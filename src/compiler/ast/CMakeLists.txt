@@ -2,19 +2,20 @@
 
 # 创建AST库
 add_library(starry_ast
-    AST.cpp
-    ASTVisitor.cpp
+    ASTNode.cpp
+    Expression.cpp
+    Statement.cpp
+    Declaration.cpp
+    Type.cpp
+    Visitor.cpp
 )
 
 target_include_directories(starry_ast
     PUBLIC
-    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(starry_ast
     PUBLIC
-    starry_lexer
+    starry_parser
 )
-
-# 设置编译选项
-target_compile_features(starry_ast PUBLIC cxx_std_20)

@@ -12,32 +12,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# C++20特性支持检查
-include(CheckCXXCompilerFlag)
-check_cxx_compiler_flag("-std=c++20" COMPILER_SUPPORTS_CXX20)
-if(NOT COMPILER_SUPPORTS_CXX20)
-    message(FATAL_ERROR "编译器不支持C++20标准")
-endif()
-
 # 编译选项
 if(MSVC)
-    add_compile_options(/W4 /WX /MP /permissive- /std:c++20)
-    # 启用C++20特性
-    add_compile_definitions(_HAS_CXX20=1)
+    add_compile_options(/W4 /WX /MP /permissive-)
 else()
-    add_compile_options(-Wall -Wextra -Wpedantic -Werror -std=c++20)
-    # 启用C++20特性支持
-    add_compile_options(-fcoroutines -fconcepts)
-endif()
-
-# C++20模块支持（实验性）
-option(ENABLE_CXX20_MODULES "启用C++20模块支持（实验性）" OFF)
-if(ENABLE_CXX20_MODULES)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        add_compile_options(-fmodules-ts)
-    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-        add_compile_options(-fmodules-ts)
-    endif()
+    add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 endif()
 
 # 输出目录设置
@@ -89,7 +68,6 @@ endif()
 add_subdirectory(src)
 add_subdirectory(lib)
 add_subdirectory(test)
-add_subdirectory(examples)
 
 # 安装规则
 install(TARGETS starry_compiler starry_runtime

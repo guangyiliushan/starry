@@ -23,6 +23,3 @@ target_link_libraries(starry_lexer
     PUBLIC
     antlr4_static
 )
-
-# 设置编译选项
-target_compile_features(starry_lexer PUBLIC cxx_std_20)
