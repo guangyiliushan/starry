@@ -15,7 +15,8 @@ add_library(starry_parser
     Parser.cpp
     ${ANTLR4_SRC_FILES_StarryParser}
 )
-add_dependencies(starry_parser ANTLR4_StarryParser starry_lexer)
+add_dependencies(starry_parser starry_lexer)
+# add_dependencies(starry_parser antlr4_generate_StarryParser starry_lexer)
 target_include_directories(starry_parser PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${ANTLR4_INCLUDE_DIR_StarryParser}

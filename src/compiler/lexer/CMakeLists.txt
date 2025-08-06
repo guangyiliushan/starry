@@ -14,7 +14,7 @@ add_library(starry_lexer
     Token.cpp
     ${ANTLR4_SRC_FILES_StarryLexer}
 )
-add_dependencies(starry_lexer ANTLR4_StarryLexer)
+# add_dependencies(starry_lexer antlr4_generate_StarryLexer)
 target_include_directories(starry_lexer PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${ANTLR4_INCLUDE_DIR_StarryLexer}
