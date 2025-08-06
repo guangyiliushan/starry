@@ -2,7 +2,6 @@
 #define STARRY_AST_H
 
 #include "Token.h"
-#include "Cpp20Features.h"
 #include <memory>
 #include <vector>
 #include <string>
