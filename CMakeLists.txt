@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 4.1)
 
 # 项目定义
 project(Starry 
@@ -28,7 +28,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # 第三方依赖管理
-include(FetchContent)
+# include(FetchContent)  # 如果不再需要，可以注释或移除
 
 # LLVM依赖
 find_package(LLVM REQUIRED CONFIG)
@@ -37,22 +37,12 @@ message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 include_directories(${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
 
-# ANTLR4依赖
-FetchContent_Declare(
-    antlr4
-    GIT_REPOSITORY https://github.com/antlr/antlr4.git
-    GIT_TAG        4.9.3
-    SOURCE_SUBDIR  runtime/Cpp
-)
-FetchContent_MakeAvailable(antlr4)
+# ANTLR4依赖 (使用vcpkg)
+set(ANTLR4_JAR_LOCATION "d:/Project/Project/starry/tools/antlr-4.13.2-complete.jar")
+find_package(antlr4-runtime REQUIRED)
 
-# GoogleTest依赖
-FetchContent_Declare(
-    googletest
-    GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG        release-1.11.0
-)
-FetchContent_MakeAvailable(googletest)
+# GoogleTest依赖 (使用vcpkg)
+find_package(GTest REQUIRED)
 enable_testing()
 
 # 代码覆盖率支持
