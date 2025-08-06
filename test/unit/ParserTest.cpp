@@ -35,8 +35,8 @@ TEST_F(ParserTest, ParseVariableDeclaration) {
     auto stmt = program->getStatements()[0].get();
     auto varDecl = dynamic_cast<VariableDeclarationNode*>(stmt);
     ASSERT_NE(varDecl, nullptr);
-    EXPECT_EQ(varDecl->getName(), "x");
-    EXPECT_EQ(varDecl->getType(), "int");
+    EXPECT_EQ(varDecl->getName().getValue(), "x");
+    EXPECT_EQ(varDecl->getType().getValue(), "int");
     EXPECT_FALSE(varDecl->isConst());
     EXPECT_NE(varDecl->getInitializer(), nullptr);
 }
@@ -52,8 +52,8 @@ TEST_F(ParserTest, ParseConstDeclaration) {
     auto stmt = program->getStatements()[0].get();
     auto varDecl = dynamic_cast<VariableDeclarationNode*>(stmt);
     ASSERT_NE(varDecl, nullptr);
-    EXPECT_EQ(varDecl->getName(), "PI");
-    EXPECT_EQ(varDecl->getType(), "double");
+    EXPECT_EQ(varDecl->getName().getValue(), "PI");
+    EXPECT_EQ(varDecl->getType().getValue(), "double");
     EXPECT_TRUE(varDecl->isConst());
 }
 
@@ -72,8 +72,8 @@ TEST_F(ParserTest, ParseFunctionDeclaration) {
     auto stmt = program->getStatements()[0].get();
     auto funcDecl = dynamic_cast<FunctionDeclarationNode*>(stmt);
     ASSERT_NE(funcDecl, nullptr);
-    EXPECT_EQ(funcDecl->getName(), "add");
-    EXPECT_EQ(funcDecl->getReturnType(), "int");
+    EXPECT_EQ(funcDecl->getName().getValue(), "add");
+    EXPECT_EQ(funcDecl->getReturnType().getValue(), "int");
     EXPECT_EQ(funcDecl->getParameters().size(), 2);
 }
 
@@ -98,8 +98,8 @@ TEST_F(ParserTest, ParseClassDeclaration) {
     auto stmt = program->getStatements()[0].get();
     auto classDecl = dynamic_cast<ClassDeclarationNode*>(stmt);
     ASSERT_NE(classDecl, nullptr);
-    EXPECT_EQ(classDecl->getName(), "Point");
-    EXPECT_EQ(classDecl->getSuperclass(), "");
+    EXPECT_EQ(classDecl->getName().getValue(), "Point");
+    EXPECT_EQ(classDecl->getSuperclass().getValue(), "");
     EXPECT_EQ(classDecl->getMembers().size(), 3);
 }
 
@@ -180,7 +180,7 @@ TEST_F(ParserTest, ParseBinaryExpression) {
     auto expr = exprStmt->getExpression();
     auto binaryExpr = dynamic_cast<BinaryExpressionNode*>(expr);
     ASSERT_NE(binaryExpr, nullptr);
-    EXPECT_EQ(binaryExpr->getOperator(), "+");
+    EXPECT_EQ(binaryExpr->getOperator().getValue(), "+");
 }
 
 TEST_F(ParserTest, ParseFunctionCall) {
@@ -216,7 +216,7 @@ TEST_F(ParserTest, ParseMemberAccess) {
     auto expr = exprStmt->getExpression();
     auto memberExpr = dynamic_cast<MemberExpressionNode*>(expr);
     ASSERT_NE(memberExpr, nullptr);
-    EXPECT_EQ(memberExpr->getProperty(), "property");
+    EXPECT_EQ(memberExpr->getProperty().getValue(), "property");
 }
 
 TEST_F(ParserTest, ParseArrayAccess) {
@@ -364,7 +364,7 @@ TEST_F(ParserTest, ParseGenericType) {
     auto stmt = program->getStatements()[0].get();
     auto varDecl = dynamic_cast<VariableDeclarationNode*>(stmt);
     ASSERT_NE(varDecl, nullptr);
-    EXPECT_EQ(varDecl->getType(), "Array<int>");
+    EXPECT_EQ(varDecl->getType().getValue(), "Array<int>");
 }
 
 TEST_F(ParserTest, ParseClassInheritance) {
@@ -384,6 +384,6 @@ TEST_F(ParserTest, ParseClassInheritance) {
     auto stmt = program->getStatements()[0].get();
     auto classDecl = dynamic_cast<ClassDeclarationNode*>(stmt);
     ASSERT_NE(classDecl, nullptr);
-    EXPECT_EQ(classDecl->getName(), "Dog");
-    EXPECT_EQ(classDecl->getSuperclass(), "Animal");
+    EXPECT_EQ(classDecl->getName().getValue(), "Dog");
+    EXPECT_EQ(classDecl->getSuperclass().getValue(), "Animal");
 }

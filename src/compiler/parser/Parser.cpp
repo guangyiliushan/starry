@@ -97,8 +97,10 @@ std::unique_ptr<StatementNode> Parser::parseStatement() {
 }
 
 std::unique_ptr<StatementNode> Parser::parseVariableDeclaration() {
+    Token keyword = current_token_;
     bool isConst = match(TokenType::CONST);
     if (!isConst) {
+        keyword = current_token_;
         consume(TokenType::VAR, "期望 'var' 关键字");
     }
     
@@ -107,7 +109,7 @@ std::unique_ptr<StatementNode> Parser::parseVariableDeclaration() {
         return nullptr;
     }
     
-    std::string name = current_token_.getValue();
+    Token nameToken = current_token_;
     advance();
     
     std::string type;
@@ -122,7 +124,7 @@ std::unique_ptr<StatementNode> Parser::parseVariableDeclaration() {
     
     consume(TokenType::SEMICOLON, "期望 ';'");
     
-    return std::make_unique<VariableDeclarationNode>(name, type, std::move(initializer), isConst);
+    return std::make_unique<VariableDeclarationNode>(keyword, nameToken, type, std::move(initializer));
 }
 
 std::unique_ptr<StatementNode> Parser::parseFunctionDeclaration() {
@@ -133,7 +135,7 @@ std::unique_ptr<StatementNode> Parser::parseFunctionDeclaration() {
         return nullptr;
     }
     
-    std::string name = current_token_.getValue();
+    Token nameToken = current_token_;
     advance();
     
     consume(TokenType::LEFT_PAREN, "期望 '('");
@@ -147,7 +149,7 @@ std::unique_ptr<StatementNode> Parser::parseFunctionDeclaration() {
     
     auto body = parseBlockStatement();
     
-    return std::make_unique<FunctionDeclarationNode>(name, std::move(parameters), 
+    return std::make_unique<FunctionDeclarationNode>(nameToken, std::move(parameters), 
                                                    returnType, std::move(body));
 }
 
@@ -159,16 +161,16 @@ std::unique_ptr<StatementNode> Parser::parseClassDeclaration() {
         return nullptr;
     }
     
-    std::string name = current_token_.getValue();
+    Token nameToken = current_token_;
     advance();
     
-    std::string superclass;
+    Token superclassToken = Token(TokenType::EOF_TOKEN, "", 1, 1);
     if (match(TokenType::EXTENDS)) {
         if (current_token_.getType() != TokenType::IDENTIFIER) {
             error("期望父类名");
             return nullptr;
         }
-        superclass = current_token_.getValue();
+        superclassToken = current_token_;
         advance();
     }
     
@@ -185,10 +187,11 @@ std::unique_ptr<StatementNode> Parser::parseClassDeclaration() {
     
     consume(TokenType::RIGHT_BRACE, "期望 '}'");
     
-    return std::make_unique<ClassDeclarationNode>(name, superclass, std::move(members));
+    return std::make_unique<ClassDeclarationNode>(nameToken, superclassToken, std::move(members));
 }
 
 std::unique_ptr<StatementNode> Parser::parseIfStatement() {
+    Token ifToken = current_token_;
     consume(TokenType::IF, "期望 'if' 关键字");
     consume(TokenType::LEFT_PAREN, "期望 '('");
     
@@ -203,12 +206,13 @@ std::unique_ptr<StatementNode> Parser::parseIfStatement() {
         elseBranch = parseStatement();
     }
     
-    return std::make_unique<IfStatementNode>(std::move(condition), 
+    return std::make_unique<IfStatementNode>(ifToken, std::move(condition), 
                                            std::move(thenBranch), 
                                            std::move(elseBranch));
 }
 
 std::unique_ptr<StatementNode> Parser::parseWhileStatement() {
+    Token whileToken = current_token_;
     consume(TokenType::WHILE, "期望 'while' 关键字");
     consume(TokenType::LEFT_PAREN, "期望 '('");
     
@@ -218,10 +222,11 @@ std::unique_ptr<StatementNode> Parser::parseWhileStatement() {
     
     auto body = parseStatement();
     
-    return std::make_unique<WhileStatementNode>(std::move(condition), std::move(body));
+    return std::make_unique<WhileStatementNode>(whileToken, std::move(condition), std::move(body));
 }
 
 std::unique_ptr<StatementNode> Parser::parseForStatement() {
+    Token forToken = current_token_;
     consume(TokenType::FOR, "期望 'for' 关键字");
     consume(TokenType::LEFT_PAREN, "期望 '('");
     
@@ -248,13 +253,14 @@ std::unique_ptr<StatementNode> Parser::parseForStatement() {
     
     auto body = parseStatement();
     
-    return std::make_unique<ForStatementNode>(std::move(initializer), 
+    return std::make_unique<ForStatementNode>(forToken, std::move(initializer), 
                                             std::move(condition), 
                                             std::move(increment), 
                                             std::move(body));
 }
 
 std::unique_ptr<StatementNode> Parser::parseReturnStatement() {
+    Token returnToken = current_token_;
     consume(TokenType::RETURN, "期望 'return' 关键字");
     
     std::unique_ptr<ExpressionNode> value = nullptr;
@@ -264,21 +270,23 @@ std::unique_ptr<StatementNode> Parser::parseReturnStatement() {
     
     consume(TokenType::SEMICOLON, "期望 ';'");
     
-    return std::make_unique<ReturnStatementNode>(std::move(value));
+    return std::make_unique<ReturnStatementNode>(returnToken, std::move(value));
 }
 
 std::unique_ptr<StatementNode> Parser::parseBreakStatement() {
+    Token breakToken = current_token_;
     consume(TokenType::BREAK, "期望 'break' 关键字");
     consume(TokenType::SEMICOLON, "期望 ';'");
     
-    return std::make_unique<BreakStatementNode>();
+    return std::make_unique<BreakStatementNode>(breakToken);
 }
 
 std::unique_ptr<StatementNode> Parser::parseContinueStatement() {
+    Token continueToken = current_token_;
     consume(TokenType::CONTINUE, "期望 'continue' 关键字");
     consume(TokenType::SEMICOLON, "期望 ';'");
     
-    return std::make_unique<ContinueStatementNode>();
+    return std::make_unique<ContinueStatementNode>(continueToken);
 }
 
 std::unique_ptr<StatementNode> Parser::parseBlockStatement() {
@@ -312,9 +320,11 @@ std::unique_ptr<ExpressionNode> Parser::parseExpression() {
 std::unique_ptr<ExpressionNode> Parser::parseAssignment() {
     auto expr = parseLogicalOr();
     
-    if (match(TokenType::ASSIGN)) {
+    if (current_token_.getType() == TokenType::ASSIGN) {
+        Token assignToken = current_token_;
+        advance();
         auto value = parseAssignment();
-        return std::make_unique<AssignmentExpressionNode>(std::move(expr), std::move(value));
+        return std::make_unique<AssignmentExpressionNode>(std::move(expr), assignToken, std::move(value));
     }
     
     return expr;
@@ -323,9 +333,11 @@ std::unique_ptr<ExpressionNode> Parser::parseAssignment() {
 std::unique_ptr<ExpressionNode> Parser::parseLogicalOr() {
     auto expr = parseLogicalAnd();
     
-    while (match(TokenType::OR)) {
+    while (current_token_.getType() == TokenType::OR) {
+        Token opToken = current_token_;
+        advance();
         auto right = parseLogicalAnd();
-        expr = std::make_unique<BinaryExpressionNode>(std::move(expr), "||", std::move(right));
+        expr = std::make_unique<BinaryExpressionNode>(std::move(expr), opToken, std::move(right));
     }
     
     return expr;
@@ -334,9 +346,11 @@ std::unique_ptr<ExpressionNode> Parser::parseLogicalOr() {
 std::unique_ptr<ExpressionNode> Parser::parseLogicalAnd() {
     auto expr = parseEquality();
     
-    while (match(TokenType::AND)) {
+    while (current_token_.getType() == TokenType::AND) {
+        Token opToken = current_token_;
+        advance();
         auto right = parseEquality();
-        expr = std::make_unique<BinaryExpressionNode>(std::move(expr), "&&", std::move(right));
+        expr = std::make_unique<BinaryExpressionNode>(std::move(expr), opToken, std::move(right));
     }
     
     return expr;
@@ -347,10 +361,10 @@ std::unique_ptr<ExpressionNode> Parser::parseEquality() {
     
     while (current_token_.getType() == TokenType::EQUAL || 
            current_token_.getType() == TokenType::NOT_EQUAL) {
-        std::string op = current_token_.getValue();
+        Token opToken = current_token_;
         advance();
         auto right = parseComparison();
-        expr = std::make_unique<BinaryExpressionNode>(std::move(expr), op, std::move(right));
+        expr = std::make_unique<BinaryExpressionNode>(std::move(expr), opToken, std::move(right));
     }
     
     return expr;
@@ -363,10 +377,10 @@ std::unique_ptr<ExpressionNode> Parser::parseComparison() {
            current_token_.getType() == TokenType::GREATER_EQUAL ||
            current_token_.getType() == TokenType::LESS ||
            current_token_.getType() == TokenType::LESS_EQUAL) {
-        std::string op = current_token_.getValue();
+        Token opToken = current_token_;
         advance();
         auto right = parseTerm();
-        expr = std::make_unique<BinaryExpressionNode>(std::move(expr), op, std::move(right));
+        expr = std::make_unique<BinaryExpressionNode>(std::move(expr), opToken, std::move(right));
     }
     
     return expr;
@@ -377,10 +391,10 @@ std::unique_ptr<ExpressionNode> Parser::parseTerm() {
     
     while (current_token_.getType() == TokenType::PLUS || 
            current_token_.getType() == TokenType::MINUS) {
-        std::string op = current_token_.getValue();
+        Token opToken = current_token_;
         advance();
         auto right = parseFactor();
-        expr = std::make_unique<BinaryExpressionNode>(std::move(expr), op, std::move(right));
+        expr = std::make_unique<BinaryExpressionNode>(std::move(expr), opToken, std::move(right));
     }
     
     return expr;
@@ -392,10 +406,10 @@ std::unique_ptr<ExpressionNode> Parser::parseFactor() {
     while (current_token_.getType() == TokenType::MULTIPLY || 
            current_token_.getType() == TokenType::DIVIDE ||
            current_token_.getType() == TokenType::MODULO) {
-        std::string op = current_token_.getValue();
+        Token opToken = current_token_;
         advance();
         auto right = parseUnary();
-        expr = std::make_unique<BinaryExpressionNode>(std::move(expr), op, std::move(right));
+        expr = std::make_unique<BinaryExpressionNode>(std::move(expr), opToken, std::move(right));
     }
     
     return expr;
@@ -404,10 +418,10 @@ std::unique_ptr<ExpressionNode> Parser::parseFactor() {
 std::unique_ptr<ExpressionNode> Parser::parseUnary() {
     if (current_token_.getType() == TokenType::NOT || 
         current_token_.getType() == TokenType::MINUS) {
-        std::string op = current_token_.getValue();
+        Token opToken = current_token_;
         advance();
         auto expr = parseUnary();
-        return std::make_unique<UnaryExpressionNode>(op, std::move(expr));
+        return std::make_unique<UnaryExpressionNode>(opToken, std::move(expr));
     }
     
     return parseCall();
@@ -417,19 +431,24 @@ std::unique_ptr<ExpressionNode> Parser::parseCall() {
     auto expr = parsePrimary();
     
     while (true) {
-        if (match(TokenType::LEFT_PAREN)) {
+        if (current_token_.getType() == TokenType::LEFT_PAREN) {
+            Token parenToken = current_token_;
+            advance();
             auto arguments = parseArgumentList();
             consume(TokenType::RIGHT_PAREN, "期望 ')'");
-            expr = std::make_unique<CallExpressionNode>(std::move(expr), std::move(arguments));
-        } else if (match(TokenType::DOT)) {
+            expr = std::make_unique<CallExpressionNode>(std::move(expr), parenToken, std::move(arguments));
+        } else if (current_token_.getType() == TokenType::DOT) {
+            Token dotToken = current_token_;
+            advance();
             if (current_token_.getType() != TokenType::IDENTIFIER) {
                 error("期望属性名");
                 break;
             }
-            std::string name = current_token_.getValue();
+            Token nameToken = current_token_;
             advance();
-            expr = std::make_unique<MemberExpressionNode>(std::move(expr), name);
-        } else if (match(TokenType::LEFT_BRACKET)) {
+            expr = std::make_unique<MemberExpressionNode>(std::move(expr), nameToken);
+        } else if (current_token_.getType() == TokenType::LEFT_BRACKET) {
+            advance();
             auto index = parseExpression();
             consume(TokenType::RIGHT_BRACKET, "期望 ']'");
             expr = std::make_unique<IndexExpressionNode>(std::move(expr), std::move(index));
@@ -444,36 +463,45 @@ std::unique_ptr<ExpressionNode> Parser::parseCall() {
 std::unique_ptr<ExpressionNode> Parser::parsePrimary() {
     switch (current_token_.getType()) {
         case TokenType::TRUE:
-            advance();
-            return std::make_unique<LiteralExpressionNode>(true);
+            {
+                Token token = current_token_;
+                advance();
+                return std::make_unique<LiteralExpressionNode>(token);
+            }
             
         case TokenType::FALSE:
-            advance();
-            return std::make_unique<LiteralExpressionNode>(false);
+            {
+                Token token = current_token_;
+                advance();
+                return std::make_unique<LiteralExpressionNode>(token);
+            }
             
         case TokenType::NULL_LITERAL:
-            advance();
-            return std::make_unique<LiteralExpressionNode>();
+            {
+                Token token = current_token_;
+                advance();
+                return std::make_unique<LiteralExpressionNode>(token);
+            }
             
         case TokenType::NUMBER:
             {
-                std::string value = current_token_.getValue();
+                Token token = current_token_;
                 advance();
-                return std::make_unique<LiteralExpressionNode>(std::stod(value));
+                return std::make_unique<LiteralExpressionNode>(token);
             }
             
         case TokenType::STRING:
             {
-                std::string value = current_token_.getValue();
+                Token token = current_token_;
                 advance();
-                return std::make_unique<LiteralExpressionNode>(value);
+                return std::make_unique<LiteralExpressionNode>(token);
             }
             
         case TokenType::IDENTIFIER:
             {
-                std::string name = current_token_.getValue();
+                Token token = current_token_;
                 advance();
-                return std::make_unique<IdentifierExpressionNode>(name);
+                return std::make_unique<IdentifierExpressionNode>(token);
             }
             
         case TokenType::LEFT_PAREN:
