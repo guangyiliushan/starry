@@ -1,59 +1,17 @@
+# 操作系统生成文件
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+*~
+.directory
+.Trash-*
 
-# 编译输出目录
-/build/
-/bin/
-/out/
-/target/
-/dist/
-/Debug/
-/Release/
-/x64/
-/x86/
-
-# 编译器生成文件
-*.o
-*.obj
-*.exe
-*.dll
-*.so
-*.dylib
-*.lib
-*.a
-*.class
-*.jar
-
-# ANTLR生成的文件
-*.tokens
-*.interp
-*Lexer.java
-*Parser.java
-*Listener.java
-*Visitor.java
-*BaseListener.java
-*BaseVisitor.java
-
-# LLVM中间文件
-*.ll
-*.bc
-
-# CMake生成文件
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-Makefile
-*.cmake
-
-# ANTLR生成文件
-.antlr/
-
-# 人工智能编辑器文件
-.windsurf/
-.codebuddy/
-.cursor/
-
-
-# IDE和编辑器文件
-## Visual Studio
+# IDE 和编辑器配置文件
 .vs/
 *.sln
 *.vcxproj
@@ -66,74 +24,115 @@ Makefile
 *.opensdf
 *.VC.db
 *.VC.opendb
-
-## Visual Studio Code
 .vscode/
 *.code-workspace
-
-## JetBrains IDEs (CLion, IntelliJ IDEA)
 .idea/
 *.iml
 *.iws
 *.ipr
-*.iws
-out/
 .idea_modules/
 cmake-build-*/
-
-## Eclipse
 .classpath
 .project
 .settings/
+.apt_generated
+.factorypath
+.springBeans
+.sts4-cache
+/compiler/nbproject/
+compiler/nbactions.xml
+.windsurf/
+.codebuddy/
+.cursor/
 
-# 操作系统生成文件
-## Windows
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-$RECYCLE.BIN/
+# 编译输出和生成文件
+/build/
+/out/
+/target/
+/dist/
+/Debug/
+/Release/
+/x64/
+/x86/
+build/
+output/
+out/
+!**/src/main/**/out/
+!**/src/test/**/out/
+/compiler/build/
+/compiler/target/
+/compiler/dist/
+compiler/goldenFile/
+*.o
+*.obj
+*.slo
+*.lo
+*.exe
+*.out
+*.app
+*.dll
+*.so
+*.dylib
+*.lib
+*.a
+*.lai
+*.la
+*.gch
+*.pch
+*.class
+*.jar
+*.d
+*.mod
+*.smod
 
-## macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-._*
-
-## Linux
-*~
-.directory
-.Trash-*
+# 构建工具生成文件
+.gradle
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+*.tokens
+*.interp
+*Lexer.java
+*Parser.java
+*Listener.java
+*Visitor.java
+*BaseListener.java
+*BaseVisitor.java
+.antlr/
+*.ll
+*.bc
 
 # 依赖管理
-## Conan
 conanbuildinfo.*
 conaninfo.txt
 conan.lock
-
-## vcpkg
 vcpkg_installed/
+ide/vscode/sric-language/node_modules/
+ide/vscode/sric-language/package-lock.json
 
-# 日志文件
+# 日志和临时文件
 *.log
 log/
 logs/
-
-# 临时文件
 *.tmp
 *.temp
 *.swp
 *.bak
 *.backup
 
-# 测试覆盖率报告
+# 测试和文档
 coverage/
 *.gcov
 *.gcda
 *.gcno
-
-# 文档生成
 /docs/generated/
 /doxygen/
 
-# 特定于Starry语言的文件
+# 项目特定文件
+.kotlin
 *.starry.cache
