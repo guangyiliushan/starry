@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::dfa::{Dfa, DfaStateId};
-use crate::nfa::{Nfa, NfaStateId};
+use crate::nfa::Nfa;
 use crate::regex::Regex;
 
 use super::ast::{NonTerminalId, Production, RegularGrammar};
@@ -15,51 +15,8 @@ impl GrammarBuilder {
     }
 
     pub fn from_nfa(nfa: &Nfa) -> RegularGrammar {
-        let mut grammar = RegularGrammar::new();
-        let mut state_to_nonterminal: HashMap<NfaStateId, NonTerminalId> = HashMap::new();
-
-        for (i, _) in nfa.states.iter().enumerate() {
-            let state_id = NfaStateId(i);
-            let name = if i == 0 {
-                "S".to_string()
-            } else {
-                format!("A{}", i)
-            };
-            let nt_id = grammar.add_non_terminal(&name);
-            state_to_nonterminal.insert(state_id, nt_id);
-        }
-
-        if let Some(&start_nt) = state_to_nonterminal.get(&nfa.start) {
-            grammar.set_start(start_nt);
-        }
-
-        for (i, state) in nfa.states.iter().enumerate() {
-            let from_state = NfaStateId(i);
-            let from_nt = state_to_nonterminal[&from_state];
-
-            for (symbol, targets) in &state.transitions {
-                for &target_state in targets {
-                    let to_nt = state_to_nonterminal[&target_state];
-                    
-                    match symbol {
-                        Some(ch) => {
-                            grammar.add_production(from_nt, Production::TerminalNonTerminal(*ch, to_nt));
-                        }
-                        None => {
-                            grammar.add_production(from_nt, Production::TerminalNonTerminal('\0', to_nt));
-                        }
-                    }
-                }
-            }
-        }
-
-        for (&accept_state, _) in &nfa.accepts {
-            if let Some(&accept_nt) = state_to_nonterminal.get(&accept_state) {
-                grammar.add_production(accept_nt, Production::Epsilon);
-            }
-        }
-
-        grammar
+        let dfa = crate::subset::nfa_to_dfa(nfa);
+        Self::from_dfa(&dfa)
     }
 
     pub fn from_dfa(dfa: &Dfa) -> RegularGrammar {
