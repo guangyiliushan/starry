@@ -40,6 +40,14 @@ impl FollowSet {
         self.end_marker
     }
 
+    pub fn insert(&mut self, nt: NonTerminalId, terminals: HashSet<TerminalId>) {
+        self.sets.insert(nt, terminals);
+    }
+
+    pub fn get_mut(&mut self, nt: NonTerminalId) -> &mut HashSet<TerminalId> {
+        self.sets.entry(nt).or_insert_with(HashSet::new)
+    }
+
     pub fn print(&self, cfg: &ContextFreeGrammar) {
         println!("FOLLOW Sets:");
         for (i, nt_name) in cfg.non_terminals.iter().enumerate() {

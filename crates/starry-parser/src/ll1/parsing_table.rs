@@ -1,6 +1,6 @@
+use crate::analysis::first::{FirstSet, FirstSetCalculator, NullableSet};
+use crate::analysis::follow::FollowSet;
 use crate::cfg::{ContextFreeGrammar, NonTerminalId, Production, Symbol, TerminalId};
-use super::first::{FirstSet, FirstSetCalculator, NullableSet};
-use super::follow::FollowSet;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -197,9 +197,20 @@ impl ParsingTableBuilder {
     pub fn build_from_grammar(cfg: &ContextFreeGrammar) -> Result<ParsingTable, Vec<ParsingConflict>> {
         let nullable = FirstSetCalculator::compute_nullable_set(cfg);
         let first_sets = FirstSetCalculator::compute_with_nullable(cfg, &nullable);
-        let follow_sets = super::follow::FollowSetCalculator::compute(cfg, &first_sets, &nullable);
+        let follow_sets = crate::analysis::follow::FollowSetCalculator::compute(cfg, &first_sets, &nullable);
 
         Self::build(cfg, &first_sets, &follow_sets, &nullable)
+    }
+
+    pub fn check_grammar(cfg: &ContextFreeGrammar) -> Result<Vec<ParsingConflict>, String> {
+        let nullable = FirstSetCalculator::compute_nullable_set(cfg);
+        let first_sets = FirstSetCalculator::compute_with_nullable(cfg, &nullable);
+        let follow_sets = crate::analysis::follow::FollowSetCalculator::compute(cfg, &first_sets, &nullable);
+
+        match Self::build(cfg, &first_sets, &follow_sets, &nullable) {
+            Ok(_) => Ok(Vec::new()),
+            Err(conflicts) => Ok(conflicts),
+        }
     }
 }
 

@@ -1,0 +1,160 @@
+use crate::cfg::TerminalId;
+use crate::lr::error::LRError;
+use starry_ast::{Token, TokenKind};
+use std::collections::HashMap;
+
+pub struct TokenMapper {
+    terminal_map: HashMap<String, TerminalId>,
+    terminal_names: Vec<String>,
+    end_marker: TerminalId,
+}
+
+impl TokenMapper {
+    pub fn new(
+        terminal_map: HashMap<String, TerminalId>,
+        terminal_names: Vec<String>,
+        end_marker: TerminalId,
+    ) -> Self {
+        TokenMapper {
+            terminal_map,
+            terminal_names,
+            end_marker,
+        }
+    }
+
+    pub fn end_marker(&self) -> TerminalId {
+        self.end_marker
+    }
+
+    pub fn tokenize(&self, tokens: &[Token]) -> Result<Vec<TerminalId>, LRError> {
+        let mut result = Vec::with_capacity(tokens.len());
+
+        for (i, token) in tokens.iter().enumerate() {
+            let terminal_id = self.get_terminal_id(token).map_err(|mut e| {
+                e.position = Some(i);
+                e
+            })?;
+            if terminal_id != self.end_marker {
+                result.push(terminal_id);
+            }
+        }
+
+        Ok(result)
+    }
+
+    pub fn get_terminal_id(&self, token: &Token) -> Result<TerminalId, LRError> {
+        self.terminal_id_from_token(&token.kind)
+            .ok_or_else(|| {
+                LRError::invalid_grammar(format!(
+                    "Unknown token: {:?} at line {} col {}",
+                    token.kind, token.line, token.column
+                ))
+            })
+    }
+
+    pub fn terminal_id_from_token(&self, kind: &TokenKind) -> Option<TerminalId> {
+        match kind {
+            TokenKind::Identifier(name) => self.terminal_map.get(name.as_str()).copied(),
+            TokenKind::Keyword(kw) => self.terminal_map.get(kw.as_str()).copied(),
+            TokenKind::Operator(op) => self.terminal_map.get(op.as_str()).copied(),
+            TokenKind::Delimiter(del) => self.terminal_map.get(del.as_str()).copied(),
+            TokenKind::Integer(_) => self
+                .terminal_map
+                .get("NUM")
+                .or_else(|| self.terminal_map.get("num"))
+                .copied(),
+            TokenKind::Float(_) => self
+                .terminal_map
+                .get("NUM")
+                .or_else(|| self.terminal_map.get("num"))
+                .copied(),
+            TokenKind::StringLiteral(_) => self.terminal_map.get("STRING").copied(),
+            TokenKind::Eof => Some(self.end_marker),
+            TokenKind::Error(_) => None,
+        }
+    }
+
+    pub fn matches_terminal(&self, expected: TerminalId, kind: &TokenKind) -> bool {
+        let expected_name = self.get_terminal_name(expected);
+
+        match kind {
+            TokenKind::Identifier(name) => name == expected_name,
+            TokenKind::Keyword(kw) => kw == expected_name,
+            TokenKind::Operator(op) => op == expected_name,
+            TokenKind::Delimiter(del) => del == expected_name,
+            TokenKind::Integer(_) | TokenKind::Float(_) => {
+                expected_name.eq_ignore_ascii_case("NUM") || expected_name == "num"
+            }
+            TokenKind::StringLiteral(_) => expected_name == "STRING",
+            TokenKind::Eof => expected == self.end_marker,
+            TokenKind::Error(_) => false,
+        }
+    }
+
+    pub fn get_terminal_name(&self, id: TerminalId) -> &str {
+        &self.terminal_names[id.0]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cfg::ContextFreeGrammar;
+
+    fn create_mapper() -> TokenMapper {
+        let cfg = ContextFreeGrammar::parse("E -> num").unwrap();
+        let end_marker = TerminalId(cfg.terminals.len());
+        TokenMapper::new(cfg.terminal_map.clone(), cfg.terminals.clone(), end_marker)
+    }
+
+    #[test]
+    fn test_map_integer_token() {
+        let mapper = create_mapper();
+        let kind = TokenKind::Integer(42);
+        let result = mapper.terminal_id_from_token(&kind);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_map_identifier_token() {
+        let cfg = ContextFreeGrammar::parse("E -> id").unwrap();
+        let end_marker = TerminalId(cfg.terminals.len());
+        let mapper = TokenMapper::new(cfg.terminal_map.clone(), cfg.terminals.clone(), end_marker);
+        let kind = TokenKind::Identifier("id".to_string());
+        let result = mapper.terminal_id_from_token(&kind);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_map_eof() {
+        let mapper = create_mapper();
+        let result = mapper.terminal_id_from_token(&TokenKind::Eof);
+        assert_eq!(result, Some(mapper.end_marker));
+    }
+
+    #[test]
+    fn test_matches_terminal() {
+        let mapper = create_mapper();
+        let num_id = mapper.terminal_id_from_token(&TokenKind::Integer(42)).unwrap();
+        assert!(mapper.matches_terminal(num_id, &TokenKind::Integer(99)));
+        assert!(mapper.matches_terminal(num_id, &TokenKind::Float(3.14)));
+    }
+
+    #[test]
+    fn test_get_terminal_name() {
+        let mapper = create_mapper();
+        let num_id = mapper.terminal_id_from_token(&TokenKind::Integer(42)).unwrap();
+        let name = mapper.get_terminal_name(num_id);
+        assert_eq!(name, "num");
+    }
+
+    #[test]
+    fn test_tokenize_simple() {
+        let mapper = create_mapper();
+        let tokens = vec![
+            Token::new(TokenKind::Integer(42), "42".to_string(), 0, 0),
+        ];
+        let result = mapper.tokenize(&tokens).unwrap();
+        assert_eq!(result.len(), 1);
+    }
+}

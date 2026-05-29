@@ -1,14 +1,14 @@
 use starry_parser::{
-    ContextFreeGrammar, FirstSetCalculator, FollowSetCalculator, LeftRecursionAnalyzer,
-    LL1Parser, ParsingTableBuilder,
+    ContextFreeGrammar, FirstSetCalculator, FollowSetCalculator, LL1Parser, LeftRecursionAnalyzer, ParsingTableBuilder
 };
 use starry_ast::TokenStreamBuilder;
 
 fn main() {
     let grammar_str = r#"
-        Expr -> Expr + Term | Term
-        Term -> Term * Factor | Factor
-        Factor -> num
+        S  -> E
+        E  -> E + T | T
+        T  -> T * F | F
+        F -> ( E ) | num
     "#;
 
     let cfg = ContextFreeGrammar::parse(grammar_str).unwrap();

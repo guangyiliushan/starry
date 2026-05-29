@@ -2,13 +2,11 @@ pub mod first;
 pub mod follow;
 pub mod left_recursion;
 pub mod left_recursion_elimination;
-pub mod parsing_table;
 
 pub use first::{FirstSet, FirstSetCalculator, NullableSet};
 pub use follow::{FollowSet, FollowSetCalculator};
 pub use left_recursion::{LeftRecursionDetector, LeftRecursionInfo, LeftRecursionType};
 pub use left_recursion_elimination::LeftRecursionEliminator;
-pub use parsing_table::{ParsingConflict, ParsingTable, ParsingTableBuilder, TableEntry};
 
 /// 提供一个统一的左递归分析器，同时包含检测和消除功能
 pub struct LeftRecursionAnalyzer {

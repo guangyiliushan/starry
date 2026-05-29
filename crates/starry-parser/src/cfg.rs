@@ -114,7 +114,11 @@ impl ContextFreeGrammar {
     }
 
     pub fn get_terminal_name(&self, id: TerminalId) -> &str {
-        &self.terminals[id.0]
+        if id.0 < self.terminals.len() {
+            &self.terminals[id.0]
+        } else {
+            "$"
+        }
     }
 
     pub fn get_productions_for(&self, non_terminal: NonTerminalId) -> Vec<&Production> {
