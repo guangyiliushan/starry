@@ -45,109 +45,38 @@ impl LookaheadCalculator {
 
     /// 计算符号串的 FIRST 集（包含 ε）
     ///
-    /// 返回 HashSet<Option<TerminalId>>，其中 None 表示 ε
+    /// 委托给 `FirstSetCalculator::compute_first_of_symbols`
     pub fn compute_first_of_symbols(&self, symbols: &[Symbol]) -> HashSet<Option<TerminalId>> {
-        let mut result = HashSet::new();
-
-        for (i, symbol) in symbols.iter().enumerate() {
-            match symbol {
-                Symbol::Terminal(term_id) => {
-                    result.insert(Some(*term_id));
-                    return result;
-                }
-                Symbol::NonTerminal(nt_id) => {
-                    for term_opt in self.first_sets.get(*nt_id) {
-                        if term_opt.is_some() {
-                            result.insert(*term_opt);
-                        }
-                    }
-
-                    if !self.nullable.contains(nt_id) {
-                        return result;
-                    }
-
-                    if i == symbols.len() - 1 {
-                        result.insert(None);
-                    }
-                }
-                Symbol::Epsilon => {
-                    result.insert(None);
-                }
-            }
-        }
-
-        result
+        FirstSetCalculator::compute_first_of_symbols(symbols, &self.first_sets, &self.nullable)
     }
 
     /// 计算符号串的 FIRST 集（不包含 ε，使用指定的向前看符号替代）
     ///
-    /// 如果符号串可以为空，则将 lookahead 加入结果
+    /// 委托给 `compute_first_of_symbols`，将 `None`（ε）替换为 `lookahead`
     pub fn compute_first_of_symbols_with_lookahead(
         &self,
         symbols: &[Symbol],
         lookahead: TerminalId,
     ) -> HashSet<TerminalId> {
-        let mut result = HashSet::new();
-
-        for symbol in symbols.iter() {
-            match symbol {
-                Symbol::Terminal(term_id) => {
-                    result.insert(*term_id);
-                    return result;
-                }
-                Symbol::NonTerminal(nt_id) => {
-                    for term_opt in self.first_sets.get(*nt_id) {
-                        if let Some(term_id) = term_opt {
-                            result.insert(*term_id);
-                        }
-                    }
-
-                    if !self.nullable.contains(nt_id) {
-                        return result;
-                    }
-                }
-                Symbol::Epsilon => {}
-            }
-        }
-
-        result.insert(lookahead);
-        result
+        self.compute_first_of_symbols(symbols)
+            .into_iter()
+            .map(|opt| opt.unwrap_or(lookahead))
+            .collect()
     }
 
     /// 传播向前看符号
     ///
     /// 计算 FIRST(β) ∪ {lookahead}，其中 β 是圆点后的符号串
-    /// 用于 LR(1) 闭包中向前看符号的传播
+    /// 委托给 `compute_first_of_symbols`，将 `None`（ε）替换为 `lookahead`
     pub fn propagate_lookahead(
         &self,
         beta: &[Symbol],
         lookahead: TerminalId,
     ) -> HashSet<TerminalId> {
-        let mut result = HashSet::new();
-
-        for symbol in beta.iter() {
-            match symbol {
-                Symbol::Terminal(term_id) => {
-                    result.insert(*term_id);
-                    return result;
-                }
-                Symbol::NonTerminal(nt_id) => {
-                    for term_opt in self.first_sets.get(*nt_id) {
-                        if let Some(term_id) = term_opt {
-                            result.insert(*term_id);
-                        }
-                    }
-
-                    if !self.nullable.contains(nt_id) {
-                        return result;
-                    }
-                }
-                Symbol::Epsilon => {}
-            }
-        }
-
-        result.insert(lookahead);
-        result
+        self.compute_first_of_symbols(beta)
+            .into_iter()
+            .map(|opt| opt.unwrap_or(lookahead))
+            .collect()
     }
 
     /// 判断非终结符是否可为空

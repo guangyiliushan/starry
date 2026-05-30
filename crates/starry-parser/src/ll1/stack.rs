@@ -6,6 +6,10 @@ pub enum StackSymbol {
     NonTerminal(NonTerminalId),
     Terminal(TerminalId),
     EndMarker,
+    ProductionEnd {
+        non_terminal: NonTerminalId,
+        production_index: usize,
+    },
 }
 
 #[derive(Debug, Clone)]

@@ -1,12 +1,14 @@
 use crate::cfg::{ContextFreeGrammar, TerminalId};
 use crate::lr::action::Action;
 use crate::lr::augmented::AugmentedGrammar;
-use crate::lr::error::{LRError, LRGrammarType};
+use crate::lr::error::LRError;
+use crate::lr::grammar_type::LRGrammarType;
 use crate::lr::stack::LRStack;
 use crate::lr::table::{LRTable, LR0TableBuilder, SLRTableBuilder, LR1TableBuilder, LALR1TableBuilder};
 use crate::lr::token_mapper::TokenMapper;
 use crate::lr::ItemSetId;
-use starry_ast::Token;
+use crate::ast_builder::{GrammarAstBuilder, is_tail_production};
+use starry_ast::{AstBuilder, AstNode, Token};
 
 #[derive(Debug, Clone)]
 pub struct LRParserConfig {
@@ -84,6 +86,7 @@ impl std::fmt::Display for ParseTrace {
 #[derive(Debug, Clone)]
 pub struct ParseResult {
     pub success: bool,
+    pub ast: Option<AstNode>,
     pub trace: ParseTrace,
     pub errors: Vec<LRError>,
     pub derivations: Vec<String>,
@@ -93,6 +96,7 @@ impl ParseResult {
     pub fn new() -> Self {
         ParseResult {
             success: true,
+            ast: None,
             trace: ParseTrace::new(),
             errors: Vec::new(),
             derivations: Vec::new(),
@@ -120,6 +124,7 @@ pub struct LRParser {
     augmented: AugmentedGrammar,
     config: LRParserConfig,
     token_mapper: TokenMapper,
+    ast_builder: GrammarAstBuilder,
 }
 
 impl LRParser {
@@ -128,6 +133,7 @@ impl LRParser {
     }
 
     pub fn with_config(cfg: ContextFreeGrammar, config: LRParserConfig) -> Result<Self, LRError> {
+        let ast_builder = GrammarAstBuilder::new(&cfg);
         let augmented = AugmentedGrammar::new(cfg);
         let end_marker = TerminalId(augmented.terminals().len());
         let token_mapper = TokenMapper::new(
@@ -140,28 +146,28 @@ impl LRParser {
             LRGrammarType::LR0 => {
                 let t = LR0TableBuilder::build(&augmented);
                 if t.has_conflicts() {
-                    return Err(LRError::conflict(t.conflicts));
+                    return Err(LRError::conflict(t.conflicts.clone()));
                 }
                 LRTable::LR0(t)
             }
             LRGrammarType::SLR1 => {
                 let t = SLRTableBuilder::build(&augmented);
                 if t.has_conflicts() {
-                    return Err(LRError::conflict(t.conflicts));
+                    return Err(LRError::conflict(t.conflicts.clone()));
                 }
                 LRTable::SLR1(t)
             }
             LRGrammarType::LR1 => {
                 let t = LR1TableBuilder::build(&augmented);
                 if t.has_conflicts() {
-                    return Err(LRError::conflict(t.conflicts));
+                    return Err(LRError::conflict(t.conflicts.clone()));
                 }
                 LRTable::LR1(t)
             }
             LRGrammarType::LALR1 => {
                 let t = LALR1TableBuilder::build(&augmented);
                 if t.has_conflicts() {
-                    return Err(LRError::conflict(t.conflicts));
+                    return Err(LRError::conflict(t.conflicts.clone()));
                 }
                 LRTable::LALR1(t)
             }
@@ -178,6 +184,7 @@ impl LRParser {
             augmented,
             config,
             token_mapper,
+            ast_builder,
         })
     }
 
@@ -186,6 +193,18 @@ impl LRParser {
         let mut stack = LRStack::new(ItemSetId(0));
         let mut input: Vec<TerminalId> = self.token_mapper.tokenize(tokens)?;
         input.push(self.token_mapper.end_marker());
+
+        let mut token_input: Vec<Token> = Vec::with_capacity(input.len());
+        for token in tokens {
+            if let Ok(tid) = self.token_mapper.get_terminal_id(token) {
+                if tid != self.token_mapper.end_marker() {
+                    token_input.push(token.clone());
+                }
+            }
+        }
+
+        let ast_builder = &self.ast_builder;
+        let mut ast_stack: Vec<AstNode> = Vec::new();
 
         let mut position = 0;
         let mut step_count = 0;
@@ -214,6 +233,8 @@ impl LRParser {
 
             match action {
                 Action::Shift(next_state) => {
+                    let node = ast_builder.make_leaf(&token_input[position]);
+                    ast_stack.push(node);
                     stack.push_terminal(current_token);
                     stack.push_state(*next_state);
                     position += 1;
@@ -226,6 +247,16 @@ impl LRParser {
                         )))?;
 
                     let rhs_len = if production.is_epsilon() { 0 } else { production.rhs.len() };
+                    let extra = if is_tail_production(production) && ast_stack.len() > rhs_len {
+                        1
+                    } else {
+                        0
+                    };
+                    let sem_start = ast_stack.len().saturating_sub(rhs_len + extra);
+                    let children: Vec<AstNode> = ast_stack.drain(sem_start..).collect();
+                    let node = ast_builder.reduce(production_id.0, children);
+                    ast_stack.push(node);
+
                     stack.pop_n(rhs_len * 2);
 
                     let top_state = stack.top_state().ok_or_else(LRError::stack_underflow)?;
@@ -252,6 +283,7 @@ impl LRParser {
                             s
                         });
                     }
+                    result.ast = ast_stack.pop();
                     break;
                 }
                 Action::Error => {

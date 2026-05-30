@@ -1,6 +1,7 @@
 use crate::cfg::ContextFreeGrammar;
 use crate::lr::augmented::AugmentedGrammar;
-use crate::lr::error::{LRError, LRGrammarType, LRValidationReport, LRValidationError};
+use crate::lr::error::{LRError, LRValidationReport, LRValidationError};
+use crate::lr::grammar_type::LRGrammarType;
 use crate::lr::parser::{LRParser, LRParserConfig};
 use crate::lr::table::SLRTable;
 use crate::lr::SLRTableBuilder;

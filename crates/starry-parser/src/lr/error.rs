@@ -1,4 +1,5 @@
 use crate::cfg::TerminalId;
+use crate::lr::grammar_type::LRGrammarType;
 use crate::lr::{Conflict, ItemSetId};
 use std::fmt;
 
@@ -259,49 +260,6 @@ impl fmt::Display for LRValidationReport {
         }
 
         Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LRGrammarType {
-    LR0,
-    SLR1,
-    LALR1,
-    LR1,
-    NotLR,
-    Unknown,
-}
-
-impl LRGrammarType {
-    pub fn is_deterministic(&self) -> bool {
-        matches!(self, LRGrammarType::LR0 | LRGrammarType::SLR1 | LRGrammarType::LALR1 | LRGrammarType::LR1)
-    }
-
-    pub fn is_lr0(&self) -> bool {
-        matches!(self, LRGrammarType::LR0)
-    }
-
-    pub fn is_slr1(&self) -> bool {
-        matches!(self, LRGrammarType::SLR1)
-    }
-
-    pub fn is_lalr1(&self) -> bool {
-        matches!(self, LRGrammarType::LALR1)
-    }
-
-    pub fn is_lr1(&self) -> bool {
-        matches!(self, LRGrammarType::LR1)
-    }
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            LRGrammarType::LR0 => "LR(0)",
-            LRGrammarType::SLR1 => "SLR(1)",
-            LRGrammarType::LALR1 => "LALR(1)",
-            LRGrammarType::LR1 => "LR(1)",
-            LRGrammarType::NotLR => "Not LR",
-            LRGrammarType::Unknown => "Unknown",
-        }
     }
 }
 

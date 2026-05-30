@@ -1,29 +1,34 @@
 use super::parsing_table::{ParsingTable, ParsingTableBuilder};
+use super::LL1ParserTrait;
+use crate::ast_builder::{GrammarAstBuilder, is_tail_production};
 use crate::cfg::{ContextFreeGrammar, NonTerminalId, Symbol, TerminalId};
 use crate::ll1::error::LL1ParseError;
 use crate::ll1::stack::{ParseStack, StackSymbol};
 use crate::ll1::token_mapper::TokenMapper;
-use crate::ll1::tree_builder::ParseTreeBuilder;
-use crate::parser::ParseTreeNode;
-use starry_ast::{TokenKind, TokenStream};
+use starry_ast::{AstBuilder, AstNode, TokenKind, TokenStream};
 
 pub struct LL1Parser {
     cfg: ContextFreeGrammar,
     table: ParsingTable,
     stream: TokenStream,
     stack: ParseStack,
-    tree_builder: ParseTreeBuilder,
+    ast_builder: GrammarAstBuilder,
+    ast_stack: Vec<AstNode>,
+    frame_stack: Vec<usize>,
     trace: bool,
 }
 
 impl LL1Parser {
     pub fn new(cfg: ContextFreeGrammar, table: ParsingTable, stream: TokenStream) -> Self {
+        let ast_builder = GrammarAstBuilder::new(&cfg);
         let mut parser = LL1Parser {
             cfg,
             table,
             stream,
             stack: ParseStack::new(),
-            tree_builder: ParseTreeBuilder::new(),
+            ast_builder,
+            ast_stack: Vec::new(),
+            frame_stack: Vec::new(),
             trace: false,
         };
         parser.initialize();
@@ -43,14 +48,15 @@ impl LL1Parser {
 
     fn initialize(&mut self) {
         self.stack.initialize(self.cfg.start_symbol);
-        self.tree_builder.reset();
+        self.ast_stack.clear();
+        self.frame_stack.clear();
     }
 
     pub fn enable_trace(&mut self, enable: bool) {
         self.trace = enable;
     }
 
-    pub fn parse(&mut self) -> Result<ParseTreeNode, LL1ParseError> {
+    pub fn parse(&mut self) -> Result<AstNode, LL1ParseError> {
         self.initialize();
 
         if self.trace {
@@ -68,7 +74,7 @@ impl LL1Parser {
                         if self.trace {
                             println!("\nParsing successful!");
                         }
-                        return self.build_parse_tree();
+                        return self.finalize_ast();
                     }
                 }
 
@@ -80,10 +86,34 @@ impl LL1Parser {
                     self.handle_non_terminal(nt)?;
                 }
 
+                Some(StackSymbol::ProductionEnd { non_terminal: _, production_index }) => {
+                    self.handle_reduce(production_index);
+                }
+
                 None => {
                     return Err(LL1ParseError::stack_underflow());
                 }
             }
+        }
+    }
+
+    fn handle_reduce(&mut self, production_index: usize) {
+        self.stack.pop_front();
+        let frame_pos = self.frame_stack.pop().unwrap();
+
+        let production = &self.cfg.productions[production_index];
+        let sem_start = if is_tail_production(production) {
+            frame_pos.saturating_sub(1)
+        } else {
+            frame_pos
+        };
+
+        let children: Vec<AstNode> = self.ast_stack.drain(sem_start..).collect();
+        let node = self.ast_builder.reduce(production_index, children);
+        self.ast_stack.push(node);
+
+        if self.trace {
+            self.print_state("After reduce");
         }
     }
 
@@ -107,7 +137,7 @@ impl LL1Parser {
     fn handle_terminal(&mut self, expected_term: TerminalId, current_token: Option<&starry_ast::Token>) -> Result<(), LL1ParseError> {
         if let Some(token) = current_token {
             let mapper = TokenMapper::new(&self.cfg, &self.table);
-            
+
             if mapper.matches_terminal(expected_term, &token.kind) {
                 if self.trace {
                     println!(
@@ -116,9 +146,10 @@ impl LL1Parser {
                     );
                 }
                 self.stack.pop_front();
-                
+
                 let consumed_token = self.stream.consume().unwrap();
-                self.tree_builder.push_terminal(consumed_token);
+                let node = self.ast_builder.make_leaf(&consumed_token);
+                self.ast_stack.push(node);
 
                 if self.trace {
                     self.print_state("After match");
@@ -153,7 +184,24 @@ impl LL1Parser {
             }
 
             self.stack.pop_front();
-            self.stack.push_production(&entry.production.rhs);
+
+            if entry.production.is_epsilon() {
+                let node = self.ast_builder.reduce(entry.production_index, vec![]);
+                self.ast_stack.push(node);
+            } else {
+                self.frame_stack.push(self.ast_stack.len());
+                self.stack.push_front(StackSymbol::ProductionEnd {
+                    non_terminal: nt,
+                    production_index: entry.production_index,
+                });
+                for symbol in entry.production.rhs.iter().rev() {
+                    match symbol {
+                        Symbol::NonTerminal(n) => self.stack.push_front(StackSymbol::NonTerminal(*n)),
+                        Symbol::Terminal(t) => self.stack.push_front(StackSymbol::Terminal(*t)),
+                        Symbol::Epsilon => {}
+                    }
+                }
+            }
 
             if self.trace {
                 self.print_state("After production");
@@ -216,6 +264,9 @@ impl LL1Parser {
                     format!("{}(T)", self.cfg.get_terminal_name(*t))
                 }
                 StackSymbol::EndMarker => "$".to_string(),
+                StackSymbol::ProductionEnd { non_terminal, .. } => {
+                    format!("↓{}(NT)", self.cfg.get_non_terminal_name(*non_terminal))
+                }
             })
             .collect();
         print!("{}]", stack_str.join(", "));
@@ -228,8 +279,8 @@ impl LL1Parser {
         println!();
     }
 
-    fn build_parse_tree(&self) -> Result<ParseTreeNode, LL1ParseError> {
-        Ok(ParseTreeNode::epsilon())
+    fn finalize_ast(&self) -> Result<AstNode, LL1ParseError> {
+        self.ast_stack.last().cloned().ok_or_else(LL1ParseError::stack_underflow)
     }
 
     pub fn get_cfg(&self) -> &ContextFreeGrammar {
@@ -238,6 +289,12 @@ impl LL1Parser {
 
     pub fn get_table(&self) -> &ParsingTable {
         &self.table
+    }
+}
+
+impl LL1ParserTrait for LL1Parser {
+    fn parse(&mut self) -> Result<AstNode, LL1ParseError> {
+        self.parse()
     }
 }
 

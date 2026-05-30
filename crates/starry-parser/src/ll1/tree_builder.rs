@@ -4,20 +4,8 @@ use crate::parser::ParseTreeNode;
 use starry_ast::Token;
 use std::collections::VecDeque;
 
-#[derive(Debug, Clone)]
-pub enum TreeNode {
-    NonTerminal {
-        name: String,
-        children: Vec<TreeNode>,
-    },
-    Terminal {
-        token: Token,
-    },
-    Epsilon,
-}
-
 pub struct ParseTreeBuilder {
-    node_stack: VecDeque<TreeNode>,
+    node_stack: VecDeque<ParseTreeNode>,
 }
 
 impl ParseTreeBuilder {
@@ -32,11 +20,11 @@ impl ParseTreeBuilder {
     }
 
     pub fn push_terminal(&mut self, token: Token) {
-        self.node_stack.push_front(TreeNode::Terminal { token });
+        self.node_stack.push_front(ParseTreeNode::Terminal { token });
     }
 
     pub fn push_epsilon(&mut self) {
-        self.node_stack.push_front(TreeNode::Epsilon);
+        self.node_stack.push_front(ParseTreeNode::Epsilon);
     }
 
     pub fn build_non_terminal(&mut self, name: String, child_count: usize) {
@@ -50,7 +38,7 @@ impl ParseTreeBuilder {
         
         children.reverse();
         
-        self.node_stack.push_front(TreeNode::NonTerminal { name, children });
+        self.node_stack.push_front(ParseTreeNode::NonTerminal { name, children });
     }
 
     pub fn build_from_production(
@@ -65,17 +53,17 @@ impl ParseTreeBuilder {
         self.build_non_terminal(name, child_count);
     }
 
-    pub fn get_result(&self) -> Option<&TreeNode> {
+    pub fn get_result(&self) -> Option<&ParseTreeNode> {
         self.node_stack.front()
     }
 
-    pub fn take_result(&mut self) -> Option<TreeNode> {
+    pub fn take_result(&mut self) -> Option<ParseTreeNode> {
         self.node_stack.pop_front()
     }
 
     pub fn to_parse_tree_node(&self) -> Result<ParseTreeNode, LL1ParseError> {
         match self.node_stack.front() {
-            Some(node) => Ok(convert_to_parse_tree_node(node)),
+            Some(node) => Ok(node.clone()),
             None => Ok(ParseTreeNode::epsilon()),
         }
     }
@@ -84,19 +72,6 @@ impl ParseTreeBuilder {
 impl Default for ParseTreeBuilder {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-fn convert_to_parse_tree_node(node: &TreeNode) -> ParseTreeNode {
-    match node {
-        TreeNode::NonTerminal { name, children } => {
-            ParseTreeNode::non_terminal(
-                name.clone(),
-                children.iter().map(convert_to_parse_tree_node).collect(),
-            )
-        }
-        TreeNode::Terminal { token } => ParseTreeNode::terminal(token.clone()),
-        TreeNode::Epsilon => ParseTreeNode::epsilon(),
     }
 }
 

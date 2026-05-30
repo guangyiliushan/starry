@@ -6,9 +6,8 @@ mod closure;
 mod conflict;
 mod core_set;
 mod error;
-mod first;
-mod follow;
 mod goto;
+mod grammar_type;
 mod item;
 mod item_set;
 mod lookahead;
@@ -27,17 +26,16 @@ pub use closure::{LR0Closure, LR1Closure};
 pub use conflict::{Conflict, ConflictDetector, ConflictKind, ConflictReport};
 pub use core_set::{CoreSet, CoreSetDetector, CoreSetMerger};
 pub use error::{
-    LRError, LRErrorKind, LRGrammarType, LRValidationError, LRValidationReport,
+    LRError, LRErrorKind, LRValidationError, LRValidationReport,
 };
-pub use first::LRFirstCalculator;
-pub use follow::LRFollowCalculator;
 pub use goto::{GotoEntry, GotoResult, GotoTable, ItemSetId, LR0Goto, LR1Goto};
+pub use grammar_type::LRGrammarType;
 pub use item::{format_item, Item, ItemKind, ItemTrait, LR0Item, LR1Item};
 pub use item_set::{create_initial_lr0_item_set, create_initial_lr1_item_set, LR0ItemSet, LR1ItemSet};
 pub use lookahead::{compute_closure_lookaheads, LookaheadCalculator, LookaheadSet};
 pub use parser::{LRParser, LRParserConfig, ParseResult, ParseStep, ParseTrace};
 pub use stack::{LRStack, StackAction, StackSymbol};
 pub use states::{LR0ItemSetCollection, LR1ItemSetCollection};
-pub use table::{GrammarType, LRTable, LR0Table, LR0TableBuilder, LR1Table, LR1TableBuilder, LALR1Table, LALR1TableBuilder, SLRTable, SLRTableBuilder};
+pub use table::{LRTable, LR0Table, LR0TableBuilder, LR1Table, LR1TableBuilder, LALR1Table, LALR1TableBuilder, SLRTable, SLRTableBuilder};
 pub use token_mapper::TokenMapper;
 pub use validator::{LALR1Validator, LR0Validator, LR1Validator, SLR1Validator};

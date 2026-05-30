@@ -55,7 +55,9 @@ fn main() {
     match parser.parse() {
         Ok(tree) => {
             println!("\nParse successful!");
-            tree.print(0);
+            println!("Display: {}", tree);
+            println!("\nAST Tree:");
+            tree.print();
         }
         Err(e) => {
             println!("\nParse error: {}", e.message);

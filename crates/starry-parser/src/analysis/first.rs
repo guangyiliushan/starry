@@ -217,12 +217,17 @@ impl FirstSetCalculator {
     }
 
     /// 计算符号串的 FIRST 集合
-    pub fn compute_first_of_string(
-        _cfg: &ContextFreeGrammar,
+    pub fn compute_first_of_symbols(
         symbols: &[Symbol],
         first_sets: &FirstSet,
         nullable: &HashSet<NonTerminalId>,
     ) -> HashSet<Option<TerminalId>> {
+        if symbols.is_empty() {
+            let mut result = HashSet::new();
+            result.insert(None);
+            return result;
+        }
+
         let mut result = HashSet::new();
 
         for (i, symbol) in symbols.iter().enumerate() {
@@ -329,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_first_of_string() {
+    fn test_compute_first_of_symbols() {
         let grammar = parse_grammar(r#"
             E -> T E'
             E' -> + T E' | ε
@@ -344,7 +349,7 @@ mod tests {
         let e_prime_id = grammar.non_terminal_map.get("E'").unwrap();
 
         let symbols = vec![Symbol::NonTerminal(*t_id), Symbol::NonTerminal(*e_prime_id)];
-        let first = FirstSetCalculator::compute_first_of_string(&grammar, &symbols, &first_sets, &nullable);
+        let first = FirstSetCalculator::compute_first_of_symbols(&symbols, &first_sets, &nullable);
 
         // 应该包含 num 和 +
         assert!(first.len() >= 1);

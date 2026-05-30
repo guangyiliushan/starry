@@ -1,38 +1,75 @@
-use crate::analysis::FollowSet;
+use crate::analysis::{FollowSet, FollowSetCalculator};
 use crate::cfg::{ContextFreeGrammar, Symbol, TerminalId};
 use crate::lr::action::{Action, ActionTable, ProductionId};
 use crate::lr::augmented::AugmentedGrammar;
 use crate::lr::closure::LR0Closure;
 use crate::lr::conflict::{Conflict, ConflictReport};
 use crate::lr::core_set::CoreSetMerger;
-use crate::lr::follow::LRFollowCalculator;
 use crate::lr::goto::{GotoTable, ItemSetId, LR0Goto};
+use crate::lr::grammar_type::LRGrammarType;
 use crate::lr::item::LR0Item;
 use crate::lr::lookahead::LookaheadCalculator;
 use crate::lr::states::{LR0ItemSetCollection, LR1ItemSetCollection};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GrammarType {
-    LR0,
-    SLR1,
-    LR1,
-    LALR1,
-    NotLR,
-    Unknown,
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct LrTableCore {
+    pub action: ActionTable,
+    pub goto: GotoTable,
+    pub state_count: usize,
+    pub terminal_count: usize,
+    pub non_terminal_count: usize,
+    pub conflicts: Vec<Conflict>,
 }
 
-impl fmt::Display for GrammarType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            GrammarType::LR0 => write!(f, "LR(0)"),
-            GrammarType::SLR1 => write!(f, "SLR(1)"),
-            GrammarType::LR1 => write!(f, "LR(1)"),
-            GrammarType::LALR1 => write!(f, "LALR(1)"),
-            GrammarType::NotLR => write!(f, "Not LR"),
-            GrammarType::Unknown => write!(f, "Unknown"),
+impl LrTableCore {
+    pub fn new(state_count: usize, terminal_count: usize, non_terminal_count: usize) -> Self {
+        LrTableCore {
+            action: ActionTable::new(state_count, terminal_count),
+            goto: GotoTable::new(state_count, non_terminal_count),
+            state_count,
+            terminal_count,
+            non_terminal_count,
+            conflicts: Vec::new(),
         }
+    }
+
+    pub fn has_conflicts(&self) -> bool {
+        !self.conflicts.is_empty()
+    }
+
+    pub fn conflict_report(&self) -> ConflictReport {
+        ConflictReport::new(self.conflicts.clone())
+    }
+
+    fn terminal_names(cfg: &ContextFreeGrammar) -> Vec<String> {
+        (0..cfg.terminals.len())
+            .map(|i| cfg.get_terminal_name(crate::cfg::TerminalId(i)).to_string())
+            .collect()
+    }
+
+    fn non_terminal_names(cfg: &ContextFreeGrammar) -> Vec<String> {
+        (0..cfg.non_terminals.len())
+            .map(|i| cfg.get_non_terminal_name(crate::cfg::NonTerminalId(i)).to_string())
+            .collect()
+    }
+
+    fn print_header(&self, cfg: &ContextFreeGrammar, label: &str) {
+        println!("{}", label);
+        println!();
+        let tn = Self::terminal_names(cfg);
+        let nn = Self::non_terminal_names(cfg);
+        self.action.print(&tn);
+        println!();
+        self.goto.print(&nn);
+    }
+
+    fn fmt_header(&self, f: &mut fmt::Formatter<'_>, label: &str) -> fmt::Result {
+        writeln!(f, "{}", label)?;
+        writeln!(f, "{}", self.action)?;
+        writeln!(f, "{}", self.goto)
     }
 }
 
@@ -81,51 +118,40 @@ impl LRTable {
         }
     }
 
-    pub fn grammar_type(&self) -> GrammarType {
+    pub fn grammar_type(&self) -> LRGrammarType {
         match self {
-            LRTable::LR0(_) => GrammarType::LR0,
-            LRTable::SLR1(_) => GrammarType::SLR1,
-            LRTable::LR1(_) => GrammarType::LR1,
-            LRTable::LALR1(_) => GrammarType::LALR1,
+            LRTable::LR0(_) => LRGrammarType::LR0,
+            LRTable::SLR1(_) => LRGrammarType::SLR1,
+            LRTable::LR1(_) => LRGrammarType::LR1,
+            LRTable::LALR1(_) => LRGrammarType::LALR1,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct LR0Table {
-    pub action: ActionTable,
-    pub goto: GotoTable,
-    pub state_count: usize,
-    pub terminal_count: usize,
-    pub non_terminal_count: usize,
-    pub conflicts: Vec<Conflict>,
+    core: LrTableCore,
+}
+
+impl std::ops::Deref for LR0Table {
+    type Target = LrTableCore;
+    fn deref(&self) -> &Self::Target { &self.core }
+}
+
+impl std::ops::DerefMut for LR0Table {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.core }
 }
 
 impl LR0Table {
     pub fn new(state_count: usize, terminal_count: usize, non_terminal_count: usize) -> Self {
-        LR0Table {
-            action: ActionTable::new(state_count, terminal_count),
-            goto: GotoTable::new(state_count, non_terminal_count),
-            state_count,
-            terminal_count,
-            non_terminal_count,
-            conflicts: Vec::new(),
-        }
+        LR0Table { core: LrTableCore::new(state_count, terminal_count, non_terminal_count) }
     }
 
-    pub fn has_conflicts(&self) -> bool {
-        !self.conflicts.is_empty()
-    }
-
-    pub fn conflict_report(&self) -> ConflictReport {
-        ConflictReport::new(self.conflicts.clone())
-    }
-
-    pub fn grammar_type(&self) -> GrammarType {
-        if self.conflicts.is_empty() {
-            GrammarType::LR0
+    pub fn grammar_type(&self) -> LRGrammarType {
+        if self.has_conflicts() {
+            LRGrammarType::NotLR
         } else {
-            GrammarType::NotLR
+            LRGrammarType::LR0
         }
     }
 
@@ -134,21 +160,8 @@ impl LR0Table {
     }
 
     pub fn print(&self, cfg: &ContextFreeGrammar) {
-        println!("LR(0) Parsing Table:");
-        println!();
-        
-        let terminal_names: Vec<String> = (0..cfg.terminals.len())
-            .map(|i| cfg.get_terminal_name(crate::cfg::TerminalId(i)).to_string())
-            .collect();
-        let non_terminal_names: Vec<String> = (0..cfg.non_terminals.len())
-            .map(|i| cfg.get_non_terminal_name(crate::cfg::NonTerminalId(i)).to_string())
-            .collect();
-        
-        self.action.print(&terminal_names);
-        println!();
-        self.goto.print(&non_terminal_names);
-        
-        if self.has_conflicts() {
+        self.core.print_header(cfg, "LR(0) Parsing Table:");
+        if !self.conflicts.is_empty() {
             println!();
             println!("Conflicts:");
             for conflict in &self.conflicts {
@@ -160,10 +173,8 @@ impl LR0Table {
 
 impl fmt::Display for LR0Table {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "LR(0) Parsing Table:")?;
-        writeln!(f, "{}", self.action)?;
-        writeln!(f, "{}", self.goto)?;
-        if self.has_conflicts() {
+        self.core.fmt_header(f, "LR(0) Parsing Table:")?;
+        if !self.conflicts.is_empty() {
             writeln!(f, "\nConflicts:")?;
             for conflict in &self.conflicts {
                 writeln!(f, "  {}", conflict)?;
@@ -268,45 +279,36 @@ impl LR0TableBuilder {
 
 #[derive(Debug, Clone)]
 pub struct SLRTable {
-    pub action: ActionTable,
-    pub goto: GotoTable,
-    pub state_count: usize,
-    pub terminal_count: usize,
-    pub non_terminal_count: usize,
-    pub conflicts: Vec<Conflict>,
+    core: LrTableCore,
     pub resolved_conflicts: Vec<Conflict>,
+}
+
+impl std::ops::Deref for SLRTable {
+    type Target = LrTableCore;
+    fn deref(&self) -> &Self::Target { &self.core }
+}
+
+impl std::ops::DerefMut for SLRTable {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.core }
 }
 
 impl SLRTable {
     pub fn new(state_count: usize, terminal_count: usize, non_terminal_count: usize) -> Self {
         SLRTable {
-            action: ActionTable::new(state_count, terminal_count),
-            goto: GotoTable::new(state_count, non_terminal_count),
-            state_count,
-            terminal_count,
-            non_terminal_count,
-            conflicts: Vec::new(),
+            core: LrTableCore::new(state_count, terminal_count, non_terminal_count),
             resolved_conflicts: Vec::new(),
         }
     }
 
-    pub fn has_conflicts(&self) -> bool {
-        !self.conflicts.is_empty()
-    }
-
-    pub fn conflict_report(&self) -> ConflictReport {
-        ConflictReport::new(self.conflicts.clone())
-    }
-
-    pub fn grammar_type(&self) -> GrammarType {
+    pub fn grammar_type(&self) -> LRGrammarType {
         if self.conflicts.is_empty() {
             if self.resolved_conflicts.is_empty() {
-                GrammarType::LR0
+                LRGrammarType::LR0
             } else {
-                GrammarType::SLR1
+                LRGrammarType::SLR1
             }
         } else {
-            GrammarType::NotLR
+            LRGrammarType::NotLR
         }
     }
 
@@ -319,20 +321,7 @@ impl SLRTable {
     }
 
     pub fn print(&self, cfg: &ContextFreeGrammar) {
-        println!("SLR(1) Parsing Table:");
-        println!();
-        
-        let terminal_names: Vec<String> = (0..cfg.terminals.len())
-            .map(|i| cfg.get_terminal_name(crate::cfg::TerminalId(i)).to_string())
-            .collect();
-        let non_terminal_names: Vec<String> = (0..cfg.non_terminals.len())
-            .map(|i| cfg.get_non_terminal_name(crate::cfg::NonTerminalId(i)).to_string())
-            .collect();
-        
-        self.action.print(&terminal_names);
-        println!();
-        self.goto.print(&non_terminal_names);
-        
+        self.core.print_header(cfg, "SLR(1) Parsing Table:");
         if !self.resolved_conflicts.is_empty() {
             println!();
             println!("Resolved conflicts by FOLLOW sets:");
@@ -352,9 +341,7 @@ impl SLRTable {
 
 impl fmt::Display for SLRTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "SLR(1) Parsing Table:")?;
-        writeln!(f, "{}", self.action)?;
-        writeln!(f, "{}", self.goto)?;
+        self.core.fmt_header(f, "SLR(1) Parsing Table:")?;
         if !self.resolved_conflicts.is_empty() {
             writeln!(f, "\nResolved conflicts by FOLLOW sets:")?;
             for conflict in &self.resolved_conflicts {
@@ -376,7 +363,7 @@ pub struct SLRTableBuilder;
 impl SLRTableBuilder {
     pub fn build(augmented: &AugmentedGrammar) -> SLRTable {
         let cfg = augmented.grammar();
-        let follow_sets = LRFollowCalculator::compute(cfg);
+        let (_, _, follow_sets) = FollowSetCalculator::compute_all(cfg);
         let end_marker = TerminalId(cfg.terminals.len());
 
         let states = Self::build_states(augmented);
@@ -595,39 +582,28 @@ impl SLRTableBuilder {
 
 #[derive(Debug, Clone)]
 pub struct LR1Table {
-    pub action: ActionTable,
-    pub goto: GotoTable,
-    pub state_count: usize,
-    pub terminal_count: usize,
-    pub non_terminal_count: usize,
-    pub conflicts: Vec<Conflict>,
+    core: LrTableCore,
+}
+
+impl std::ops::Deref for LR1Table {
+    type Target = LrTableCore;
+    fn deref(&self) -> &Self::Target { &self.core }
+}
+
+impl std::ops::DerefMut for LR1Table {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.core }
 }
 
 impl LR1Table {
     pub fn new(state_count: usize, terminal_count: usize, non_terminal_count: usize) -> Self {
-        LR1Table {
-            action: ActionTable::new(state_count, terminal_count),
-            goto: GotoTable::new(state_count, non_terminal_count),
-            state_count,
-            terminal_count,
-            non_terminal_count,
-            conflicts: Vec::new(),
-        }
+        LR1Table { core: LrTableCore::new(state_count, terminal_count, non_terminal_count) }
     }
 
-    pub fn has_conflicts(&self) -> bool {
-        !self.conflicts.is_empty()
-    }
-
-    pub fn conflict_report(&self) -> ConflictReport {
-        ConflictReport::new(self.conflicts.clone())
-    }
-
-    pub fn grammar_type(&self) -> GrammarType {
+    pub fn grammar_type(&self) -> LRGrammarType {
         if self.conflicts.is_empty() {
-            GrammarType::LR1
+            LRGrammarType::LR1
         } else {
-            GrammarType::NotLR
+            LRGrammarType::NotLR
         }
     }
 
@@ -636,21 +612,8 @@ impl LR1Table {
     }
 
     pub fn print(&self, cfg: &ContextFreeGrammar) {
-        println!("LR(1) Parsing Table:");
-        println!();
-        
-        let terminal_names: Vec<String> = (0..cfg.terminals.len())
-            .map(|i| cfg.get_terminal_name(crate::cfg::TerminalId(i)).to_string())
-            .collect();
-        let non_terminal_names: Vec<String> = (0..cfg.non_terminals.len())
-            .map(|i| cfg.get_non_terminal_name(crate::cfg::NonTerminalId(i)).to_string())
-            .collect();
-        
-        self.action.print(&terminal_names);
-        println!();
-        self.goto.print(&non_terminal_names);
-        
-        if self.has_conflicts() {
+        self.core.print_header(cfg, "LR(1) Parsing Table:");
+        if !self.conflicts.is_empty() {
             println!();
             println!("Conflicts:");
             for conflict in &self.conflicts {
@@ -662,10 +625,8 @@ impl LR1Table {
 
 impl fmt::Display for LR1Table {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "LR(1) Parsing Table:")?;
-        writeln!(f, "{}", self.action)?;
-        writeln!(f, "{}", self.goto)?;
-        if self.has_conflicts() {
+        self.core.fmt_header(f, "LR(1) Parsing Table:")?;
+        if !self.conflicts.is_empty() {
             writeln!(f, "\nConflicts:")?;
             for conflict in &self.conflicts {
                 writeln!(f, "  {}", conflict)?;
@@ -796,41 +757,32 @@ impl LR1TableBuilder {
 
 #[derive(Debug, Clone)]
 pub struct LALR1Table {
-    pub action: ActionTable,
-    pub goto: GotoTable,
-    pub state_count: usize,
-    pub terminal_count: usize,
-    pub non_terminal_count: usize,
-    pub conflicts: Vec<Conflict>,
+    core: LrTableCore,
     pub merged_states: usize,
+}
+
+impl std::ops::Deref for LALR1Table {
+    type Target = LrTableCore;
+    fn deref(&self) -> &Self::Target { &self.core }
+}
+
+impl std::ops::DerefMut for LALR1Table {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.core }
 }
 
 impl LALR1Table {
     pub fn new(state_count: usize, terminal_count: usize, non_terminal_count: usize) -> Self {
         LALR1Table {
-            action: ActionTable::new(state_count, terminal_count),
-            goto: GotoTable::new(state_count, non_terminal_count),
-            state_count,
-            terminal_count,
-            non_terminal_count,
-            conflicts: Vec::new(),
+            core: LrTableCore::new(state_count, terminal_count, non_terminal_count),
             merged_states: 0,
         }
     }
 
-    pub fn has_conflicts(&self) -> bool {
-        !self.conflicts.is_empty()
-    }
-
-    pub fn conflict_report(&self) -> ConflictReport {
-        ConflictReport::new(self.conflicts.clone())
-    }
-
-    pub fn grammar_type(&self) -> GrammarType {
+    pub fn grammar_type(&self) -> LRGrammarType {
         if self.conflicts.is_empty() {
-            GrammarType::LALR1
+            LRGrammarType::LALR1
         } else {
-            GrammarType::NotLR
+            LRGrammarType::NotLR
         }
     }
 
@@ -839,21 +791,9 @@ impl LALR1Table {
     }
 
     pub fn print(&self, cfg: &ContextFreeGrammar) {
-        println!("LALR(1) Parsing Table ({} merged states):", self.merged_states);
-        println!();
-        
-        let terminal_names: Vec<String> = (0..cfg.terminals.len())
-            .map(|i| cfg.get_terminal_name(crate::cfg::TerminalId(i)).to_string())
-            .collect();
-        let non_terminal_names: Vec<String> = (0..cfg.non_terminals.len())
-            .map(|i| cfg.get_non_terminal_name(crate::cfg::NonTerminalId(i)).to_string())
-            .collect();
-        
-        self.action.print(&terminal_names);
-        println!();
-        self.goto.print(&non_terminal_names);
-        
-        if self.has_conflicts() {
+        let label = format!("LALR(1) Parsing Table ({} merged states):", self.merged_states);
+        self.core.print_header(cfg, &label);
+        if !self.conflicts.is_empty() {
             println!();
             println!("Conflicts introduced by merging:");
             for conflict in &self.conflicts {
@@ -865,10 +805,9 @@ impl LALR1Table {
 
 impl fmt::Display for LALR1Table {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "LALR(1) Parsing Table ({} merged states):", self.merged_states)?;
-        writeln!(f, "{}", self.action)?;
-        writeln!(f, "{}", self.goto)?;
-        if self.has_conflicts() {
+        let label = format!("LALR(1) Parsing Table ({} merged states):", self.merged_states);
+        self.core.fmt_header(f, &label)?;
+        if !self.conflicts.is_empty() {
             writeln!(f, "\nConflicts introduced by merging:")?;
             for conflict in &self.conflicts {
                 writeln!(f, "  {}", conflict)?;
@@ -1070,11 +1009,11 @@ mod tests {
 
     #[test]
     fn test_grammar_type_display() {
-        assert_eq!(format!("{}", GrammarType::LR0), "LR(0)");
-        assert_eq!(format!("{}", GrammarType::SLR1), "SLR(1)");
-        assert_eq!(format!("{}", GrammarType::LR1), "LR(1)");
-        assert_eq!(format!("{}", GrammarType::LALR1), "LALR(1)");
-        assert_eq!(format!("{}", GrammarType::NotLR), "Not LR");
+        assert_eq!(format!("{}", LRGrammarType::LR0), "LR(0)");
+        assert_eq!(format!("{}", LRGrammarType::SLR1), "SLR(1)");
+        assert_eq!(format!("{}", LRGrammarType::LR1), "LR(1)");
+        assert_eq!(format!("{}", LRGrammarType::LALR1), "LALR(1)");
+        assert_eq!(format!("{}", LRGrammarType::NotLR), "Not LR");
     }
 
     #[test]

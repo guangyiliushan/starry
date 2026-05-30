@@ -159,8 +159,7 @@ impl ParsingTableBuilder {
             let lhs = production.lhs;
             let rhs = &production.rhs;
 
-            let first_alpha = FirstSetCalculator::compute_first_of_string(
-                cfg,
+            let first_alpha = FirstSetCalculator::compute_first_of_symbols(
                 rhs,
                 first_sets,
                 nullable,

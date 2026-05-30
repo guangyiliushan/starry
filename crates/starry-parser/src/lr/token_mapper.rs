@@ -53,42 +53,20 @@ impl TokenMapper {
     }
 
     pub fn terminal_id_from_token(&self, kind: &TokenKind) -> Option<TerminalId> {
-        match kind {
-            TokenKind::Identifier(name) => self.terminal_map.get(name.as_str()).copied(),
-            TokenKind::Keyword(kw) => self.terminal_map.get(kw.as_str()).copied(),
-            TokenKind::Operator(op) => self.terminal_map.get(op.as_str()).copied(),
-            TokenKind::Delimiter(del) => self.terminal_map.get(del.as_str()).copied(),
-            TokenKind::Integer(_) => self
-                .terminal_map
-                .get("NUM")
-                .or_else(|| self.terminal_map.get("num"))
-                .copied(),
-            TokenKind::Float(_) => self
-                .terminal_map
-                .get("NUM")
-                .or_else(|| self.terminal_map.get("num"))
-                .copied(),
-            TokenKind::StringLiteral(_) => self.terminal_map.get("STRING").copied(),
-            TokenKind::Eof => Some(self.end_marker),
-            TokenKind::Error(_) => None,
-        }
+        crate::token_mapper::terminal_id_from_token(
+            kind,
+            |name| self.terminal_map.get(name).copied(),
+            self.end_marker,
+        )
     }
 
     pub fn matches_terminal(&self, expected: TerminalId, kind: &TokenKind) -> bool {
-        let expected_name = self.get_terminal_name(expected);
-
-        match kind {
-            TokenKind::Identifier(name) => name == expected_name,
-            TokenKind::Keyword(kw) => kw == expected_name,
-            TokenKind::Operator(op) => op == expected_name,
-            TokenKind::Delimiter(del) => del == expected_name,
-            TokenKind::Integer(_) | TokenKind::Float(_) => {
-                expected_name.eq_ignore_ascii_case("NUM") || expected_name == "num"
-            }
-            TokenKind::StringLiteral(_) => expected_name == "STRING",
-            TokenKind::Eof => expected == self.end_marker,
-            TokenKind::Error(_) => false,
-        }
+        crate::token_mapper::matches_terminal(
+            expected,
+            kind,
+            self.get_terminal_name(expected),
+            self.end_marker,
+        )
     }
 
     pub fn get_terminal_name(&self, id: TerminalId) -> &str {

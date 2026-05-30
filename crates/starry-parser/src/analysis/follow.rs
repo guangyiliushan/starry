@@ -117,8 +117,7 @@ impl FollowSetCalculator {
 
                         // 规则 R2：FOLLOW(B) = FOLLOW(B) ∪ (FIRST(β) - {ε})
                         if !beta.is_empty() {
-                            let first_beta = FirstSetCalculator::compute_first_of_string(
-                                cfg,
+                            let first_beta = FirstSetCalculator::compute_first_of_symbols(
                                 &beta,
                                 first_sets,
                                 nullable,

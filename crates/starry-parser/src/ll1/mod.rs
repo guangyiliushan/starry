@@ -2,17 +2,25 @@ mod builder;
 mod error;
 mod parser;
 mod parsing_table;
+mod recursive;
 mod stack;
 mod token_mapper;
 mod tree_builder;
+
+use starry_ast::AstNode;
+
+pub trait LL1ParserTrait {
+    fn parse(&mut self) -> Result<AstNode, LL1ParseError>;
+}
 
 pub use builder::{LL1ParserBuilder, LL1ValidationReport, LL1Validator};
 pub use error::LL1ParseError;
 pub use parser::LL1Parser;
 pub use parsing_table::{ParsingConflict, ParsingTable, ParsingTableBuilder, TableEntry};
+pub use recursive::{RecursiveDescentParser, RecursiveDescentParserBuilder};
 pub use stack::{ParseStack, StackSymbol};
 pub use token_mapper::TokenMapper;
-pub use tree_builder::{DerivationRecorder, DerivationStep, ParseTreeBuilder, TreeNode};
+pub use tree_builder::{DerivationRecorder, DerivationStep, ParseTreeBuilder};
 
 #[cfg(test)]
 mod tests {

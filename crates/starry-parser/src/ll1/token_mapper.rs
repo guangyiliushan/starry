@@ -32,44 +32,20 @@ impl<'a> TokenMapper<'a> {
     }
 
     pub fn terminal_id_from_token(&self, kind: &TokenKind) -> Option<TerminalId> {
-        match kind {
-            TokenKind::Identifier(name) => self.cfg.terminal_map.get(name).copied(),
-            TokenKind::Keyword(kw) => self.cfg.terminal_map.get(kw).copied(),
-            TokenKind::Operator(op) => self.cfg.terminal_map.get(op).copied(),
-            TokenKind::Delimiter(del) => self.cfg.terminal_map.get(del).copied(),
-            TokenKind::Integer(_) => self
-                .cfg
-                .terminal_map
-                .get("NUM")
-                .or_else(|| self.cfg.terminal_map.get("num"))
-                .copied(),
-            TokenKind::Float(_) => self
-                .cfg
-                .terminal_map
-                .get("NUM")
-                .or_else(|| self.cfg.terminal_map.get("num"))
-                .copied(),
-            TokenKind::StringLiteral(_) => self.cfg.terminal_map.get("STRING").copied(),
-            TokenKind::Eof => Some(self.table.end_marker()),
-            _ => None,
-        }
+        crate::token_mapper::terminal_id_from_token(
+            kind,
+            |name| self.cfg.terminal_map.get(name).copied(),
+            self.table.end_marker(),
+        )
     }
 
     pub fn matches_terminal(&self, expected: TerminalId, kind: &TokenKind) -> bool {
-        let expected_name = self.cfg.get_terminal_name(expected);
-
-        match kind {
-            TokenKind::Identifier(name) => name == expected_name,
-            TokenKind::Keyword(kw) => kw == expected_name,
-            TokenKind::Operator(op) => op == expected_name,
-            TokenKind::Delimiter(del) => del == expected_name,
-            TokenKind::Integer(_) | TokenKind::Float(_) => {
-                expected_name.eq_ignore_ascii_case("NUM") || expected_name == "num"
-            }
-            TokenKind::StringLiteral(_) => expected_name == "STRING",
-            TokenKind::Eof => expected == self.table.end_marker(),
-            _ => false,
-        }
+        crate::token_mapper::matches_terminal(
+            expected,
+            kind,
+            self.cfg.get_terminal_name(expected),
+            self.table.end_marker(),
+        )
     }
 
     pub fn get_terminal_name(&self, id: TerminalId) -> &str {
