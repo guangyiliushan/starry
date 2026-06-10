@@ -31,9 +31,11 @@ fn main() {
     grammar_from_dfa.print();
     println!();
 
+    println!("Regex from grammar:");    
     let regex_from_grammar = grammar_from_dfa.to_regex().unwrap();
     println!("{:?}\n", regex_from_grammar);
 
+    println!("Grammar from regex:");
     let grammar = GrammarBuilder::from_regex(&regex);
     grammar.print();
     println!();

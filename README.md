@@ -13,12 +13,13 @@ The long-term vision for Starry is to evolve into a modern multi-paradigm progra
 ```
 starry/
 ├── crates/
-│   ├── starry-lex/     # Lexer library with regex and automata support
-│   ├── starry-parser/  # Parser library (in development)
-│   ├── starry-ast/     # Abstract Syntax Tree definitions (in development)
-│   ├── starry/         # Core library integration
-│   └── starryc/        # Compiler executable
-└── Cargo.toml          # Workspace configuration
+│   ├── starry-lex/      # Lexer library with regex and automata support
+│   ├── starry-parser/   # Parser library with LL(1) and LR family support
+│   ├── starry-ast/      # Abstract Syntax Tree definitions
+│   ├── starry-semantic/ # Semantic analysis pipeline and IR generation
+│   ├── starry/          # Core library integration (stub)
+│   └── starryc/         # Compiler executable (stub)
+└── Cargo.toml           # Workspace configuration
 ```
 
 ## Running Tests
@@ -29,7 +30,7 @@ cargo test
 
 ## Current Features
 
-The current implementation features a fully functional lexer with regular expression support, NFA/DFA construction, and DFA minimization algorithms, with parser and AST components under active development.
+The current implementation features a fully functional lexer with regular expression support, NFA/DFA construction, and DFA minimization algorithms; a mature parser supporting LL(1) (table-driven and recursive descent) and the full LR family (LR(0), SLR(1), LR(1), LALR(1)) with CFG analysis (FIRST/FOLLOW sets, left recursion detection and elimination, phrase analysis); a complete AST library with span tracking and token types; and a multi-pass semantic analysis pipeline covering name resolution, type checking, and IR generation (TAC/quadruples/triples, basic blocks, DAG), with rule-driven attribute evaluation.
 
 ## Requirements
 

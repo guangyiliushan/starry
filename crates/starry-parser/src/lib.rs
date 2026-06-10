@@ -1,14 +1,167 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+mod ast_builder;
+mod cfg;
+mod ll1;
+mod lr;
+mod parser;
+mod token_mapper;
+
+pub mod analysis;
+pub use analysis::{
+    DirectPhrase, FirstSet, FirstSetCalculator, FollowSet, FollowSetCalculator,
+    HandleReducer, LeftRecursionAnalyzer, LeftRecursionDetector, LeftRecursionEliminator,
+    LeftRecursionInfo, LeftRecursionType, NullableSet, Phrase, PhraseAnalyzer,
+};
+
+pub use cfg::{ContextFreeGrammar, NonTerminalId, Production, Symbol, TerminalId};
+pub use ll1::{
+    LL1ParseError, LL1Parser, LL1ParserBuilder, LL1ParserTrait, LL1ValidationReport, LL1Validator,
+    ParsingConflict, ParsingTable, ParsingTableBuilder, TableEntry,
+    ParseStack, StackSymbol, TokenMapper, ParseTreeBuilder,
+    DerivationRecorder, DerivationStep,
+    RecursiveDescentParser, RecursiveDescentParserBuilder,
+};
+pub use lr::{
+    Action, ActionTable, AugmentedGrammar, Conflict, ConflictDetector, ConflictKind,
+    ConflictReport, CoreSet, CoreSetDetector, CoreSetMerger, GotoEntry, GotoResult,
+    GotoTable, ItemSetId, LALR1Validator, LR0Closure, LR0Goto, LR0Item, LR0ItemSet,
+    LR0Table, LR0TableBuilder, LR0Validator, LR1Closure, LR1Goto, LR1Item, LR1ItemSet, LR1Validator,
+    LR1Table, LR1TableBuilder, LALR1Table, LALR1TableBuilder,
+    LRError, LRErrorKind, LRGrammarType,
+    LRParser, LRParserBuilder, LRParserConfig, LRStack, LRTable, LRValidationError,
+    LRValidationReport, LRValidator, LookaheadCalculator, LookaheadSet, ParseResult,
+    ParseStep, ParseTrace, ProductionId, SLR1Validator, SLRTable, SLRTableBuilder,
+    StackAction, StackSymbol as LRStackSymbol, TokenMapper as LRTokenMapper,
+    Item, ItemKind, ItemTrait, format_item,
+    create_initial_lr0_item_set, create_initial_lr1_item_set,
+    compute_closure_lookaheads, AllLR0Items, AllLR1Items,
+    LR0ItemSetCollection, LR1ItemSetCollection,
+};
+pub use parser::{ParseError, ParseTreeNode, Parser, ParserBuilder};
+pub use starry_ast::{Token, TokenKind, TokenStream, TokenStreamBuilder};
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    fn test_full_parsing_pipeline() {
+        let grammar_str = r#"
+            Expr -> Term + Expr | Term
+            Term -> num
+        "#;
+        
+        let cfg = ContextFreeGrammar::parse(grammar_str).unwrap();
+        
+        let mut builder = TokenStreamBuilder::new();
+        builder.add_integer(1, "1".to_string());
+        builder.add_operator("+".to_string());
+        builder.add_integer(2, "2".to_string());
+        let stream = builder.build();
+
+        let mut parser = Parser::new(cfg, stream);
+        let result = parser.parse();
+        
+        assert!(result.is_ok());
+        
+        let tree = result.unwrap();
+        tree.print(0);
+    }
+
+    #[test]
+    fn test_simple_expression() {
+        let grammar_str = "Expr -> num";
+        let cfg = ContextFreeGrammar::parse(grammar_str).unwrap();
+        
+        let mut builder = TokenStreamBuilder::new();
+        builder.add_integer(42, "42".to_string());
+        let stream = builder.build();
+
+        let mut parser = Parser::new(cfg, stream);
+        let result = parser.parse();
+        
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_epsilon_production() {
+        let grammar_str = r#"
+            S -> a A | ε
+            A -> b
+        "#;
+        
+        let cfg = ContextFreeGrammar::parse(grammar_str).unwrap();
+        
+        let stream = TokenStreamBuilder::new().build();
+        
+        let mut parser = Parser::new(cfg, stream);
+        let result = parser.parse();
+        
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_full_pipeline_phrase_analyzer() {
+        let cfg = ContextFreeGrammar::parse("E -> T + E | T\nT -> num").unwrap();
+        
+        let mut builder = TokenStreamBuilder::new();
+        builder.add_integer(1, "1".to_string());
+        builder.add_operator("+".to_string());
+        builder.add_integer(2, "2".to_string());
+        let stream = builder.build();
+
+        let mut parser = Parser::new(cfg.clone(), stream);
+        let tree = parser.parse().unwrap();
+
+        let analyzer = PhraseAnalyzer::new();
+        let phrases = analyzer.find_phrases(&tree, &cfg);
+        assert!(!phrases.is_empty(), "Should find phrases in parse tree");
+
+        let handle = analyzer.find_handle(&tree, &cfg);
+        assert!(handle.is_some(), "Should find a handle");
+
+        let ast = analyzer.parse_tree_to_ast(&tree, &cfg);
+        let display = format!("{}", ast);
+        assert!(!display.is_empty());
+    }
+
+    #[test]
+    fn test_full_pipeline_handle_reducer() {
+        let cfg = ContextFreeGrammar::parse("E -> T + E | T\nT -> num").unwrap();
+        
+        let mut builder = TokenStreamBuilder::new();
+        builder.add_integer(1, "1".to_string());
+        builder.add_operator("+".to_string());
+        builder.add_integer(2, "2".to_string());
+        let stream = builder.build();
+
+        let mut parser = Parser::new(cfg.clone(), stream);
+        let tree = parser.parse().unwrap();
+
+        let reducer = HandleReducer::new();
+
+        let (ast, trace) = reducer.reduce_with_trace(&tree, &cfg);
+        assert!(!trace.is_empty());
+        assert!(trace.iter().any(|s| s.contains("Handle Reduction Loop")), 
+            "Trace should mention handle reduction");
+
+        let display = format!("{}", ast);
+        assert!(!display.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_parse_to_ast() {
+        let cfg = ContextFreeGrammar::parse("E -> T + E | T\nT -> num").unwrap();
+        
+        let mut builder = TokenStreamBuilder::new();
+        builder.add_integer(1, "1".to_string());
+        builder.add_operator("+".to_string());
+        builder.add_integer(2, "2".to_string());
+        let stream = builder.build();
+
+        let mut parser = Parser::new(cfg, stream);
+        let ast = parser.parse_to_ast().unwrap();
+
+        let display = format!("{}", ast);
+        assert!(!display.is_empty());
     }
 }
