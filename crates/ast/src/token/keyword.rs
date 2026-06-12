@@ -212,15 +212,11 @@ pub enum KeywordKind {
     /// property
     Property,
 
-    // ==================== 异常处理关键字 ====================
-    /// try
-    Try,
-    /// catch
-    Catch,
-    /// finally
-    Finally,
-    /// throw
-    Throw,
+    // ==================== 错误处理关键字 ====================
+    /// defer
+    Defer,
+    /// panic
+    Panic,
 
     // ==================== 模块/导入关键字 ====================
     /// import
@@ -378,11 +374,9 @@ impl KeywordKind {
             KeywordKind::Field => "field",
             KeywordKind::Property => "property",
 
-            // 异常处理关键字
-            KeywordKind::Try => "try",
-            KeywordKind::Catch => "catch",
-            KeywordKind::Finally => "finally",
-            KeywordKind::Throw => "throw",
+            // 错误处理关键字
+            KeywordKind::Defer => "defer",
+            KeywordKind::Panic => "panic",
 
             // 模块/导入关键字
             KeywordKind::Import => "import",
@@ -516,11 +510,9 @@ static KEYWORDS: phf::Map<&'static str, KeywordKind> = phf_map! {
     "field" => KeywordKind::Field,
     "property" => KeywordKind::Property,
 
-    // 异常处理关键字
-    "try" => KeywordKind::Try,
-    "catch" => KeywordKind::Catch,
-    "finally" => KeywordKind::Finally,
-    "throw" => KeywordKind::Throw,
+    // 错误处理关键字
+    "defer" => KeywordKind::Defer,
+    "panic" => KeywordKind::Panic,
 
     // 模块/导入关键字
     "import" => KeywordKind::Import,
