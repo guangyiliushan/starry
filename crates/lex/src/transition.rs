@@ -880,35 +880,6 @@ impl Transition {
         }
     }
 
-    /// 检查字节是否匹配该转移
-    ///
-    /// 类似于 `matches`，但接受字节作为输入。
-    /// 对于非 ASCII 字符，总是返回 false。
-    ///
-    /// # 参数
-    ///
-    /// - `byte` - 要匹配的字节
-    ///
-    /// # 返回
-    ///
-    /// 如果字节匹配该转移的条件，返回 true
-    ///
-    /// # 注意
-    ///
-    /// 当前仅支持 ASCII。未来可以扩展支持 UTF-8 编码。
-    ///
-    /// # 示例
-    ///
-    /// ```
-    /// # use lex::transition::Transition;
-    /// assert!(Transition::char('a').matches_byte(b'a'));
-    /// assert!(!Transition::char('a').matches_byte(b'b'));
-    /// ```
-    pub fn matches_byte(&self, byte: u8) -> bool {
-        let c = byte as char;
-        self.matches(c)
-    }
-
     /// 获取转移的描述字符串（用于调试）
     ///
     /// # 示例
@@ -1144,7 +1115,6 @@ mod tests {
         assert!(!epsilon.is_char());
         assert!(!epsilon.consumes_input());
         assert!(!epsilon.matches('a'));
-        assert!(!epsilon.matches_byte(b'a'));
         assert_eq!(epsilon.description(), "ε");
     }
 
@@ -1156,8 +1126,6 @@ mod tests {
         assert!(char_trans.consumes_input());
         assert!(char_trans.matches('a'));
         assert!(!char_trans.matches('b'));
-        assert!(char_trans.matches_byte(b'a'));
-        assert!(!char_trans.matches_byte(b'b'));
         assert_eq!(char_trans.description(), "'a'");
     }
 

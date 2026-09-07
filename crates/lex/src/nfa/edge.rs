@@ -116,10 +116,6 @@ impl Edge {
         self.trans.matches(c)
     }
 
-    /// 检查字节是否匹配该转移
-    pub fn matches_byte(&self, byte: u8) -> bool {
-        self.trans.matches_byte(byte)
-    }
 }
 
 impl fmt::Display for Edge {

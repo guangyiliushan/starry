@@ -1,10 +1,18 @@
 //! 状态管理模块
 //!
-//! 该模块提供词法分析自动机（NFA/DFA）的状态管理功能：
-//! - [`StateId`] - 状态标识符类型别名
-//! - [`State`] - 自动机状态定义
-//! - [`StateSet`] - 状态集合类型别名
+//! 词法分析自动机的**状态层**基础类型（面向状态转移函数 / DFA）：
+//! - [`StateId`] - 状态标识符
+//! - [`StateSet`] - 状态集合（`BTreeSet`，迭代序确定，供子集法复现）
+//! - [`State`] - 转移函数的状态（携带接受信息）
 //! - [`StateGenerator`] - 状态 ID 生成器
+//!
+//! # 与 NFA 层的关系
+//!
+//! NFA 层（[`crate::nfa`]）用 `Vec<NFAState>` 表达图节点、用独立的
+//! `accepting` 向量记录接受态；本模块的 `State`/`StateGenerator` 为
+//! 子集法构造 DFA 预留——DFA 的一个状态对应“NFA 状态集合”（转移
+//! 函数的目标），接受信息单点存放在 [`State::token_kind`]。两层各自
+//! 单点定义接受概念，不共享结构。
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -15,74 +23,34 @@ use ast::token::TokenKind;
 
 /// 状态标识符
 ///
-/// 使用简单的 `usize` 作为状态标识符，提供以下优势：
-/// - 零成本抽象，无额外内存开销
-/// - 可以直接作为数组索引
-/// - 简单直观，易于调试
-///
-/// 未来如果需要区分不同来源的状态（如组合多个 NFA），
-/// 可以轻松替换为结构体类型，而不影响使用方式。
+/// 零成本抽象：可直接作数组索引，无额外内存开销。
 pub type StateId = usize;
 
 // ==================== 状态集合 ====================
 
 /// 状态集合
 ///
-/// 使用 `BTreeSet<StateId>` 作为状态集合，提供以下优势：
-/// - 自动排序，保证遍历顺序的确定性
-/// - 可以直接比较两个集合是否相等
-/// - 可以直接作为 HashMap 的键（用于 DFA 状态去重）
-/// - 支持高效的集合操作（并、交、差）
-/// - 调试友好，输出有序
-///
-/// 对于词法分析器的状态集合（通常几十到几百个状态），
-/// BTreeSet 的性能足够好。如果未来需要优化，可以：
-/// - 替换为 `HashSet<StateId>`（更快但无序）
-/// - 替换为 `BitSet`（更节省内存，但需要预知最大状态数）
-/// - 定义 `StateSet` trait 来抽象集合行为
+/// `BTreeSet` 保证迭代序确定（子集法构造可复现），可直接比较相等、
+/// 直接作为 HashMap 的键。
 pub type StateSet = BTreeSet<StateId>;
 
 // ==================== 状态定义 ====================
 
-/// 自动机状态
+/// 转移函数的状态：携带接受信息
 ///
-/// 表示 NFA 或 DFA 中的一个状态，包含状态 ID 和关联的 Token 类型。
+/// - 接受状态：`token_kind` 为 `Some`，自动机在此产生对应 Token
+/// - 非接受状态：`token_kind` 为 `None`
 ///
-/// # 字段说明
+/// # 示例
 ///
-/// - `id` - 状态的唯一标识符
-/// - `token_kind` - 如果是接受状态，存储对应的 Token 类型；否则为 None
-///
-/// # 设计考量
-///
-/// 采用简单直接的结构体设计，而不是复杂的状态管理系统：
-/// - 信息集中，访问 Token 类型只需一次查找
-/// - 直观易懂，符合自动机的语义模型
-/// - 内存占用可接受（大部分状态是接受状态，TokenKind 是 Copy 类型）
-///
-/// # 未来扩展点
-///
-/// 如果需要添加更多状态属性，可以轻松扩展：
-///
-/// ```ignore
-/// pub struct State {
-///     pub id: StateId,
-///     pub token_kind: Option<TokenKind>,
-///     // 未来可能的扩展：
-///     // pub fallback_state: Option<StateId>,  // 回退状态（用于错误恢复）
-///     // pub name: Option<String>,              // 调试用的状态名称
-///     // pub is_dead: bool,                     // 死状态标记（用于 DFA 最小化）
-/// }
 /// ```
+/// use ast::token::TokenKind;
+/// use lex::state::State;
 ///
-/// # 性能优化可能性
-///
-/// 如果未来遇到性能瓶颈，可以在不改变使用方式的前提下进行内部优化：
-/// - 使用位掩码打包 `is_accepting` 和 `token_kind`
-/// - 将状态信息存储在分离的数组中（SoA 布局）
-/// - 使用 `#[repr(C)]` 或 `#[repr(packed)]` 控制内存布局
-///
-/// 这些优化对外部消费者是完全透明的，依然可以通过 `state.is_accepting()` 等方法访问信息。
+/// let state = State::accepting(1, TokenKind::Identifier);
+/// assert!(state.is_accepting());
+/// assert_eq!(state.token_kind(), Some(&TokenKind::Identifier));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     /// 状态 ID
@@ -94,13 +62,11 @@ pub struct State {
 impl State {
     /// 创建新的非接受状态
     ///
-    /// # 参数
-    ///
-    /// - `id` - 状态 ID
-    ///
     /// # 示例
     ///
-    /// ```ignore
+    /// ```
+    /// use lex::state::State;
+    ///
     /// let state = State::new(0);
     /// assert_eq!(state.id, 0);
     /// assert!(!state.is_accepting());
@@ -114,18 +80,14 @@ impl State {
 
     /// 创建接受状态
     ///
-    /// # 参数
-    ///
-    /// - `id` - 状态 ID
-    /// - `token_kind` - 对应的 Token 类型
-    ///
     /// # 示例
     ///
-    /// ```ignore
+    /// ```
+    /// use ast::token::TokenKind;
+    /// use lex::state::State;
+    ///
     /// let state = State::accepting(1, TokenKind::Identifier);
-    /// assert_eq!(state.id, 1);
     /// assert!(state.is_accepting());
-    /// assert_eq!(state.token_kind(), Some(&TokenKind::Identifier));
     /// ```
     pub fn accepting(id: StateId, token_kind: TokenKind) -> Self {
         Self {
@@ -135,43 +97,26 @@ impl State {
     }
 
     /// 检查是否为接受状态
-    ///
-    /// 接受状态表示自动机在此状态可以成功匹配，并产生对应的 Token。
-    ///
-    /// # 示例
-    ///
-    /// ```ignore
-    /// let normal = State::new(0);
-    /// assert!(!normal.is_accepting());
-    ///
-    /// let accepting = State::accepting(1, TokenKind::Identifier);
-    /// assert!(accepting.is_accepting());
-    /// ```
     pub fn is_accepting(&self) -> bool {
         self.token_kind.is_some()
     }
 
     /// 获取 Token 类型
     ///
-    /// 如果是接受状态，返回对应的 Token 类型；否则返回 None。
-    ///
     /// # 示例
     ///
-    /// ```ignore
-    /// let state = State::accepting(0, TokenKind::Integer);
-    /// assert_eq!(state.token_kind(), Some(&TokenKind::Integer));
+    /// ```
+    /// use ast::token::TokenKind;
+    /// use lex::state::State;
+    ///
+    /// let state = State::accepting(0, TokenKind::Identifier);
+    /// assert_eq!(state.token_kind(), Some(&TokenKind::Identifier));
     /// ```
     pub fn token_kind(&self) -> Option<&TokenKind> {
         self.token_kind.as_ref()
     }
 
-    /// 设置 Token 类型
-    ///
-    /// 将状态转换为接受状态，或更新接受状态的 Token 类型。
-    ///
-    /// # 参数
-    ///
-    /// - `token_kind` - 要设置的 Token 类型（None 表示非接受状态）
+    /// 设置 Token 类型（None 表示转为非接受状态）
     pub fn set_token_kind(&mut self, token_kind: Option<TokenKind>) {
         self.token_kind = token_kind;
     }
@@ -189,24 +134,20 @@ impl fmt::Display for State {
 
 // ==================== 状态生成器 ====================
 
-/// 状态 ID 生成器
+/// 状态 ID 生成器：递增计数器
 ///
-/// 用于自动生成唯一的状态 ID。采用简单的递增计数器设计。
+/// 编译器短期运行无需 ID 重用，单调递增即可；并发构建时按线程划分
+/// 独立 ID 段（`with_start` 偏移）即可，无需加锁。
 ///
-/// # 设计考量
+/// # 示例
 ///
-/// 使用全局计数器而不是 ID 池的原因：
-/// - 编译器是短期运行的，不需要 ID 重用
-/// - 简单高效，保证单调递增
-/// - 避免了 ID 池的额外内存开销
+/// ```
+/// use lex::state::StateGenerator;
 ///
-/// # 多线程考虑
-///
-/// 当前实现不是线程安全的。如果未来需要并发构建自动机，
-/// 可以：
-/// - 使用 `AtomicUsize` 替换 `usize`
-/// - 每个线程使用独立的生成器，在组合时添加偏移量
-/// - 使用 `Arc<Mutex<StateGenerator>>` 加锁
+/// let mut generator = StateGenerator::new();
+/// assert_eq!(generator.next(), 0);
+/// assert_eq!(generator.next(), 1);
+/// ```
 pub struct StateGenerator {
     /// 下一个可用的状态 ID
     next_id: StateId,
@@ -220,51 +161,26 @@ impl Default for StateGenerator {
 
 impl StateGenerator {
     /// 创建新的状态生成器，从 0 开始
-    ///
-    /// # 示例
-    ///
-    /// ```ignore
-    /// let mut gen = StateGenerator::new();
-    /// assert_eq!(gen.next(), 0);
-    /// assert_eq!(gen.next(), 1);
-    /// ```
     pub fn new() -> Self {
         Self { next_id: 0 }
     }
 
-    /// 创建新的状态生成器，从指定 ID 开始
-    ///
-    /// 这个方法在组合多个 NFA 时很有用，可以确保不同来源的 NFA 使用不同的 ID 范围。
-    ///
-    /// # 参数
-    ///
-    /// - `start` - 起始状态 ID
+    /// 创建新的状态生成器，从指定 ID 开始（组合多个来源时划分 ID 段）
     ///
     /// # 示例
     ///
-    /// ```ignore
-    /// let mut gen = StateGenerator::with_start(100);
-    /// assert_eq!(gen.next(), 100);
-    /// assert_eq!(gen.next(), 101);
+    /// ```
+    /// use lex::state::StateGenerator;
+    ///
+    /// let mut generator = StateGenerator::with_start(100);
+    /// assert_eq!(generator.next(), 100);
+    /// assert_eq!(generator.next(), 101);
     /// ```
     pub fn with_start(start: StateId) -> Self {
         Self { next_id: start }
     }
 
     /// 生成下一个状态 ID
-    ///
-    /// # 返回
-    ///
-    /// 新的状态 ID
-    ///
-    /// # 示例
-    ///
-    /// ```ignore
-    /// let mut gen = StateGenerator::new();
-    /// let id1 = gen.next();
-    /// let id2 = gen.next();
-    /// assert!(id1 < id2);
-    /// ```
     pub fn next(&mut self) -> StateId {
         let id = self.next_id;
         self.next_id += 1;
@@ -273,37 +189,27 @@ impl StateGenerator {
 
     /// 查看下一个将要生成的状态 ID（不生成）
     ///
-    /// # 返回
-    ///
-    /// 下一个状态 ID
-    ///
     /// # 示例
     ///
-    /// ```ignore
-    /// let gen = StateGenerator::new();
-    /// assert_eq!(gen.peek(), 0);
-    /// assert_eq!(gen.peek(), 0); // 不改变状态
+    /// ```
+    /// use lex::state::StateGenerator;
+    ///
+    /// let generator = StateGenerator::new();
+    /// assert_eq!(generator.peek(), 0);
     /// ```
     pub fn peek(&self) -> StateId {
         self.next_id
     }
 
-    /// 批量生成多个状态 ID
-    ///
-    /// # 参数
-    ///
-    /// - `count` - 要生成的状态数量
-    ///
-    /// # 返回
-    ///
-    /// 状态 ID 的向量
+    /// 批量生成多个状态 ID，返回连续 ID 向量
     ///
     /// # 示例
     ///
-    /// ```ignore
-    /// let mut gen = StateGenerator::new();
-    /// let ids = gen.next_batch(3);
-    /// assert_eq!(ids, vec![0, 1, 2]);
+    /// ```
+    /// use lex::state::StateGenerator;
+    ///
+    /// let mut generator = StateGenerator::new();
+    /// assert_eq!(generator.next_batch(3), vec![0, 1, 2]);
     /// ```
     pub fn next_batch(&mut self, count: usize) -> Vec<StateId> {
         let start = self.next_id;
@@ -311,67 +217,10 @@ impl StateGenerator {
         (start..self.next_id).collect()
     }
 
-    /// 重置生成器到指定状态
-    ///
-    /// # 警告
-    ///
-    /// 这个方法可能会导致 ID 重复，请谨慎使用。
-    ///
-    /// # 参数
-    ///
-    /// - `id` - 重置到的状态 ID
+    /// 重置生成器到指定 ID（注意：可能导致 ID 重复）
     pub fn reset(&mut self, id: StateId) {
         self.next_id = id;
     }
-}
-
-// ==================== 辅助函数 ====================
-
-/// 创建包含单个状态的状态集合
-///
-/// # 参数
-///
-/// - `id` - 状态 ID
-///
-/// # 返回
-///
-/// 包含该状态的状态集合
-///
-/// # 示例
-///
-/// ```ignore
-/// let set = state_set!(0);
-/// assert!(set.contains(&0));
-/// assert!(!set.contains(&1));
-/// ```
-#[macro_export]
-macro_rules! state_set {
-    ($($id:expr),+ $(,)?) => {{
-        let mut set = $crate::state::StateSet::new();
-        $(
-            set.insert($id);
-        )+
-        set
-    }};
-}
-
-/// 创建空的状态集合
-///
-/// # 返回
-///
-/// 空的状态集合
-///
-/// # 示例
-///
-/// ```ignore
-/// let set = empty_state_set!();
-/// assert!(set.is_empty());
-/// ```
-#[macro_export]
-macro_rules! empty_state_set {
-    () => {{
-        $crate::state::StateSet::new()
-    }};
 }
 
 // ==================== 测试 ====================
@@ -401,9 +250,9 @@ mod tests {
         let mut state = State::new(0);
         assert!(!state.is_accepting());
 
-        state.set_token_kind(Some(TokenKind::integer()));
+        state.set_token_kind(Some(TokenKind::Identifier));
         assert!(state.is_accepting());
-        assert_eq!(state.token_kind(), Some(&TokenKind::integer()));
+        assert_eq!(state.token_kind(), Some(&TokenKind::Identifier));
 
         state.set_token_kind(None);
         assert!(!state.is_accepting());
@@ -419,12 +268,19 @@ mod tests {
     }
 
     #[test]
-    fn test_state_generator_new() {
+    fn test_state_generator() {
         let mut generator = StateGenerator::new();
         assert_eq!(generator.peek(), 0);
         assert_eq!(generator.next(), 0);
         assert_eq!(generator.peek(), 1);
         assert_eq!(generator.next(), 1);
+
+        assert_eq!(generator.next_batch(3), vec![2, 3, 4]);
+        assert_eq!(generator.peek(), 5);
+
+        generator.reset(10);
+        assert_eq!(generator.next(), 10);
+        assert_eq!(generator.next(), 11);
     }
 
     #[test]
@@ -436,58 +292,18 @@ mod tests {
     }
 
     #[test]
-    fn test_state_generator_next_batch() {
-        let mut generator = StateGenerator::new();
-        let ids = generator.next_batch(3);
-        assert_eq!(ids, vec![0, 1, 2]);
-        assert_eq!(generator.peek(), 3);
-    }
-
-    #[test]
-    fn test_state_generator_reset() {
-        let mut generator = StateGenerator::new();
-        assert_eq!(generator.next(), 0);
-        assert_eq!(generator.next(), 1);
-
-        generator.reset(10);
-        assert_eq!(generator.next(), 10);
-        assert_eq!(generator.next(), 11);
-    }
-
-    #[test]
-    fn test_state_set_macro() {
-        let set = state_set!(0, 2, 1);
-        assert_eq!(set.len(), 3);
-        assert!(set.contains(&0));
-        assert!(set.contains(&1));
-        assert!(set.contains(&2));
-        assert!(!set.contains(&3));
-    }
-
-    #[test]
-    fn test_empty_state_set_macro() {
-        let set = empty_state_set!();
-        assert!(set.is_empty());
-    }
-
-    #[test]
     fn test_state_set_operations() {
-        let set1 = state_set!(0, 1, 2);
-        let set2 = state_set!(2, 3, 4);
+        let set1: StateSet = BTreeSet::from([0, 1, 2]);
+        let set2: StateSet = BTreeSet::from([2, 3, 4]);
 
-        // 并集
-        let union: StateSet = set1.union(&set2).cloned().collect();
+        // 并集/交集/差集走 std 迭代器
+        let union: StateSet = set1.union(&set2).copied().collect();
         assert_eq!(union.len(), 5);
 
-        // 交集
-        let intersection: StateSet = set1.intersection(&set2).cloned().collect();
-        assert_eq!(intersection.len(), 1);
-        assert!(intersection.contains(&2));
+        let intersection: StateSet = set1.intersection(&set2).copied().collect();
+        assert_eq!(intersection, BTreeSet::from([2]));
 
-        // 差集
-        let difference: StateSet = set1.difference(&set2).cloned().collect();
-        assert_eq!(difference.len(), 2);
-        assert!(difference.contains(&0));
-        assert!(difference.contains(&1));
+        let difference: StateSet = set1.difference(&set2).copied().collect();
+        assert_eq!(difference, BTreeSet::from([0, 1]));
     }
 }

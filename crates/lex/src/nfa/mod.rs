@@ -10,20 +10,18 @@
 //! - **`compiler`** - Thompson 构造算法，将 HIR 编译为 NFA
 //! - **`mod`** (本模块) - NFA 对外接口，epsilon_closure、match_prefix、from_hir
 
-use std::collections::HashMap;
 use std::collections::VecDeque;
 
 pub mod edge;
 pub mod state;
 pub mod builder;
-pub mod compiler;
 
 pub use edge::Edge;
 pub use state::NFAState;
-pub use builder::Builder;
-pub use compiler::Compiler;
+pub use builder::{Builder, Fragment};
 
 use crate::regex::hir::Hir;
+use crate::regex::optimize::Optimizer;
 use crate::state::{StateId, StateSet};
 use ast::token::TokenKind;
 
@@ -32,99 +30,63 @@ use ast::token::TokenKind;
 pub struct NFA {
     states: Vec<NFAState>,
     start_state: StateId,
-    accept_states: HashMap<StateId, TokenKind>,
+    /// 接受态表：索引即 StateId（稠密编号配稠密向量，迭代序 = 状态分配序）
+    accepting: Vec<Option<TokenKind>>,
 }
 
 impl NFA {
     pub fn new(
         start_state: StateId,
         states: Vec<NFAState>,
-        accept_states: HashMap<StateId, TokenKind>,
+        accepting: Vec<Option<TokenKind>>,
     ) -> Self {
         Self {
             states,
             start_state,
-            accept_states,
+            accepting,
         }
     }
 
-    /// 从 HIR 构建 NFA（使用 Thompson 构造）
+    /// 从 HIR 构建 NFA（Thompson 构造；内部先跑优化器——优化的唯一入口）
     pub fn from_hir(hir: &Hir, token_kind: TokenKind) -> Self {
-        let mut compiler = Compiler::new();
-        let frag = compiler.compile_hir(hir);
+        let (hir, _) = Optimizer::new().optimize(hir);
 
-        let builder = compiler.into_builder();
-        let mut accept_states = HashMap::new();
-        accept_states.insert(frag.end, token_kind);
+        let mut builder = Builder::new();
+        let frag = builder.compile(&hir);
+
+        let mut accepting = vec![None; builder.state_count()];
+        accepting[frag.end] = Some(token_kind);
 
         NFA {
             states: builder.into_states(),
             start_state: frag.start,
-            accept_states,
+            accepting,
         }
     }
 
     /// 从多个 HIR 规则构建组合 NFA
+    ///
+    /// 单 Builder 编译：所有规则共享同一状态编号空间（计数器恒驻
+    /// Builder），全局 start 用 epsilon 连到各规则片段，无需偏移与拷贝。
     pub fn from_hir_multi(rules: impl IntoIterator<Item = (Hir, TokenKind)>) -> Self {
-        let mut global_builder = Builder::new();
-        let global_start = global_builder.add_state();
+        let mut builder = Builder::new();
+        let global_start = builder.add_state();
+        let mut accepting = vec![None];
 
-        // Phase 1: compile each rule independently
-        let mut sub_builders: Vec<(Builder, Fragment, TokenKind)> = Vec::new();
-        for (hir, tk) in rules {
-            let mut compiler = Compiler::new();
-            let frag = compiler.compile_hir(&hir);
-            sub_builders.push((compiler.into_builder(), frag, tk));
+        for (hir, token_kind) in rules {
+            let (hir, _) = Optimizer::new().optimize(&hir);
+            let frag = builder.compile(&hir);
+
+            builder.add_epsilon(global_start, frag.start);
+            accepting.resize(builder.state_count(), None);
+            accepting[frag.end] = Some(token_kind);
         }
 
-        // Phase 2: calculate offsets for each sub-builder
-        let mut offsets: Vec<usize> = Vec::new();
-        let mut current_offset = global_builder.state_count();
-        for (builder, _frag, _tk) in &sub_builders {
-            offsets.push(current_offset);
-            current_offset += builder.state_count();
-        }
-
-        // Phase 3: merge all sub-states with adjusted transitions
-        let mut accept_states = HashMap::new();
-        for (i, (builder, frag, tk)) in sub_builders.into_iter().enumerate() {
-            let offset = offsets[i];
-            let states = builder.into_states();
-
-            // 3a: copy states to global builder
-            for _state in &states {
-                global_builder.add_state();
-            }
-
-            // 3b: re-add transitions with offset adjustment
-            for state in &states {
-                let adjusted_from = offset + state.id;
-
-                for &eps_target in &state.epsilons {
-                    global_builder.add_epsilon(adjusted_from, offset + eps_target);
-                }
-
-                for edge in &state.edges {
-                    global_builder.add_edge(
-                        adjusted_from,
-                        edge.trans.clone(),
-                        offset + edge.target,
-                    );
-                }
-            }
-
-            // 3c: epsilon from global start to sub-NFA start
-            global_builder.add_epsilon(global_start, offset + frag.start);
-
-            // 3d: record accept state
-            accept_states.insert(offset + frag.end, tk);
-        }
-
-        let states = global_builder.into_states();
+        let states = builder.into_states();
         NFA {
             states,
             start_state: global_start,
-            accept_states,
+            accepting,
         }
     }
 
@@ -146,16 +108,16 @@ impl NFA {
         &self.states
     }
 
-    pub fn accept_states(&self) -> &HashMap<StateId, TokenKind> {
-        &self.accept_states
+    pub fn accepting(&self) -> &[Option<TokenKind>] {
+        &self.accepting
     }
 
     pub fn is_accepting(&self, id: StateId) -> bool {
-        self.accept_states.contains_key(&id)
+        self.accepting[id].is_some()
     }
 
     pub fn token_kind(&self, id: StateId) -> Option<TokenKind> {
-        self.accept_states.get(&id).copied()
+        self.accepting[id]
     }
 
     // ==================== Epsilon closure ====================
@@ -242,9 +204,6 @@ impl NFA {
         last_accept
     }
 }
-
-/// NFA fragment used during compilation (re-exported from compiler)
-pub use compiler::Fragment;
 
 // ==================== Tests ====================
 

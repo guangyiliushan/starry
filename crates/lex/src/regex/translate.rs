@@ -179,8 +179,13 @@ impl Translator {
         Hir::choice(translated)
     }
 
-    /// 翻译重复
+    /// 翻译重复（重复规范化的唯一入口）
     fn translate_repeat(&mut self, expr: &Ast, min: u32, max: Option<u32>) -> Hir {
+        // {0,0} → Empty（短路，不展开子树）
+        if min == 0 && max == Some(0) {
+            return Hir::Empty;
+        }
+
         let hir = self.translate(expr);
         
         // 优化：展开小次数的精确重复为序列
@@ -284,6 +289,14 @@ mod tests {
         let hir = translator.translate(&ast);
         
         assert_eq!(hir, Hir::zero_or_one(Hir::literal('a')));
+    }
+
+    #[test]
+    fn test_translate_repeat_zero() {
+        let ast = parse("a{0}").unwrap();
+        let hir = Translator::new().translate(&ast);
+
+        assert_eq!(hir, Hir::Empty);
     }
 
     #[test]

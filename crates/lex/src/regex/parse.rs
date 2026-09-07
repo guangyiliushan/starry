@@ -336,17 +336,13 @@ impl Parser {
     /// 解析原子（atom）
     ///
     /// 语法：literal | char_class | '(' regex ')' | '(?' flags ')' | '\' escaped_char
+    ///
+    /// `'|'` 与 `')'` 在 `is_end_of_sequence` 处已被挡下，不会进入此函数。
     fn parse_atom(&mut self) -> Result<Ast, ParseError> {
         match self.peek() {
             Some('(') => self.parse_group(),
             Some('[') => self.parse_char_class(),
             Some('\\') => self.parse_escape(),
-            Some('|') => Ok(Ast::Empty),
-            Some(')') => Err(ParseError::UnexpectedChar {
-                found: ')',
-                expected: "expression",
-                position: self.pos,
-            }),
             Some(c) => {
                 self.bump();
                 Ok(Ast::Literal(c))
@@ -1002,5 +998,21 @@ mod tests {
             parse("[z-a]"),
             Err(ParseError::InvalidRange { start: 'z', end: 'a', .. })
         ));
+    }
+
+    #[test]
+    fn test_top_level_close_paren_and_empty_alternative() {
+        // 顶层 ')' 由 parse() 的 EOF 检查报错（parse_atom 不再携带不可达分支）
+        assert!(matches!(
+            parse(")"),
+            Err(ParseError::UnexpectedChar { found: ')', .. })
+        ));
+
+        // `(a|)` → Choice([a, Empty])：空分支是合法的空串匹配
+        let ast = parse("(a|)").unwrap();
+        assert_eq!(
+            ast,
+            Ast::group(Ast::choice(vec![Ast::literal('a'), Ast::Empty]))
+        );
     }
 }

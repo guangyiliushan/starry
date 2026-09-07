@@ -321,16 +321,18 @@ pub fn count(ast: &Ast) -> usize {
 /// ```
 pub fn any<F>(ast: &Ast, predicate: F) -> bool
 where
-    F: Fn(&Ast) -> bool,
+    F: FnMut(&Ast) -> bool,
 {
-    let mut result = false;
-    visit(ast, |node| {
+    // 独立迭代实现：命中即短路返回，不遍历剩余节点
+    let mut predicate = predicate;
+    let mut stack = vec![ast];
+    while let Some(node) = stack.pop() {
         if predicate(node) {
-            result = true;
+            return true;
         }
-        Ok(())
-    }).ok();
-    result
+        stack.extend(node.children().into_iter().rev());
+    }
+    false
 }
 
 /// 检查 AST 的所有节点是否都满足条件
@@ -359,16 +361,18 @@ where
 /// ```
 pub fn all<F>(ast: &Ast, predicate: F) -> bool
 where
-    F: Fn(&Ast) -> bool,
+    F: FnMut(&Ast) -> bool,
 {
-    let mut result = true;
-    visit(ast, |node| {
+    // 对偶实现：任一节点不满足即短路返回 false
+    let mut predicate = predicate;
+    let mut stack = vec![ast];
+    while let Some(node) = stack.pop() {
         if !predicate(node) {
-            result = false;
+            return false;
         }
-        Ok(())
-    }).ok();
-    result
+        stack.extend(node.children().into_iter().rev());
+    }
+    true
 }
 
 // ==================== 测试 ====================
