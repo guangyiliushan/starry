@@ -1,0 +1,94 @@
+# Starry v0.3 lexical source of truth.
+# Format: <kind> <lexeme> <rust-variant> <grammar-slot>
+# Only HARD keywords are lexer-reserved. MODIFIER and SLOT words remain
+# identifiers lexically and are classified by the parser in grammar slots.
+
+# 39 globally reserved keywords.
+hard package Package global
+hard import Import global
+hard module Module global
+hard extern Extern global
+hard val Val global
+hard var Var global
+hard fun Fun global
+hard type Type global
+hard class Class global
+hard struct Struct global
+hard enum Enum global
+hard union Union global
+hard trait Trait global
+hard if If global
+hard else Else global
+hard when When global
+hard for For global
+hard while While global
+hard loop Loop global
+hard break Break global
+hard continue Continue global
+hard return Return global
+hard defer Defer global
+hard async Async global
+hard await Await global
+hard true True global
+hard false False global
+hard null Null global
+hard self Self_ global
+hard super Super global
+hard Self SelfType global
+hard unsafe Unsafe global
+hard dyn Dyn global
+hard as As global
+hard is Is global
+hard in In global
+hard by By global
+hard where Where global
+hard mut Mut global
+
+# 14 modifier words, recognized only in a modifier list.
+modifier public Public modifier
+modifier private Private modifier
+modifier protected Protected modifier
+modifier internal Internal modifier
+modifier open Open modifier
+modifier abstract Abstract modifier
+modifier sealed Sealed modifier
+modifier override Override modifier
+modifier const Const modifier
+modifier static Static modifier
+modifier inline Inline modifier
+modifier operator OperatorWord modifier
+modifier infix Infix modifier
+modifier vararg Vararg modifier
+
+# 31 slot words, recognized only in their named parser slot.
+slot actor Actor declaration_or_spawn
+slot aspect Aspect declaration
+slot provide Provide declaration
+slot impl Impl declaration
+slot macro Macro declaration_or_call
+slot comptime Comptime expression_or_block
+slot spawn Spawn expression
+slot detached Detached after_spawn
+slot concurrent Concurrent expression
+slot thread Thread after_spawn
+slot fiber Fiber after_spawn
+slot process Process after_spawn
+slot namespace Namespace extern_cpp
+slot grow Grow statement
+slot bits Bits after_grow_capacity
+slot it It omitted_lambda_parameter
+slot move Move lambda_capture
+slot before Before aspect_advice
+slot after After aspect_advice
+slot around Around aspect_advice
+slot proceed Proceed around_advice
+slot singleton Singleton provider_lifetime
+slot scoped Scoped provider_lifetime
+slot transient Transient provider_lifetime
+slot bind Bind provider_binding
+slot to To provider_binding
+slot init Init class_initializer
+slot get Get accessor
+slot set Set accessor
+slot out Out type_variance
+slot let Let condition_binding
