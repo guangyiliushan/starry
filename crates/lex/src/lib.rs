@@ -15,6 +15,7 @@
 
 pub mod dfa;
 pub mod display;
+pub mod grammar;
 pub mod nfa;
 pub mod regex;
 pub mod state;
@@ -22,6 +23,7 @@ pub mod transition;
 
 pub use dfa::{DfaError, DFA};
 pub use display::{write_escaped_char, write_escaped_str};
+pub use grammar::{NonTerminalId, Production, RegularGrammar, SymbolId};
 pub use nfa::{NFA, Edge, NFAState, Builder, Fragment};
 pub use regex::{Ast, Hir, Parser, ParseError, Flags};
 pub use state::{State, StateGenerator, StateId, StateSet};
