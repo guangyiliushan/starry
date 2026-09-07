@@ -22,36 +22,30 @@ pub use operator::OperatorKind;
 
 use std::fmt;
 
-/// 源代码位置信息
+/// 源码字节区间（`end` exclusive；`end - start` = lexeme 字节数）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
-    /// 行号（从 1 开始）
-    pub line: u32,
-    /// 列号（从 1 开始）
-    pub column: u32,
+    /// 起始字节偏移（含）
+    pub start: u32,
+    /// 结束字节偏移（不含）
+    pub end: u32,
 }
 
 impl Span {
-    /// 创建新的位置信息
-    pub fn new(line: u32, column: u32) -> Self {
-        Self { line, column }
-    }
-
-    /// 创建起始位置（第 1 行第 1 列）
-    pub fn start() -> Self {
-        Self { line: 1, column: 1 }
+    /// 创建字节区间
+    ///
+    /// # Panics (debug)
+    ///
+    /// `start > end` 时断言失败。
+    pub fn new(start: u32, end: u32) -> Self {
+        debug_assert!(start <= end);
+        Self { start, end }
     }
 }
 
 impl fmt::Display for Span {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.line, self.column)
-    }
-}
-
-impl Default for Span {
-    fn default() -> Self {
-        Self::start()
+        write!(f, "{}..{}", self.start, self.end)
     }
 }
 
@@ -108,16 +102,6 @@ impl Token {
         Self::new(TokenKind::Eof, "", span)
     }
 
-    /// 获取行号
-    pub fn line(&self) -> u32 {
-        self.span.line
-    }
-
-    /// 获取列号
-    pub fn column(&self) -> u32 {
-        self.span.column
-    }
-
     /// 检查是否为指定类型的 Token
     pub fn is(&self, kind: TokenKind) -> bool {
         self.kind == kind
@@ -165,10 +149,12 @@ mod tests {
 
     #[test]
     fn test_span() {
-        let span = Span::new(10, 5);
-        assert_eq!(span.line, 10);
-        assert_eq!(span.column, 5);
-        assert_eq!(span.to_string(), "10:5");
+        let span = Span::new(10, 15);
+        assert_eq!(span.start, 10);
+        assert_eq!(span.end, 15);
+        assert_eq!(span.to_string(), "10..15");
+        // end exclusive：end - start = 字节数
+        assert_eq!(span.end - span.start, 5);
     }
 
     #[test]
@@ -192,11 +178,11 @@ mod tests {
 
     #[test]
     fn test_token_display() {
-        let span = Span::new(1, 1);
+        let span = Span::new(0, 1);
         let token = Token::identifier("x", span);
         assert_eq!(
             token.to_string(),
-            "Token { kind: identifier, lexeme: \"x\", span: 1:1 }"
+            "Token { kind: identifier, lexeme: \"x\", span: 0..1 }"
         );
     }
 }

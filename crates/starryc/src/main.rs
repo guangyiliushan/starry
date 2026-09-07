@@ -7,7 +7,10 @@
 
 use std::process::ExitCode;
 
+use ast::token::LiteralKind;
 use lex::nfa::NFA;
+use lex::display::write_escaped_str;
+use lex::lexer::Lexer;
 use lex::regex::parse::parse;
 use lex::regex::Translator;
 use lex::TokenKind;
@@ -28,12 +31,13 @@ fn main() -> ExitCode {
     match args.as_slice() {
         [cmd, pattern, input] if cmd == "match" => cmd_match(pattern, input),
         [cmd, pattern] if cmd == "dump-nfa" => cmd_dump_nfa(pattern),
+        [cmd, source] if cmd == "tokenize" => cmd_tokenize(source),
         _ => usage(),
     }
 }
 
 fn usage() -> ExitCode {
-    eprintln!("用法: starryc match <regex> <input> | starryc dump-nfa <regex>");
+    eprintln!("用法: starryc match <regex> <input> | starryc dump-nfa <regex> | starryc tokenize <source>");
     ExitCode::from(2)
 }
 
@@ -87,6 +91,35 @@ fn cmd_dump_nfa(pattern: &str) -> ExitCode {
         if let Some(kind) = kind {
             println!("accept: S{id} ({kind})");
         }
+    }
+    ExitCode::SUCCESS
+}
+
+/// 内置的 Starry 起步词法规则（ident / number）；关键字后分类
+fn build_lexer() -> Result<Lexer, lex::LexerError> {
+    Lexer::build(vec![
+        ("[a-zA-Z_][a-zA-Z0-9_]*", TokenKind::Identifier),
+        ("[0-9]+", TokenKind::Literal(LiteralKind::Integer)),
+    ])
+}
+
+fn cmd_tokenize(source: &str) -> ExitCode {
+    let lexer = match build_lexer() {
+        Ok(lexer) => lexer,
+        Err(e) => {
+            eprintln!("starryc: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // lexeme 经 escape_debug 展示（display 纪律一致）
+    for token in lexer.tokenize(source) {
+        let mut lexeme = String::new();
+        let _ = write_escaped_str(&mut lexeme, token.lexeme.as_ref()); // String 写入不失败
+        println!(
+            "{}..{}\t{}\t{}",
+            token.span.start, token.span.end, token.kind, lexeme
+        );
     }
     ExitCode::SUCCESS
 }

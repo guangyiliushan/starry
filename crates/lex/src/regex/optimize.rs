@@ -146,27 +146,16 @@ impl Optimizer {
         }
     }
 
-    /// 规则：移除选择中的空节点；单元素选择解包
+    /// 规则：单元素选择解包
+    ///
+    /// 注意：Choice 的 Empty 替代项**不可移除**——`Choice([a, ε])` 去掉
+    /// ε 会改变语言（丢失空串匹配）。Choice 不做语言改写，仅解包。
     fn eliminate_empty_choice(&mut self, choices: Vec<Hir>) -> Hir {
-        let original_len = choices.len();
-        let kept: Vec<Hir> = choices.into_iter().filter(|e| !e.is_empty()).collect();
-        let removed = original_len - kept.len();
-
-        match kept.len() {
-            0 => {
-                self.changed = true;
-                Hir::Empty
-            }
-            1 => {
-                self.changed = true;
-                kept.into_iter().next().unwrap()
-            }
-            _ => {
-                if removed > 0 {
-                    self.changed = true;
-                }
-                Hir::Choice(kept)
-            }
+        if choices.len() == 1 {
+            self.changed = true;
+            choices.into_iter().next().unwrap()
+        } else {
+            Hir::Choice(choices)
         }
     }
 
@@ -238,9 +227,10 @@ mod tests {
         let (optimized, _) = Optimizer::new().optimize(&hir);
         assert_eq!(optimized, Hir::literal('a'));
 
+        // Choice 的 Empty 替代项是语言的一部分（ε），不可移除
         let hir = Hir::choice(vec![Hir::literal('a'), Hir::Empty]);
         let (optimized, _) = Optimizer::new().optimize(&hir);
-        assert_eq!(optimized, Hir::literal('a'));
+        assert_eq!(optimized, hir);
     }
 
     #[test]

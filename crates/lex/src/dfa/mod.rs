@@ -28,7 +28,9 @@ use crate::transition::next_char;
 /// 子集构造的状态数上限（指数爆炸防线，MAX_REPEAT 的 DFA 阶段对应物）
 pub const MAX_DFA_STATES: usize = 65_536;
 
-/// 虚拟死态：最小化细化与等价检查中的 total 化哨兵，永不物化
+/// 虚拟死态：等价检查中的 total 化哨兵（测试专用，永不物化；
+/// 最小化内部以 dead_i 槽位等价实现）
+#[cfg(test)]
 pub(crate) const DEAD: StateId = u32::MAX as usize;
 
 /// 子集构造/最小化的错误

@@ -41,9 +41,11 @@ starry/
 
 ## Roadmap (textbook order)
 
-- Subset-construction DFA + Hopcroft minimization; lexer driver
-  (longest match, error recovery). The DFA phase will co-design byte
-  equivalence classes (edge labels: char vs UTF-8 byte intervals).
+- [x] Subset-construction DFA; Hopcroft / Moore / Brzozowski
+  minimization; lexer driver (longest match, keyword post-
+  classification, error recovery); regular grammar <-> NFA.
+- Byte equivalence classes (char vs UTF-8 byte intervals) and an ASCII
+  direct table (`[Option<StateId>; 128]`).
 - Recursive-descent / LR parser and the language-level AST for Starry.
 - Semantic analysis: symbol tables, scopes, type checking.
 - Intermediate representation (three-address code / SSA) and

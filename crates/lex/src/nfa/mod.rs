@@ -171,6 +171,13 @@ impl NFA {
 
     // ==================== Matching ====================
 
+    /// ε ∈ L(N)？（start 闭包含接受态）——lexer 规则的 build 期防线
+    pub fn matches_epsilon(&self) -> bool {
+        self.epsilon_closure_of(self.start_state)
+            .iter()
+            .any(|&s| self.is_accepting(s))
+    }
+
     /// 最长匹配：返回最长接受前缀的**字节长度**
     pub fn match_prefix(&self, input: &str) -> Option<usize> {
         let start_set = self.epsilon_closure_of(self.start_state);
