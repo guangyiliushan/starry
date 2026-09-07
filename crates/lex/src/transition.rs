@@ -31,6 +31,28 @@ use std::fmt;
 
 use crate::display::write_escaped_char;
 
+/// 获取下一个字符
+///
+/// 跳过代理区缺口（U+D7FF 的后继是 U+E000）；`char::MAX` 无后继返回 `None`。
+pub(crate) fn next_char(c: char) -> Option<char> {
+    match c {
+        '\u{D7FF}' => Some('\u{E000}'),
+        char::MAX => None,
+        _ => char::from_u32(c as u32 + 1),
+    }
+}
+
+/// 获取前一个字符
+///
+/// 跨代理区缺口（U+E000 的前驱是 U+D7FF）；`\0` 无前驱返回 `None`。
+pub(crate) fn prev_char(c: char) -> Option<char> {
+    match c {
+        '\u{E000}' => Some('\u{D7FF}'),
+        '\0' => None,
+        _ => char::from_u32(c as u32 - 1),
+    }
+}
+
 // ==================== 预定义字符类 ====================
 
 /// 预定义字符类
@@ -519,40 +541,28 @@ impl CharClass {
     /// assert!(non_digit.contains('a'));
     /// ```
     pub fn complement(&self) -> Self {
-        let mut result = Vec::new();
-        let mut last_end = '\0';
+        debug_assert!(self.is_normalized());
+        let mut result: Vec<(char, char)> = Vec::new();
+        let mut cursor = Some('\0');
 
         for range in &self.ranges {
-            if *range.start() > last_end {
-                result.push(last_end..=Self::prev_char(*range.start()));
+            let start = *range.start();
+            if let Some(c) = cursor {
+                if c < start {
+                    if let Some(gap_end) = prev_char(start) {
+                        result.push((c, gap_end));
+                    }
+                }
             }
-            last_end = Self::next_char(*range.end());
+            cursor = next_char(*range.end());
         }
 
-        // 添加最后一个范围到 Unicode 结束
-        if last_end <= char::MAX {
-            result.push(last_end..=char::MAX);
+        // 尾部覆盖到 Unicode 末尾
+        if let Some(c) = cursor {
+            result.push((c, char::MAX));
         }
 
-        Self { ranges: result }
-    }
-
-    /// 获取下一个字符（处理 Unicode 边界）
-    fn next_char(c: char) -> char {
-        if c == char::MAX {
-            c
-        } else {
-            char::from_u32(c as u32 + 1).unwrap_or(char::MAX)
-        }
-    }
-
-    /// 获取前一个字符（处理 Unicode 边界）
-    fn prev_char(c: char) -> char {
-        if c == '\0' {
-            c
-        } else {
-            char::from_u32(c as u32 - 1).unwrap_or('\0')
-        }
+        Self::from_ranges(result)
     }
 
     /// 迭代字符类中的所有范围
@@ -882,6 +892,29 @@ impl Transition {
         }
     }
 
+    /// 该转移匹配的全部语义区间
+    ///
+    /// 子集法的字母表原子分区与正则文法的字母表 intern 以此为输入。
+    /// 注意：若未来引入否定标志形态的转移，须先物化为补集区间，
+    /// 不能直接返回内部表示（`[^a]` 测试守卫此前提）。
+    pub fn intervals(&self) -> Vec<(char, char)> {
+        match self {
+            Transition::Epsilon => Vec::new(),
+            Transition::Char(c) => vec![(*c, *c)],
+            Transition::Range(lo, hi) => vec![(*lo, *hi)],
+            Transition::CharClass(class) => class
+                .ranges()
+                .iter()
+                .map(|r| (*r.start(), *r.end()))
+                .collect(),
+            Transition::PredefinedClass(p) => p
+                .to_ranges()
+                .into_iter()
+                .map(|r| (*r.start(), *r.end()))
+                .collect(),
+        }
+    }
+
 }
 
 impl fmt::Display for Transition {
@@ -1105,6 +1138,47 @@ mod tests {
     #[should_panic(expected = "字符区间起点不能大于终点")]
     fn test_char_class_from_ranges_rejects_inverted() {
         let _ = CharClass::from_ranges([('z', 'a')]);
+    }
+
+    #[test]
+    fn test_complement_surrogate_boundaries() {
+        // 补集不含代理区：字符域内无合法 char 存在于缺口
+        let class = CharClass::from_ranges([('\0', '\u{D7FF}')]).complement();
+        assert_eq!(class.ranges(), &['\u{E000}'..=char::MAX]);
+
+        // 全域补集为空
+        let class = CharClass::from_ranges([('\0', char::MAX)]).complement();
+        assert!(class.is_empty());
+
+        // 首字符之前无空隙
+        let class = CharClass::from_ranges([('\0', '\u{10FFFE}')]).complement();
+        assert_eq!(class.ranges(), &['\u{10FFFF}'..=char::MAX]);
+    }
+
+    #[test]
+    fn test_next_prev_char_surrogate_gap() {
+        assert_eq!(next_char('\u{D7FF}'), Some('\u{E000}'));
+        assert_eq!(prev_char('\u{E000}'), Some('\u{D7FF}'));
+        assert_eq!(next_char(char::MAX), None);
+        assert_eq!(prev_char('\0'), None);
+        assert_eq!(next_char('a'), Some('b'));
+        assert_eq!(prev_char('b'), Some('a'));
+    }
+
+    #[test]
+    fn test_transition_intervals() {
+        assert_eq!(Transition::char('a').intervals(), vec![('a', 'a')]);
+        assert_eq!(Transition::range('a', 'z').intervals(), vec![('a', 'z')]);
+        assert!(Transition::Epsilon.intervals().is_empty());
+        let class = CharClass::from_ranges([('0', '9'), ('a', 'c')]);
+        assert_eq!(
+            Transition::char_class(class).intervals(),
+            vec![('0', '9'), ('a', 'c')]
+        );
+        assert_eq!(
+            Transition::predefined_class(PredefinedClass::Digit).intervals(),
+            vec![('0', '9')]
+        );
     }
 
     // ==================== Transition 测试 ====================

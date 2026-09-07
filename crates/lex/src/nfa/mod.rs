@@ -171,33 +171,25 @@ impl NFA {
 
     // ==================== Matching ====================
 
-    /// Attempt to match a prefix of the input
-    ///
-    /// Returns the length of the longest match, or None.
-    pub fn match_prefix(&self, input: &[char]) -> Option<usize> {
+    /// 最长匹配：返回最长接受前缀的**字节长度**
+    pub fn match_prefix(&self, input: &str) -> Option<usize> {
         let start_set = self.epsilon_closure_of(self.start_state);
         let mut current = start_set;
         let mut last_accept: Option<usize> = None;
 
-        for &s in &current {
-            if self.is_accepting(s) {
-                last_accept = Some(0);
-                break;
-            }
+        if current.iter().any(|&s| self.is_accepting(s)) {
+            last_accept = Some(0);
         }
 
-        for (i, &c) in input.iter().enumerate() {
+        for (offset, c) in input.char_indices() {
             let next = self.move_on(&current, c);
             if next.is_empty() {
                 break;
             }
             current = self.epsilon_closure(&next);
 
-            for &s in &current {
-                if self.is_accepting(s) {
-                    last_accept = Some(i + 1);
-                    break;
-                }
+            if current.iter().any(|&s| self.is_accepting(s)) {
+                last_accept = Some(offset + c.len_utf8());
             }
         }
 
@@ -264,30 +256,32 @@ mod tests {
     fn test_match_prefix_literal() {
         let hir = Hir::literal('a');
         let nfa = NFA::from_hir(&hir, TokenKind::Identifier);
-        let input: Vec<char> = "a".chars().collect();
-        assert_eq!(nfa.match_prefix(&input), Some(1));
-        let bad: Vec<char> = "b".chars().collect();
-        assert_eq!(nfa.match_prefix(&bad), None);
+        assert_eq!(nfa.match_prefix("a"), Some(1));
+        assert_eq!(nfa.match_prefix("b"), None);
     }
 
     #[test]
     fn test_match_prefix_sequence() {
         let hir = Hir::sequence(vec![Hir::literal('a'), Hir::literal('b')]);
         let nfa = NFA::from_hir(&hir, TokenKind::Identifier);
-        let input: Vec<char> = "ab".chars().collect();
-        assert_eq!(nfa.match_prefix(&input), Some(2));
-        let bad: Vec<char> = "ac".chars().collect();
-        assert_eq!(nfa.match_prefix(&bad), None);
+        assert_eq!(nfa.match_prefix("ab"), Some(2));
+        assert_eq!(nfa.match_prefix("ac"), None);
     }
 
     #[test]
     fn test_match_prefix_star() {
         let hir = Hir::zero_or_more(Hir::literal('a'));
         let nfa = NFA::from_hir(&hir, TokenKind::Identifier);
-        let empty: Vec<char> = vec![];
-        assert_eq!(nfa.match_prefix(&empty), Some(0));
-        let aaa: Vec<char> = "aaa".chars().collect();
-        assert_eq!(nfa.match_prefix(&aaa), Some(3));
+        assert_eq!(nfa.match_prefix(""), Some(0));
+        assert_eq!(nfa.match_prefix("aaa"), Some(3));
+    }
+
+    #[test]
+    fn test_match_prefix_byte_length() {
+        // 字节语义：非 ASCII 按字节计（é = 2 字节）
+        let hir = Hir::literal('é');
+        let nfa = NFA::from_hir(&hir, TokenKind::Identifier);
+        assert_eq!(nfa.match_prefix("é"), Some(2));
     }
 
     #[test]

@@ -52,8 +52,7 @@ fn cmd_match(pattern: &str, input: &str) -> ExitCode {
         }
     };
 
-    let chars: Vec<char> = input.chars().collect();
-    match nfa.match_prefix(&chars) {
+    match nfa.match_prefix(input) {
         // Some(n) → stdout 打印长度；None → "no match"，空匹配(0)与不匹配不可折叠
         Some(len) => {
             println!("{len}");
@@ -91,3 +90,4 @@ fn cmd_dump_nfa(pattern: &str) -> ExitCode {
     }
     ExitCode::SUCCESS
 }
+

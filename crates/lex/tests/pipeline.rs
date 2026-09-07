@@ -10,7 +10,7 @@ fn match_len(pattern: &str, input: &str) -> Option<usize> {
     let ast = parse(pattern).unwrap();
     let hir = Translate::new().translate(&ast);
     let nfa = NFA::from_hir(&hir, TokenKind::Identifier);
-    nfa.match_prefix(&input.chars().collect::<Vec<_>>())
+    nfa.match_prefix(input)
 }
 
 #[test]
@@ -57,7 +57,7 @@ fn case_insensitive_basic() {
     assert_eq!(match_len("(?i)Z", "z"), Some(1));
     assert_eq!(match_len("(?i)Z", "Z"), Some(1));
     // 非 ASCII 不折叠；(?i)1 无 lower==upper 特判也正确
-    assert_eq!(match_len("(?i)é", "é"), Some(1));
+    assert_eq!(match_len("(?i)é", "é"), Some(2));
     assert_eq!(match_len("(?i)1", "1"), Some(1));
 }
 
@@ -96,8 +96,8 @@ fn multi_rule_longest_match_wins() {
         (hir_a, TokenKind::Eof),
     ]);
 
-    assert_eq!(nfa.match_prefix(&"ab".chars().collect::<Vec<_>>()), Some(2));
-    assert_eq!(nfa.match_prefix(&"a".chars().collect::<Vec<_>>()), Some(1));
+    assert_eq!(nfa.match_prefix("ab"), Some(2));
+    assert_eq!(nfa.match_prefix("a"), Some(1));
 }
 
 #[test]
