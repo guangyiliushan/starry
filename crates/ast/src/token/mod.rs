@@ -20,7 +20,6 @@ pub use keyword::{is_keyword, lookup_keyword, KeywordKind};
 pub use literal::LiteralKind;
 pub use operator::OperatorKind;
 
-use compact_str::CompactString;
 use std::fmt;
 
 /// 源代码位置信息
@@ -64,14 +63,14 @@ pub struct Token {
     /// Token 类型
     pub kind: TokenKind,
     /// 词素（Token 的文本内容）
-    pub lexeme: CompactString,
+    pub lexeme: Box<str>,
     /// 位置信息
     pub span: Span,
 }
 
 impl Token {
     /// 创建新的 Token
-    pub fn new(kind: TokenKind, lexeme: impl Into<CompactString>, span: Span) -> Self {
+    pub fn new(kind: TokenKind, lexeme: impl Into<Box<str>>, span: Span) -> Self {
         Self {
             kind,
             lexeme: lexeme.into(),
@@ -80,7 +79,7 @@ impl Token {
     }
 
     /// 创建标识符 Token
-    pub fn identifier(name: impl Into<CompactString>, span: Span) -> Self {
+    pub fn identifier(name: impl Into<Box<str>>, span: Span) -> Self {
         Self::new(TokenKind::Identifier, name, span)
     }
 
@@ -90,7 +89,7 @@ impl Token {
     }
 
     /// 创建字面量 Token
-    pub fn literal(kind: LiteralKind, value: impl Into<CompactString>, span: Span) -> Self {
+    pub fn literal(kind: LiteralKind, value: impl Into<Box<str>>, span: Span) -> Self {
         Self::new(TokenKind::Literal(kind), value, span)
     }
 
@@ -179,12 +178,12 @@ mod tests {
         // 标识符
         let token = Token::identifier("foo", span);
         assert!(token.is_identifier());
-        assert_eq!(token.lexeme, "foo");
+        assert_eq!(&*token.lexeme, "foo");
 
         // 关键字
         let token = Token::keyword(KeywordKind::If, span);
         assert!(token.is_keyword());
-        assert_eq!(token.lexeme, "if");
+        assert_eq!(&*token.lexeme, "if");
 
         // EOF
         let token = Token::eof(span);

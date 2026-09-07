@@ -4,9 +4,9 @@
 //!
 //! # 设计特点
 //!
-//! - **规范化**：展开重复、简化序列、合并相邻字面量
-//! - **控件标记处理**：根据标记展开字面量（如忽略大小写）
-//! - **智能构造**：自动合并相邻的字面量和字符类
+//! - **规范化**：展开重复、简化序列
+//! - **控件标记处理**：`(?i)` 按 PCRE 作用域语义展开 ASCII 字面量
+//! - **智能构造**：自动扁平化嵌套的序列和选择
 //!
 //! # 核心类型
 //!
@@ -92,6 +92,7 @@ impl Translator {
     /// ```
     /// # use lex::regex::Translate;
     /// # use lex::regex::parse;
+    /// # use lex::regex::Hir;
     ///
     /// let ast = parse("a|b").unwrap();
     /// let mut translator = Translate::new();
@@ -119,30 +120,31 @@ impl Translator {
                 Hir::zero_or_one(hir)
             }
             Ast::Repeat { expr, min, max } => self.translate_repeat(expr, *min, *max),
-            Ast::Group(expr) => self.translate(expr), // 组只影响优先级，在 HIR 中不需要
+            Ast::Group(expr) => {
+                // PCRE 语义：`(?i)` 作用到所在分组结束；出组恢复快照。
+                // 分支内设置的标记跨 `|` 后续分支继承，直到分组结束。
+                let saved = self.flags;
+                let hir = self.translate(expr);
+                self.flags = saved;
+                hir
+            }
             Ast::Flags(flags) => {
-                // 保存旧标记，应用新标记
-                let old_flags = self.flags;
-                self.flags = flags.merge(&self.flags);
-                
-                // 注意：标记后的表达式会在后续翻译中使用这些标志
-                // 这里只是记录标记，实际的翻译由其他节点处理
-                let result = Hir::Empty;
-                
-                self.flags = old_flags;
-                result
+                // 设置后持续生效（顶层不恢复），由 Group 臂负责作用域恢复
+                self.flags.case_insensitive = flags.case_insensitive;
+                Hir::Empty
             }
         }
     }
 
     /// 翻译字面量，考虑控制标记
+    ///
+    /// 仅 ASCII 字母参与忽略大小写折叠（展开为大小写并集字符类，
+    /// 单状态一次区间测试）；非 ASCII 字符不折叠。
     fn translate_literal(&self, c: char) -> Hir {
         if self.flags.case_insensitive && c.is_ascii_alphabetic() {
-            // 忽略大小写：将字面量展开为字符类
             let lower = c.to_ascii_lowercase();
             let upper = c.to_ascii_uppercase();
-            let class = CharClass::range(lower, upper);
-            Hir::Class(class)
+            Hir::Class(CharClass::from_ranges([(lower, lower), (upper, upper)]))
         } else {
             Hir::Literal(c)
         }

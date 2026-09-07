@@ -113,6 +113,8 @@ impl Optimizer {
     /// ]);
     ///
     /// let mut optimizer = Optimizer::new();
+    /// // 关闭合并以聚焦本例
+    /// optimizer.merge_literals = false;
     /// let optimized = optimizer.optimize(&hir);
     ///
     /// // 应该移除中间的 Empty

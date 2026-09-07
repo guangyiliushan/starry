@@ -9,6 +9,12 @@
 //! - **嵌套深度限制**：防止深层嵌套导致的栈溢出
 //! - **友好的错误信息**：提供详细的错误位置和原因
 //!
+//! # 语法约定
+//!
+//! - 重复计数 `{n}`/`{n,m}` 上限为 1_000，`a{}`、`a{,5}`、`a{3,x}` 均为错误
+//! - 控制标记仅支持 `(?i)` 与 `(?-i)`；`(?m)`、`(?s)` 等返回 `ParseError::InvalidFlag`
+//!   （引擎没有锚点与点号语义）
+//!
 //! # 核心类型
 //!
 //! - [`Parser`] - 解析器
@@ -24,13 +30,16 @@
 //! let ast = parse("a|b").unwrap();
 //!
 //! // 使用 Parser 进行高级控制
-//! let parser = Parser::new("[a-zA-Z][a-zA-Z0-9_]*");
+//! let mut parser = Parser::new("[a-zA-Z][a-zA-Z0-9_]*");
 //! let result = parser.parse_with_recovery();
 //! ```
 
 use std::fmt;
 use crate::regex::ast::{Ast, Flags};
 use crate::transition::{CharClass, PredefinedClass};
+
+/// 重复次数上限（与主流正则引擎同量级），在 `parse_number` 内对 min/max 统一设卡
+const MAX_REPEAT: u32 = 1_000;
 
 // ==================== 解析器 ====================
 
@@ -113,7 +122,7 @@ impl Parser {
     /// ```
     /// # use lex::regex::Parser;
     ///
-    /// let parser = Parser::new("a|b");
+    /// let mut parser = Parser::new("a|b");
     /// let ast = parser.parse().unwrap();
     /// ```
     pub fn parse(&mut self) -> Result<Ast, ParseError> {
@@ -253,14 +262,6 @@ impl Parser {
                     }
                 }
 
-                // 避免过大的重复次数
-                const MAX_REPEAT: u32 = 1000;
-                if min > MAX_REPEAT || max.map_or(false, |m| m > MAX_REPEAT) {
-                    return Err(ParseError::RepeatCountTooLarge {
-                        limit: MAX_REPEAT,
-                    });
-                }
-
                 Ok(repeat)
             }
             _ => unreachable!(),
@@ -297,30 +298,39 @@ impl Parser {
         }
     }
 
-    /// 解析数字
+    /// 解析重复计数中的数字串
+    ///
+    /// 以 `u64` 中转解析：纯数字串 `parse::<u64>` 的唯一失败模式是
+    /// `PosOverflow`（`Empty`/`InvalidDigit` 由语法层保证不可达，见下方
+    /// 空串检查），语义统一为“过大”。上限在单值上设卡，min 与 max 自动
+    /// 同受约束。
     fn parse_number(&mut self) -> Result<u32, ParseError> {
-        let mut num = 0u32;
-        let mut has_digit = false;
-
-        while let Some(c) = self.peek() {
-            if c.is_ascii_digit() {
-                has_digit = true;
-                num = num * 10 + (c as u32 - '0' as u32);
-                self.bump();
-            } else {
-                break;
-            }
+        let start = self.pos;
+        while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+            self.bump();
         }
+        let digits: String = self.input[start..self.pos].iter().collect();
 
-        if !has_digit {
+        if digits.is_empty() {
             return Err(ParseError::Expected {
                 expected: "digit".to_string(),
                 found: format!("{:?}", self.peek()),
-                position: self.pos,
+                position: start,
             });
         }
 
-        Ok(num)
+        let n: u64 = digits.parse().map_err(|_| ParseError::RepeatCountTooLarge {
+            limit: MAX_REPEAT,
+            position: start,
+        })?;
+        if n > u64::from(MAX_REPEAT) {
+            return Err(ParseError::RepeatCountTooLarge {
+                limit: MAX_REPEAT,
+                position: start,
+            });
+        }
+
+        Ok(n as u32)
     }
 
     /// 解析原子（atom）
@@ -375,56 +385,45 @@ impl Parser {
 
     /// 解析控制标记组
     ///
-    /// 语法：'(?' flags ')'
+    /// 语法：'(?' flags ')'，仅支持 `i`（忽略大小写）与 `-i`（关闭）。
+    /// `(?m)`、`(?s)` 等返回 `ParseError::InvalidFlag`：引擎没有锚点与点号语义。
     fn parse_flags_group(&mut self) -> Result<Ast, ParseError> {
-        let mut flags = Flags::new();
-
-        while let Some(c) = self.peek() {
-            match c {
-                'i' => {
-                    flags.case_insensitive = true;
+        let mut case_insensitive = false;
+        loop {
+            match self.peek() {
+                Some('i') => {
+                    case_insensitive = true;
                     self.bump();
                 }
-                'm' => {
-                    flags.multiline = true;
+                Some('-') => {
                     self.bump();
-                }
-                's' => {
-                    flags.dot_matches_newline = true;
-                    self.bump();
-                }
-                '-' => {
-                    // 取消标记
-                    self.bump();
-                    if let Some(flag) = self.peek() {
-                        match flag {
-                            'i' => flags.case_insensitive = false,
-                            'm' => flags.multiline = false,
-                            's' => flags.dot_matches_newline = false,
-                            _ => {
-                                return Err(ParseError::InvalidFlag {
-                                    flag,
-                                    message: "未知或无效的控制标记".to_string(),
-                                });
-                            }
+                    match self.peek() {
+                        Some('i') => {
+                            case_insensitive = false;
+                            self.bump();
                         }
-                        self.bump();
+                        Some(other) => {
+                            return Err(ParseError::InvalidFlag {
+                                flag: other,
+                                message: "仅支持 (?i) 与 (?-i)".to_string(),
+                            });
+                        }
+                        None => return Err(ParseError::UnclosedGroup),
                     }
                 }
-                ')' => {
+                Some(')') => {
                     self.bump();
-                    return Ok(Ast::Flags(flags));
+                    return Ok(Ast::Flags(Flags { case_insensitive }));
                 }
-                _ => {
+                Some(other) => {
                     return Err(ParseError::InvalidFlag {
-                        flag: c,
-                        message: "未知或无效的控制标记".to_string(),
+                        flag: other,
+                        message: "仅支持 (?i) 与 (?-i)".to_string(),
                     });
                 }
+                None => return Err(ParseError::UnclosedGroup),
             }
         }
-
-        Err(ParseError::UnclosedGroup)
     }
 
     /// 解析字符类
@@ -626,6 +625,7 @@ pub enum ParseError {
     /// 重复次数过大
     RepeatCountTooLarge {
         limit: u32,
+        position: usize,
     },
 
     /// 超过嵌套深度限制
@@ -664,8 +664,8 @@ impl fmt::Display for ParseError {
             ParseError::InvalidRepeatRange { min, max, message } => {
                 write!(f, "Invalid repeat count {{{},{}}}: {}", min, max, message)
             }
-            ParseError::RepeatCountTooLarge { limit } => {
-                write!(f, "Repeat count exceeds limit {}", limit)
+            ParseError::RepeatCountTooLarge { limit, position } => {
+                write!(f, "Position {}: repeat count exceeds limit {}", position + 1, limit)
             }
             ParseError::NestLimitExceeded { limit } => {
                 write!(f, "Nesting depth limit {} exceeded", limit)
@@ -735,7 +735,7 @@ pub fn parse(input: &str) -> Result<Ast, ParseError> {
 /// # 示例
 ///
 /// ```
-/// # use lex::regex::parse_with_recovery;
+/// # use lex::regex::parse::parse_with_recovery;
 ///
 /// let result = parse_with_recovery("a|b");
 /// println!("{:?}", result.ast);
@@ -932,5 +932,75 @@ mod tests {
             Ast::Literal('a'),
             Ast::Literal('b'),
         ]));
+    }
+
+    #[test]
+    fn test_repeat_count_limit() {
+        // 超过 MAX_REPEAT(1_000)：u32 溢出与天文数字统一走同一错误
+        for pattern in ["a{1001}", "a{4294967296}", "a{2,4000000000}", "a{99999999999999999999999}"] {
+            let err = parse(pattern).unwrap_err();
+            assert!(
+                matches!(err, ParseError::RepeatCountTooLarge { limit: 1_000, .. }),
+                "{pattern}"
+            );
+        }
+
+        // 边界：恰好等于上限
+        assert!(parse("a{1000}").is_ok());
+        assert!(parse("a{2,1000}").is_ok());
+    }
+
+    #[test]
+    fn test_repeat_count_syntax() {
+        assert!(matches!(
+            parse("a{2,1}"),
+            Err(ParseError::InvalidRepeatRange { min: 2, max: 1, .. })
+        ));
+        assert!(parse("a{0}").is_ok());
+        let ast = parse("a{0000005}").unwrap();
+        assert!(matches!(ast, Ast::Repeat { min: 5, max: Some(5), .. }));
+        assert!(matches!(parse("a{}"), Err(ParseError::Expected { .. })));
+        assert!(matches!(parse("a{,5}"), Err(ParseError::Expected { .. })));
+        assert!(matches!(parse("a{3,x}"), Err(ParseError::Expected { .. })));
+    }
+
+    #[test]
+    fn test_nest_limit_returns_error() {
+        let pattern = format!("{}a{}", "(".repeat(120), ")".repeat(120));
+        assert!(matches!(
+            parse(&pattern),
+            Err(ParseError::NestLimitExceeded { limit: 100 })
+        ));
+
+        // 边界内正常解析，不炸栈
+        let ok = format!("{}a{}", "(".repeat(50), ")".repeat(50));
+        assert!(parse(&ok).is_ok());
+    }
+
+    #[test]
+    fn test_parse_flags_grammar() {
+        assert!(parse("(?i)a").is_ok());
+        assert!(parse("(?-i)a").is_ok());
+        assert!(matches!(
+            parse("(?m)a"),
+            Err(ParseError::InvalidFlag { flag: 'm', .. })
+        ));
+        assert!(matches!(
+            parse("(?s)a"),
+            Err(ParseError::InvalidFlag { flag: 's', .. })
+        ));
+        assert!(matches!(
+            parse("(?x)a"),
+            Err(ParseError::InvalidFlag { flag: 'x', .. })
+        ));
+    }
+
+    #[test]
+    fn test_parse_range_out_of_order() {
+        // 反序字符区间是用户输入错误，解析期报错而非进入构造层
+        assert!(matches!(
+            parse("[z-a]"),
+            Err(ParseError::InvalidRange { start: 'z', end: 'a', .. })
+        ));
     }
 }

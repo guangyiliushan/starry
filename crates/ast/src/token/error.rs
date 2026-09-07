@@ -2,8 +2,6 @@
 
 use std::fmt;
 
-use compact_str::CompactString;
-
 /// Token 错误类型
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenError {
@@ -33,7 +31,7 @@ pub enum TokenError {
     /// 无效的数字字面量
     InvalidNumber {
         /// 错误信息
-        message: CompactString,
+        message: Box<str>,
         /// 行号
         line: u32,
         /// 列号
@@ -42,7 +40,7 @@ pub enum TokenError {
     /// 无效的转义序列
     InvalidEscapeSequence {
         /// 转义序列
-        sequence: CompactString,
+        sequence: Box<str>,
         /// 行号
         line: u32,
         /// 列号

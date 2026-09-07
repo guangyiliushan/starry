@@ -1,7 +1,6 @@
 //! 关键字类型定义和查找
 
 use std::fmt;
-use phf::phf_map;
 
 /// 关键字类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -400,140 +399,10 @@ impl KeywordKind {
     }
 }
 
-/// 关键字静态查找表
-static KEYWORDS: phf::Map<&'static str, KeywordKind> = phf_map! {
-    // 类型关键字
-    "int" => KeywordKind::Int,
-    "i4" => KeywordKind::I4,
-    "i8" => KeywordKind::I8,
-    "i16" => KeywordKind::I16,
-    "i32" => KeywordKind::I32,
-    "i64" => KeywordKind::I64,
-    "i128" => KeywordKind::I128,
-    "uint" => KeywordKind::Uint,
-    "u8" => KeywordKind::U8,
-    "u16" => KeywordKind::U16,
-    "u32" => KeywordKind::U32,
-    "u64" => KeywordKind::U64,
-    "u128" => KeywordKind::U128,
-    "float" => KeywordKind::Float,
-    "f4" => KeywordKind::F4,
-    "f8" => KeywordKind::F8,
-    "f8a" => KeywordKind::F8a,
-    "f8b" => KeywordKind::F8b,
-    "f8c" => KeywordKind::F8c,
-    "f8d" => KeywordKind::F8d,
-    "f8e" => KeywordKind::F8e,
-    "f8f" => KeywordKind::F8f,
-    "f16" => KeywordKind::F16,
-    "f32" => KeywordKind::F32,
-    "f64" => KeywordKind::F64,
-    "f128" => KeywordKind::F128,
-    "str" => KeywordKind::Str,
-    "char" => KeywordKind::Char,
-    "bool" => KeywordKind::Bool,
-
-    // 字面量关键字
-    "true" => KeywordKind::True,
-    "false" => KeywordKind::False,
-    "null" => KeywordKind::Null,
-
-    // 控制流关键字
-    "if" => KeywordKind::If,
-    "else" => KeywordKind::Else,
-    "when" => KeywordKind::When,
-    "for" => KeywordKind::For,
-    "while" => KeywordKind::While,
-    "do" => KeywordKind::Do,
-    "loop" => KeywordKind::Loop,
-    "break" => KeywordKind::Break,
-    "continue" => KeywordKind::Continue,
-    "return" => KeywordKind::Return,
-
-    // 类型操作关键字
-    "as" => KeywordKind::As,
-    "is" => KeywordKind::Is,
-    "in" => KeywordKind::In,
-
-    // 声明关键字
-    "class" => KeywordKind::Class,
-    "interface" => KeywordKind::Interface,
-    "struct" => KeywordKind::Struct,
-    "enum" => KeywordKind::Enum,
-    "union" => KeywordKind::Union,
-    "trait" => KeywordKind::Trait,
-    "fun" => KeywordKind::Fun,
-    "val" => KeywordKind::Val,
-    "var" => KeywordKind::Var,
-    "type" => KeywordKind::Type,
-    "typealias" => KeywordKind::Typealias,
-
-    // 访问修饰关键字
-    "public" => KeywordKind::Public,
-    "private" => KeywordKind::Private,
-    "protected" => KeywordKind::Protected,
-    "internal" => KeywordKind::Internal,
-    "abstract" => KeywordKind::Abstract,
-    "final" => KeywordKind::Final,
-    "open" => KeywordKind::Open,
-    "override" => KeywordKind::Override,
-
-    // 特殊修饰关键字
-    "const" => KeywordKind::Const,
-    "static" => KeywordKind::Static,
-    "async" => KeywordKind::Async,
-    "await" => KeywordKind::Await,
-    "inline" => KeywordKind::Inline,
-    "noinline" => KeywordKind::Noinline,
-    "crossinline" => KeywordKind::Crossinline,
-    "infix" => KeywordKind::Infix,
-    "operator" => KeywordKind::Operator,
-    "lateinit" => KeywordKind::Lateinit,
-    "inner" => KeywordKind::Inner,
-    "companion" => KeywordKind::Companion,
-    "data" => KeywordKind::Data,
-    "sealed" => KeywordKind::Sealed,
-    "suspend" => KeywordKind::Suspend,
-    "reified" => KeywordKind::Reified,
-    "tailrec" => KeywordKind::Tailrec,
-    "value" => KeywordKind::Value,
-    "actual" => KeywordKind::Actual,
-    "expect" => KeywordKind::Expect,
-    "annotation" => KeywordKind::Annotation,
-    "external" => KeywordKind::External,
-
-    // 类成员关键字
-    "constructor" => KeywordKind::Constructor,
-    "init" => KeywordKind::Init,
-    "get" => KeywordKind::Get,
-    "set" => KeywordKind::Set,
-    "field" => KeywordKind::Field,
-    "property" => KeywordKind::Property,
-
-    // 错误处理关键字
-    "defer" => KeywordKind::Defer,
-    "panic" => KeywordKind::Panic,
-
-    // 模块/导入关键字
-    "import" => KeywordKind::Import,
-    "extern" => KeywordKind::Extern,
-
-    // 其他关键字
-    "self" => KeywordKind::Self_,
-    "super" => KeywordKind::Super,
-    "dyn" => KeywordKind::Dyn,
-    "unsafe" => KeywordKind::Unsafe,
-    "where" => KeywordKind::Where,
-    "by" => KeywordKind::By,
-    "delegate" => KeywordKind::Delegate,
-    "this" => KeywordKind::This,
-    "typeof" => KeywordKind::Typeof,
-    "package" => KeywordKind::Package,
-    "dynamic" => KeywordKind::Dynamic,
-    "out" => KeywordKind::Out,
-};
-
 /// 查找关键字
+///
+/// `match` 字符串字面量由 rustc 降维为长度分派 + memcmp 链，
+/// 百级关键字规模下无排序不变量、无外部依赖。
 ///
 /// # Arguments
 /// * `ident` - 标识符字符串
@@ -542,13 +411,123 @@ static KEYWORDS: phf::Map<&'static str, KeywordKind> = phf_map! {
 /// 如果是关键字，返回对应的 `KeywordKind`，否则返回 `None`
 #[inline]
 pub fn lookup_keyword(ident: &str) -> Option<KeywordKind> {
-    KEYWORDS.get(ident).copied()
+    Some(match ident {
+        "int" => KeywordKind::Int,
+        "i4" => KeywordKind::I4,
+        "i8" => KeywordKind::I8,
+        "i16" => KeywordKind::I16,
+        "i32" => KeywordKind::I32,
+        "i64" => KeywordKind::I64,
+        "i128" => KeywordKind::I128,
+        "uint" => KeywordKind::Uint,
+        "u8" => KeywordKind::U8,
+        "u16" => KeywordKind::U16,
+        "u32" => KeywordKind::U32,
+        "u64" => KeywordKind::U64,
+        "u128" => KeywordKind::U128,
+        "float" => KeywordKind::Float,
+        "f4" => KeywordKind::F4,
+        "f8" => KeywordKind::F8,
+        "f8a" => KeywordKind::F8a,
+        "f8b" => KeywordKind::F8b,
+        "f8c" => KeywordKind::F8c,
+        "f8d" => KeywordKind::F8d,
+        "f8e" => KeywordKind::F8e,
+        "f8f" => KeywordKind::F8f,
+        "f16" => KeywordKind::F16,
+        "f32" => KeywordKind::F32,
+        "f64" => KeywordKind::F64,
+        "f128" => KeywordKind::F128,
+        "str" => KeywordKind::Str,
+        "char" => KeywordKind::Char,
+        "bool" => KeywordKind::Bool,
+        "true" => KeywordKind::True,
+        "false" => KeywordKind::False,
+        "null" => KeywordKind::Null,
+        "if" => KeywordKind::If,
+        "else" => KeywordKind::Else,
+        "when" => KeywordKind::When,
+        "for" => KeywordKind::For,
+        "while" => KeywordKind::While,
+        "do" => KeywordKind::Do,
+        "loop" => KeywordKind::Loop,
+        "break" => KeywordKind::Break,
+        "continue" => KeywordKind::Continue,
+        "return" => KeywordKind::Return,
+        "as" => KeywordKind::As,
+        "is" => KeywordKind::Is,
+        "in" => KeywordKind::In,
+        "class" => KeywordKind::Class,
+        "interface" => KeywordKind::Interface,
+        "struct" => KeywordKind::Struct,
+        "enum" => KeywordKind::Enum,
+        "union" => KeywordKind::Union,
+        "trait" => KeywordKind::Trait,
+        "fun" => KeywordKind::Fun,
+        "val" => KeywordKind::Val,
+        "var" => KeywordKind::Var,
+        "type" => KeywordKind::Type,
+        "typealias" => KeywordKind::Typealias,
+        "public" => KeywordKind::Public,
+        "private" => KeywordKind::Private,
+        "protected" => KeywordKind::Protected,
+        "internal" => KeywordKind::Internal,
+        "abstract" => KeywordKind::Abstract,
+        "final" => KeywordKind::Final,
+        "open" => KeywordKind::Open,
+        "override" => KeywordKind::Override,
+        "const" => KeywordKind::Const,
+        "static" => KeywordKind::Static,
+        "async" => KeywordKind::Async,
+        "await" => KeywordKind::Await,
+        "inline" => KeywordKind::Inline,
+        "noinline" => KeywordKind::Noinline,
+        "crossinline" => KeywordKind::Crossinline,
+        "infix" => KeywordKind::Infix,
+        "operator" => KeywordKind::Operator,
+        "lateinit" => KeywordKind::Lateinit,
+        "inner" => KeywordKind::Inner,
+        "companion" => KeywordKind::Companion,
+        "data" => KeywordKind::Data,
+        "sealed" => KeywordKind::Sealed,
+        "suspend" => KeywordKind::Suspend,
+        "reified" => KeywordKind::Reified,
+        "tailrec" => KeywordKind::Tailrec,
+        "value" => KeywordKind::Value,
+        "actual" => KeywordKind::Actual,
+        "expect" => KeywordKind::Expect,
+        "annotation" => KeywordKind::Annotation,
+        "external" => KeywordKind::External,
+        "constructor" => KeywordKind::Constructor,
+        "init" => KeywordKind::Init,
+        "get" => KeywordKind::Get,
+        "set" => KeywordKind::Set,
+        "field" => KeywordKind::Field,
+        "property" => KeywordKind::Property,
+        "defer" => KeywordKind::Defer,
+        "panic" => KeywordKind::Panic,
+        "import" => KeywordKind::Import,
+        "extern" => KeywordKind::Extern,
+        "self" => KeywordKind::Self_,
+        "super" => KeywordKind::Super,
+        "dyn" => KeywordKind::Dyn,
+        "unsafe" => KeywordKind::Unsafe,
+        "where" => KeywordKind::Where,
+        "by" => KeywordKind::By,
+        "delegate" => KeywordKind::Delegate,
+        "this" => KeywordKind::This,
+        "typeof" => KeywordKind::Typeof,
+        "package" => KeywordKind::Package,
+        "dynamic" => KeywordKind::Dynamic,
+        "out" => KeywordKind::Out,
+        _ => return None,
+    })
 }
 
 /// 检查字符串是否为关键字
 #[inline]
 pub fn is_keyword(ident: &str) -> bool {
-    KEYWORDS.contains_key(ident)
+    lookup_keyword(ident).is_some()
 }
 
 #[cfg(test)]

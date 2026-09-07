@@ -402,31 +402,26 @@ impl fmt::Display for Ast {
 
 /// 控制标记
 ///
-/// 用于修改正则表达式的匹配行为。
+/// 当前唯一语义化标记是忽略大小写（`(?i)`）；`(?m)`、`(?s)` 等在解析期
+/// 即被拒绝（引擎没有锚点与点号语义）。
 ///
 /// # 示例
 ///
 /// ```
 /// # use lex::regex::Flags;
-/// let flags = Flags::CASE_INSENSITIVE;
-/// assert!(flags.case_insensitive());
+/// let flags = Flags::case_insensitive();
+/// assert!(flags.is_case_insensitive());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Flags {
     /// 忽略大小写
     pub case_insensitive: bool,
-    /// 多行模式（^ 和 $ 匹配行首行尾）
-    pub multiline: bool,
-    /// 点号匹配换行符
-    pub dot_matches_newline: bool,
 }
 
 impl Default for Flags {
     fn default() -> Self {
         Self {
             case_insensitive: false,
-            multiline: false,
-            dot_matches_newline: false,
         }
     }
 }
@@ -441,35 +436,6 @@ impl Flags {
     pub const fn case_insensitive() -> Self {
         Self {
             case_insensitive: true,
-            multiline: false,
-            dot_matches_newline: false,
-        }
-    }
-
-    /// 创建多行模式标记
-    pub const fn multiline() -> Self {
-        Self {
-            case_insensitive: false,
-            multiline: true,
-            dot_matches_newline: false,
-        }
-    }
-
-    /// 创建点号匹配换行符标记
-    pub const fn dot_matches_newline() -> Self {
-        Self {
-            case_insensitive: false,
-            multiline: false,
-            dot_matches_newline: true,
-        }
-    }
-
-    /// 合并两个标记
-    pub fn merge(&self, other: &Self) -> Self {
-        Self {
-            case_insensitive: self.case_insensitive || other.case_insensitive,
-            multiline: self.multiline || other.multiline,
-            dot_matches_newline: self.dot_matches_newline || other.dot_matches_newline,
         }
     }
 
@@ -477,35 +443,14 @@ impl Flags {
     pub fn is_case_insensitive(&self) -> bool {
         self.case_insensitive
     }
-
-    /// 检查是否为多行模式
-    pub fn is_multiline(&self) -> bool {
-        self.multiline
-    }
-
-    /// 检查点号是否匹配换行符
-    pub fn is_dot_matches_newline(&self) -> bool {
-        self.dot_matches_newline
-    }
 }
 
 impl fmt::Display for Flags {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut flags = Vec::new();
         if self.case_insensitive {
-            flags.push("i");
-        }
-        if self.multiline {
-            flags.push("m");
-        }
-        if self.dot_matches_newline {
-            flags.push("s");
-        }
-
-        if flags.is_empty() {
-            write!(f, "(? )")
+            write!(f, "(?i)")
         } else {
-            write!(f, "(?{})", flags.join(""))
+            write!(f, "(? )")
         }
     }
 }
@@ -717,17 +662,9 @@ mod tests {
     fn test_flags() {
         let flags = Flags::case_insensitive();
         assert!(flags.is_case_insensitive());
-        assert!(!flags.is_multiline());
         assert_eq!(flags.to_string(), "(?i)");
-    }
 
-    #[test]
-    fn test_flags_merge() {
-        let flags1 = Flags::case_insensitive();
-        let flags2 = Flags::multiline();
-        let merged = flags1.merge(&flags2);
-        assert!(merged.is_case_insensitive());
-        assert!(merged.is_multiline());
-        assert_eq!(merged.to_string(), "(?im)");
+        assert!(!Flags::default().is_case_insensitive());
+        assert_eq!(Flags::default().to_string(), "(? )");
     }
 }

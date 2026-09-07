@@ -190,6 +190,61 @@ impl CharClass {
         }
     }
 
+    /// 从 (start, end) 区间列表创建字符类（smart constructor）
+    ///
+    /// 唯一的规范构造入口：区间按码点排序，重叠与码点相邻（`end + 1 ==
+    /// next start`）的区间合并，保证 [`CharClass::ranges`] 返回“有序、
+    /// 不重叠、不相邻”的规范化列表。注意跨代理区缺口（U+D7FF 与 U+E000
+    /// 之间没有合法字符但码点不相邻）不合并，保证 [`CharClass::len`]
+    /// 计数精确。
+    ///
+    /// # Panics (debug)
+    ///
+    /// 反序区间（`lo > hi`）属于调用方 bug，debug 构建下断言失败；
+    /// 用户输入的反序区间（如 `[z-a]`）应在解析层以 `InvalidRange` 拒绝。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// # use lex::transition::CharClass;
+    /// let class = CharClass::from_ranges([('c', 'z'), ('a', 'c'), ('0', '9')]);
+    /// assert_eq!(class.ranges(), &['0'..='9', 'a'..='z']);
+    ///
+    /// // 切片调用方需要 copied() 产出 (char, char)
+    /// let pairs: &[(char, char)] = &[('x', 'y')];
+    /// let class = CharClass::from_ranges(pairs.iter().copied());
+    /// assert!(class.contains('x'));
+    /// ```
+    pub fn from_ranges(ranges: impl IntoIterator<Item = (char, char)>) -> Self {
+        let mut sorted: Vec<(char, char)> = ranges.into_iter().collect();
+        sorted.sort_unstable();
+        debug_assert!(
+            sorted.iter().all(|(lo, hi)| lo <= hi),
+            "字符区间起点不能大于终点: {sorted:?}"
+        );
+
+        let mut ranges: Vec<RangeInclusive<char>> = Vec::with_capacity(sorted.len());
+        for (lo, hi) in sorted {
+            match ranges.last_mut() {
+                // 重叠或码点相邻 → 合并
+                Some(last) if *last.end() >= lo || *last.end() as u32 + 1 == lo as u32 => {
+                    if hi > *last.end() {
+                        *last = *last.start()..=hi;
+                    }
+                }
+                _ => ranges.push(lo..=hi),
+            }
+        }
+        Self { ranges }
+    }
+
+    /// 检查规范化不变量：有序、不重叠、码点不相邻
+    fn is_normalized(&self) -> bool {
+        self.ranges.windows(2).all(|w| {
+            *w[0].end() < *w[1].start() && *w[0].end() as u32 + 1 != *w[1].start() as u32
+        })
+    }
+
     /// 从单个字符创建字符类
     ///
     /// # 参数
@@ -205,9 +260,7 @@ impl CharClass {
     /// assert!(!single.contains('b'));
     /// ```
     pub fn single(c: char) -> Self {
-        Self {
-            ranges: vec![c..=c],
-        }
+        Self::from_ranges([(c, c)])
     }
 
     /// 从字符范围创建字符类
@@ -231,9 +284,7 @@ impl CharClass {
     /// ```
     pub fn range(start: char, end: char) -> Self {
         assert!(start <= end, "字符范围起点不能大于终点");
-        Self {
-            ranges: vec![start..=end],
-        }
+        Self::from_ranges([(start, end)])
     }
 
     /// 从多个字符创建字符类
@@ -251,11 +302,7 @@ impl CharClass {
     /// assert!(operators.contains('/'));
     /// ```
     pub fn chars(chars: &[char]) -> Self {
-        let mut class = Self::new();
-        for &c in chars {
-            class = class.union(&Self::single(c));
-        }
-        class
+        Self::from_ranges(chars.iter().copied().map(|c| (c, c)))
     }
 
     /// 从预定义类创建字符类
@@ -272,9 +319,7 @@ impl CharClass {
     /// assert!(digit.contains('5'));
     /// ```
     pub fn predefined(class: PredefinedClass) -> Self {
-        Self {
-            ranges: class.to_ranges(),
-        }
+        Self::from_ranges(class.to_ranges().into_iter().map(|r| (*r.start(), *r.end())))
     }
 
     /// 检查字符是否属于该字符类
@@ -298,6 +343,7 @@ impl CharClass {
     /// assert!(!digits.contains('a'));
     /// ```
     pub fn contains(&self, c: char) -> bool {
+        debug_assert!(self.is_normalized());
         // 使用二分查找
         self.ranges
             .binary_search_by(|range| {
@@ -337,6 +383,7 @@ impl CharClass {
     /// assert_eq!(digits.len(), 10);
     /// ```
     pub fn len(&self) -> usize {
+        debug_assert!(self.is_normalized());
         self.ranges
             .iter()
             .map(|range| (*range.end() as u32 - *range.start() as u32 + 1) as usize)
@@ -525,6 +572,7 @@ impl CharClass {
     ///
     /// 注意：返回的范围列表是规范化的（不重叠、已排序）
     pub fn ranges(&self) -> &[RangeInclusive<char>] {
+        debug_assert!(self.is_normalized());
         &self.ranges
     }
 }
@@ -1053,6 +1101,38 @@ mod tests {
         assert_eq!(CharClass::new().to_string(), "[]");
         assert_eq!(CharClass::single('a').to_string(), "[a]");
         assert_eq!(CharClass::range('a', 'z').to_string(), "[a-z]");
+    }
+
+    #[test]
+    fn test_char_class_from_ranges_sort_and_merge() {
+        let class = CharClass::from_ranges([('c', 'z'), ('a', 'c'), ('0', '9')]);
+        assert_eq!(class.ranges(), &['0'..='9', 'a'..='z']);
+
+        // 重叠合并
+        let class = CharClass::from_ranges([('a', 'g'), ('e', 'k')]);
+        assert_eq!(class.ranges(), &['a'..='k']);
+
+        // 码点相邻合并
+        let class = CharClass::from_ranges([('a', 'c'), ('d', 'f')]);
+        assert_eq!(class.ranges(), &['a'..='f']);
+
+        // 代理区缺口：码点不相邻，不合并，len() 精确
+        let class = CharClass::from_ranges([
+            ('\u{D7FF}', '\u{D7FF}'),
+            ('\u{E000}', '\u{E000}'),
+        ]);
+        assert_eq!(
+            class.ranges(),
+            &['\u{D7FF}'..='\u{D7FF}', '\u{E000}'..='\u{E000}']
+        );
+        assert_eq!(class.len(), 2);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "字符区间起点不能大于终点")]
+    fn test_char_class_from_ranges_rejects_inverted() {
+        let _ = CharClass::from_ranges([('z', 'a')]);
     }
 
     // ==================== Transition 测试 ====================

@@ -7,7 +7,6 @@
 //! - [`translate`] - AST 到 HIR 的翻译器
 //! - [`optimize`] - HIR 优化器
 //! - [`visitor`] - 迭代遍历器
-//! - [`flags`] - 控制标记支持
 //!
 //! # 架构设计
 //!
@@ -37,10 +36,9 @@ pub mod parse;
 pub mod translate;
 pub mod optimize;
 pub mod visitor;
-pub mod flags;
 
 pub use ast::{Ast, Flags};
 pub use hir::Hir;
-pub use parse::{Parser, ParseError, ParseResult};
+pub use parse::{parse, Parser, ParseError, ParseResult};
 pub use translate::{Translate, Translator};
 pub use optimize::Optimizer;

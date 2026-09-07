@@ -17,7 +17,7 @@
 //! ```
 //! use lex::regex::{Parser, Translate};
 //!
-//! let parser = Parser::new("a|b");
+//! let mut parser = Parser::new("a|b");
 //! let ast = parser.parse().unwrap();
 //!
 //! let mut translator = Translate::new();
