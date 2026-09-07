@@ -12,6 +12,8 @@
 //!
 //! canonical Display（边按 (lo, hi) → target 升序）⇒ 同输入位级相同的 dump。
 
+pub mod minimize;
+
 mod subset;
 
 use std::fmt;
@@ -25,6 +27,9 @@ use crate::transition::next_char;
 
 /// 子集构造的状态数上限（指数爆炸防线，MAX_REPEAT 的 DFA 阶段对应物）
 pub const MAX_DFA_STATES: usize = 65_536;
+
+/// 虚拟死态：最小化细化与等价检查中的 total 化哨兵，永不物化
+pub(crate) const DEAD: StateId = u32::MAX as usize;
 
 /// 子集构造/最小化的错误
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +107,11 @@ impl DFA {
         subset::construct(nfa)
     }
 
+    /// 最小化（默认 Hopcroft；另见 [`minimize`] 模块的 Moore / Brzozowski）
+    pub fn minimize(&self) -> DFA {
+        minimize::hopcroft(self)
+    }
+
     pub fn start(&self) -> StateId {
         self.start
     }
@@ -121,6 +131,34 @@ impl DFA {
     /// 状态的区间边（排序、不相交、同目标相邻已合并）
     pub fn edges(&self, id: StateId) -> &[(char, char, StateId)] {
         &self.states[id].edges
+    }
+
+    /// 字母表原子分区（最小化细化与等价检查的探测点来源）
+    pub(crate) fn alphabet_atoms(&self) -> Vec<(char, char)> {
+        let mut cuts = std::collections::BTreeSet::new();
+        for s in &self.states {
+            for &(lo, hi, _) in &s.edges {
+                cuts.insert(lo);
+                if let Some(succ) = crate::transition::next_char(hi) {
+                    cuts.insert(succ);
+                }
+            }
+        }
+        cuts.insert(char::MAX); // 终末切点
+        let cuts: Vec<char> = cuts.into_iter().collect();
+        let mut atoms: Vec<(char, char)> = cuts
+            .windows(2)
+            .map(|w| {
+                (
+                    w[0],
+                    crate::transition::prev_char(w[1]).expect("非最大切点必有前驱"),
+                )
+            })
+            .collect();
+        if let Some(&last) = cuts.last() {
+            atoms.push((last, char::MAX));
+        }
+        atoms
     }
 
     /// 确定性转移：c 命中区间边则返回目标，区间间缺口返回 `None`
@@ -168,6 +206,245 @@ impl DFA {
             }
         }
         debug_assert!(seen.iter().all(|&s| s), "DFA 存在不可达状态");
+    }
+
+    /// canonical 空语言 DFA：1 态非接受、无边
+    ///
+    /// （无边与自环 trap 语义等价；canonical 钉无边，确定性测试才不假失败）
+    pub(crate) fn empty_language() -> DFA {
+        DFA {
+            states: vec![DfaState::from_edges(State::new(0), Vec::new())],
+            start: 0,
+        }
+    }
+
+    /// 删除无法到达接受态的死态（co-reachability 过滤），
+    /// 保留原相对顺序重编号。brzozowski 输出后处理使用。
+    pub(crate) fn prune_dead(&self) -> DFA {
+        use std::collections::VecDeque;
+        let n = self.state_count();
+        let mut keep = vec![false; n];
+        let mut queue = VecDeque::new();
+        for i in 0..n {
+            if self.is_accepting(i) {
+                keep[i] = true;
+                queue.push_back(i);
+            }
+        }
+        while let Some(t) = queue.pop_front() {
+            for p in 0..n {
+                if !keep[p] && self.edges(p).iter().any(|&(_, _, t2)| t2 == t && keep[t2]) {
+                    keep[p] = true;
+                    queue.push_back(p);
+                }
+            }
+        }
+        if !keep[self.start] {
+            return DFA::empty_language();
+        }
+        let mut new_id = vec![usize::MAX; n];
+        let mut states = Vec::new();
+        for (i, s) in self.states.iter().enumerate() {
+            if keep[i] {
+                new_id[i] = states.len();
+                let mut st = State::new(states.len());
+                st.set_token_kind(s.state.token_kind);
+                states.push(DfaState::from_edges(st, Vec::new()));
+            }
+        }
+        for (i, s) in self.states.iter().enumerate() {
+            if !keep[i] {
+                continue;
+            }
+            let id = new_id[i];
+            for &(lo, hi, t) in &s.edges {
+                if keep[t] {
+                    states[id]
+                        .edges
+                        .push((lo, hi, new_id[t]));
+                }
+            }
+        }
+        // 重排序合并（继承 smart constructor 的规范化不变量）
+        let states: Vec<DfaState> = states
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut s)| {
+                let rebuilt = DfaState::from_edges(s.state.clone(), std::mem::take(&mut s.edges));
+                let mut st = State::new(i);
+                st.set_token_kind(rebuilt.state.token_kind);
+                DfaState::from_edges(st, rebuilt.edges)
+            })
+            .collect();
+        let out = DFA {
+            states,
+            start: new_id[self.start],
+        };
+        #[cfg(debug_assertions)]
+        out.assert_all_reachable();
+        out
+    }
+
+    /// 仅供测试：手造 DFA（豁免可达性检查；正常路径只有 from_nfa/minimize）
+    #[cfg(test)]
+    pub(crate) fn raw(states: Vec<DfaState>, start: StateId) -> DFA {
+        DFA { states, start }
+    }
+}
+
+/// 最小化共用件：着色初始分割（按 `Option<TokenKind>`，DEAD 归 None 块）
+pub(super) struct Block {
+    pub(super) color: Option<TokenKind>,
+    pub(super) members: Vec<usize>,
+}
+
+/// total 化目标函数：DEAD 槽自环，缺口落 DEAD 槽
+pub(super) fn total_target(dfa: &DFA, dead_i: usize, q: usize, c: char) -> usize {
+    if q == dead_i {
+        dead_i
+    } else {
+        dfa.next_state(q, c).unwrap_or(dead_i)
+    }
+}
+
+/// 着色初始分割：`Option<TokenKind>` 各一块（颜色是 lexer 的可观察行为，
+/// 语言盲的 accepting 布尔分割会静默切错 token——ax/ay 反例测试守卫）
+pub(super) fn initial_blocks(dfa: &DFA, dead_i: usize) -> (Vec<Block>, Vec<usize>) {
+    let total = dead_i + 1;
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut block_of = vec![0usize; total];
+    for i in 0..total {
+        let color = if i == dead_i { None } else { dfa.token_kind(i) };
+        let b = blocks
+            .iter()
+            .position(|blk| blk.color == color)
+            .unwrap_or_else(|| {
+                blocks.push(Block {
+                    color,
+                    members: Vec::new(),
+                });
+                blocks.len() - 1
+            });
+        block_of[i] = b;
+        blocks[b].members.push(i);
+    }
+    (blocks, block_of)
+}
+
+/// 由分块构建最小化 DFA：删除 sink 块（含 DEAD）及其入边；
+/// start 落入 sink（⇔ 原语言为空）⇒ canonical 1 态非接受无边 DFA；
+/// 幸存块按 min-member 重编号（粗稳定划分唯一 ⇒ 位级可复现）。
+pub(super) fn build(dfa: &DFA, blocks: &[Block], block_of: &[usize], sink: usize) -> DFA {
+    if block_of[dfa.start()] == sink {
+        return DFA::empty_language();
+    }
+    let mut survivors: Vec<usize> = (0..blocks.len())
+        .filter(|&b| b != sink && !blocks[b].members.is_empty())
+        .collect();
+    survivors.sort_by_key(|&b| *blocks[b].members.iter().min().unwrap());
+    let mut new_id = vec![usize::MAX; blocks.len()];
+    for (i, &b) in survivors.iter().enumerate() {
+        new_id[b] = i;
+    }
+    let mut states = Vec::new();
+    for (i, &b) in survivors.iter().enumerate() {
+        let mut st = State::new(i);
+        st.set_token_kind(dfa.token_kind(*blocks[b].members.iter().min().unwrap()));
+        let mut e = Vec::new();
+        for &p in &blocks[b].members {
+            if p >= dfa.state_count() {
+                continue; // DEAD 槽
+            }
+            for &(lo, hi, t) in dfa.edges(p) {
+                let tb = block_of[t];
+                if tb == sink {
+                    continue; // 入边删除：续读永不接受
+                }
+                e.push((lo, hi, new_id[tb]));
+            }
+        }
+        states.push(DfaState::from_edges(st, e));
+    }
+    let out = DFA {
+        states,
+        start: new_id[block_of[dfa.start()]],
+    };
+    #[cfg(debug_assertions)]
+    out.assert_all_reachable();
+    out
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    //! 测试基建：product 构造的着色等价检查（穷尽验证，替代采样）
+
+    use std::collections::{BTreeSet, VecDeque};
+
+    use ast::token::TokenKind;
+
+    use crate::dfa::{DFA, DEAD};
+    use crate::nfa::NFA;
+    use crate::regex::parse::parse;
+    use crate::regex::Translate;
+    use crate::state::StateId;
+    use crate::transition::next_char;
+
+    pub(crate) fn nfa_from(pattern: &str) -> NFA {
+        let ast = parse(pattern).unwrap();
+        let hir = Translate::new().translate(&ast);
+        NFA::from_hir(&hir, TokenKind::Identifier)
+    }
+
+    /// 断言两个 DFA 着色等价：每个可达对颜色 `Option<TokenKind>` 全等，
+    /// 转移/DEAD 配对（双侧 DEAD 一致跳过）。DEAD 为虚拟吸收态。
+    pub(crate) fn assert_colored_equivalent(a: &DFA, b: &DFA) {
+        // 探测点 = 两侧切点集 {lo} ∪ {next_char(hi)} 的并集
+        let mut cuts = BTreeSet::new();
+        for dfa in [a, b] {
+            for id in 0..dfa.state_count() {
+                for &(lo, hi, _) in dfa.edges(id) {
+                    cuts.insert(lo);
+                    if let Some(succ) = next_char(hi) {
+                        cuts.insert(succ);
+                    }
+                }
+            }
+        }
+        let probes: Vec<char> = cuts.into_iter().collect();
+
+        let color = |dfa: &DFA, s: StateId| -> Option<TokenKind> {
+            if s == DEAD {
+                None
+            } else {
+                dfa.token_kind(s)
+            }
+        };
+        let step = |dfa: &DFA, s: StateId, c: char| -> StateId {
+            if s == DEAD {
+                DEAD
+            } else {
+                dfa.next_state(s, c).unwrap_or(DEAD)
+            }
+        };
+
+        let mut seen = BTreeSet::new();
+        let mut queue = VecDeque::new();
+        seen.insert((a.start(), b.start()));
+        queue.push_back((a.start(), b.start()));
+
+        while let Some((p, q)) = queue.pop_front() {
+            assert_eq!(color(a, p), color(b, q), "着色不等价：状态对 (S{p}, S{q})");
+            for &c in &probes {
+                let p2 = step(a, p, c);
+                let q2 = step(b, q, c);
+                if (p2, q2) != (DEAD, DEAD) {
+                    // 经其他探测路径重复到达同一对属正常，seen 去重即可
+                    if seen.insert((p2, q2)) {
+                        queue.push_back((p2, q2));
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -90,7 +90,7 @@ pub(super) fn construct(nfa: &NFA) -> Result<DFA, DfaError> {
         })
         .collect();
 
-    let mut dfa = DFA { states, start };
+    let dfa = DFA { states, start };
     #[cfg(debug_assertions)]
     dfa.assert_all_reachable();
     Ok(dfa)
