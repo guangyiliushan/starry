@@ -29,6 +29,8 @@
 use std::ops::RangeInclusive;
 use std::fmt;
 
+use crate::display::write_escaped_char;
+
 // ==================== 预定义字符类 ====================
 
 /// 预定义字符类
@@ -880,29 +882,28 @@ impl Transition {
         }
     }
 
-    /// 获取转移的描述字符串（用于调试）
-    ///
-    /// # 示例
-    ///
-    /// ```
-    /// # use lex::transition::Transition;
-    /// assert_eq!(Transition::epsilon().description(), "ε");
-    /// assert_eq!(Transition::char('a').description(), "'a'");
-    /// ```
-    pub fn description(&self) -> String {
-        match self {
-            Transition::Epsilon => "ε".to_string(),
-            Transition::Char(c) => format!("'{}'", c),
-            Transition::Range(start, end) => format!("'{}'-'{}'", start, end),
-            Transition::CharClass(class) => class.to_string(),
-            Transition::PredefinedClass(class) => class.to_string(),
-        }
-    }
 }
 
 impl fmt::Display for Transition {
+    /// 边标签展示：字符经 `char::escape_debug()` 转义（如换行显示为 \n）
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.description())
+        match self {
+            Transition::Epsilon => write!(f, "ε"),
+            Transition::Char(c) => {
+                write!(f, "'")?;
+                write_escaped_char(f, *c)?;
+                write!(f, "'")
+            }
+            Transition::Range(start, end) => {
+                write!(f, "'")?;
+                write_escaped_char(f, *start)?;
+                write!(f, "'-'")?;
+                write_escaped_char(f, *end)?;
+                write!(f, "'")
+            }
+            Transition::CharClass(class) => write!(f, "{class}"),
+            Transition::PredefinedClass(class) => write!(f, "{class}"),
+        }
     }
 }
 
@@ -1115,7 +1116,7 @@ mod tests {
         assert!(!epsilon.is_char());
         assert!(!epsilon.consumes_input());
         assert!(!epsilon.matches('a'));
-        assert_eq!(epsilon.description(), "ε");
+        assert_eq!(epsilon.to_string(), "ε");
     }
 
     #[test]
@@ -1126,7 +1127,7 @@ mod tests {
         assert!(char_trans.consumes_input());
         assert!(char_trans.matches('a'));
         assert!(!char_trans.matches('b'));
-        assert_eq!(char_trans.description(), "'a'");
+        assert_eq!(char_trans.to_string(), "'a'");
     }
 
     #[test]
@@ -1139,7 +1140,7 @@ mod tests {
         assert!(range.matches('m'));
         assert!(range.matches('z'));
         assert!(!range.matches('0'));
-        assert_eq!(range.description(), "'a'-'z'");
+        assert_eq!(range.to_string(), "'a'-'z'");
     }
 
     #[test]
@@ -1152,7 +1153,7 @@ mod tests {
         assert!(char_class_trans.matches('0'));
         assert!(char_class_trans.matches('9'));
         assert!(!char_class_trans.matches('a'));
-        assert_eq!(char_class_trans.description(), "[0-9]");
+        assert_eq!(char_class_trans.to_string(), "[0-9]");
     }
 
     #[test]
@@ -1164,7 +1165,7 @@ mod tests {
         assert!(digit_trans.matches('0'));
         assert!(digit_trans.matches('9'));
         assert!(!digit_trans.matches('a'));
-        assert_eq!(digit_trans.description(), "\\d");
+        assert_eq!(digit_trans.to_string(), "\\d");
     }
 
     #[test]

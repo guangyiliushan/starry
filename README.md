@@ -1,35 +1,65 @@
 # Starry
 
-A modular compiler infrastructure written in Rust.
+A textbook compiler project written in pure Rust std (zero external
+dependencies). Every phase of the classic compiler pipeline is
+hand-written from its mathematical foundations — the goal is to
+implement the theory through code, not to minimize code.
 
-## Overview
+## Pipeline
 
-Starry is a compiler infrastructure project currently focused on implementing fundamental algorithms and concepts from compiler theory, including lexical analysis, syntax parsing, and automata theory. The project serves as both an educational platform for understanding compiler construction and a foundation for future language development.
+Implemented today (regex → NFA):
 
-The long-term vision for Starry is to evolve into a modern multi-paradigm programming language that maintains full C/C++ compatibility while incorporating Kotlin-style syntactic sugar. The planned language will feature a hybrid type system combining static and dynamic typing, region-based memory management with borrow checking, and support for multiple programming paradigms including object-oriented, functional, and reactive programming.
+```text
+regex string
+  | parse      regex::parse           -> Ast
+  | translate  regex::Translate       -> Hir   normalization, (?i) scoping, repeat unfolding
+  | optimize   inside NFA::from_hir   -> Hir   fixpoint-equivalent rewrites (single entry)
+  | compile    nfa::Builder::compile  -> NFA   Thompson construction
+  | simulate   NFA::match_prefix      -> Option<usize>  longest match
+```
+
+## CLI
+
+```bash
+starryc match "[a-zA-Z][a-zA-Z0-9_]*" "abc123"   # stdout: 6
+starryc dump-nfa "a|b"                            # prints the NFA
+```
+
+Exit codes: `0` match (length on stdout) · `1` no match (stderr
+`no match`) · `2` usage error.
 
 ## Project Structure
 
 ```
 starry/
 ├── crates/
-│   ├── starry-lex/     # Lexer library with regex and automata support
-│   ├── starry-parser/  # Parser library (in development)
-│   ├── starry-ast/     # Abstract Syntax Tree definitions (in development)
-│   ├── starry/         # Core library integration
-│   └── starryc/        # Compiler executable
-└── Cargo.toml          # Workspace configuration
+│   ├── ast/       # Token / Keyword / TokenKind definitions (pure std)
+│   ├── lex/       # regex -> NFA pipeline + automaton state layer
+│   └── starryc/   # compiler executable (currently the regex pipeline CLI)
+└── Cargo.toml     # workspace
 ```
+
+## Roadmap (textbook order)
+
+- Subset-construction DFA + Hopcroft minimization; lexer driver
+  (longest match, error recovery). The DFA phase will co-design byte
+  equivalence classes (edge labels: char vs UTF-8 byte intervals).
+- Recursive-descent / LR parser and the language-level AST for Starry.
+- Semantic analysis: symbol tables, scopes, type checking.
+- Intermediate representation (three-address code / SSA) and
+  optimization passes (constant folding, copy propagation, DCE).
+- LLVM IR text emission (pure std string building), then
+  llvm-as/llc/clang for multi-platform executables.
+- Builder state budget (make from_hir fallible to guard against
+  nested repeat products); `(?i:...)` scoped groups.
+- NFA storage: CSR + bitset with concrete-typed hot loops;
+  zero-copy token spans + interning.
 
 ## Running Tests
 
 ```bash
 cargo test
 ```
-
-## Current Features
-
-The current implementation features a fully functional lexer with regular expression support, NFA/DFA construction, and DFA minimization algorithms, with parser and AST components under active development.
 
 ## Requirements
 
@@ -38,4 +68,4 @@ The current implementation features a fully functional lexer with regular expres
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+Licensed under the Apache-2.0. See [LICENSE](LICENSE) for details.

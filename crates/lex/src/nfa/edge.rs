@@ -120,7 +120,7 @@ impl Edge {
 
 impl fmt::Display for Edge {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} --> S{}", self.trans.description(), self.target)
+        write!(f, "{} --> S{}", self.trans, self.target)
     }
 }
 

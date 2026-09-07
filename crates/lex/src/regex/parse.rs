@@ -5,7 +5,6 @@
 //! # 设计特点
 //!
 //! - **递归下降解析**：清晰直观，易于理解和调试
-//! - **错误恢复**：支持错误恢复，继续解析剩余内容
 //! - **嵌套深度限制**：防止深层嵌套导致的栈溢出
 //! - **友好的错误信息**：提供详细的错误位置和原因
 //!
@@ -19,7 +18,6 @@
 //!
 //! - [`Parser`] - 解析器
 //! - [`ParseError`] - 解析错误类型
-//! - [`ParseResult`] - 解析结果（包含 AST、警告、错误）
 //!
 //! # 示例
 //!
@@ -31,7 +29,7 @@
 //!
 //! // 使用 Parser 进行高级控制
 //! let mut parser = Parser::new("[a-zA-Z][a-zA-Z0-9_]*");
-//! let result = parser.parse_with_recovery();
+//! let ast = parser.parse().unwrap();
 //! ```
 
 use std::fmt;
@@ -49,9 +47,8 @@ const MAX_REPEAT: u32 = 1_000;
 ///
 /// # 设计特点
 ///
-/// - 支持错误恢复，提供详细的错误信息
-/// - 支持嵌套深度限制，防止栈溢出
-/// - 使用迭代遍历而非递归，避免栈溢出
+/// - 递归下降 + 嵌套深度限制（`nest_limit`，超限返回错误而非栈溢出）
+/// - 错误携带位置与期望信息
 ///
 /// # 示例
 ///
@@ -138,39 +135,6 @@ impl Parser {
         }
 
         Ok(result)
-    }
-
-    /// 解析正则表达式（支持错误恢复）
-    ///
-    /// # 返回
-    ///
-    /// 返回包含 AST、警告和错误的解析结果
-    ///
-    /// # 示例
-    ///
-    /// ```
-    /// # use lex::regex::Parser;
-    ///
-    /// let mut parser = Parser::new("a|b");
-    /// let result = parser.parse_with_recovery();
-    /// ```
-    pub fn parse_with_recovery(&mut self) -> ParseResult {
-        let warnings = Vec::new();
-        let mut errors = Vec::new();
-
-        let ast = match self.parse_alt() {
-            Ok(ast) => ast,
-            Err(e) => {
-                errors.push(e.clone());
-                Ast::Empty
-            }
-        };
-
-        ParseResult {
-            ast,
-            warnings,
-            errors,
-        }
     }
 
     // ==================== 解析方法 ====================
@@ -675,25 +639,6 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-// ==================== 解析结果 ====================
-
-/// 解析结果
-///
-/// 包含 AST、警告和错误。
-#[derive(Debug, Clone)]
-pub struct ParseResult {
-    pub ast: Ast,
-    pub warnings: Vec<ParseWarning>,
-    pub errors: Vec<ParseError>,
-}
-
-/// 解析警告
-#[derive(Debug, Clone)]
-pub enum ParseWarning {
-    EmptyChoice,
-    EmptySequence,
-}
-
 // ==================== 便捷函数 ====================
 
 /// 解析正则表达式字符串（便捷函数）
@@ -716,28 +661,6 @@ pub enum ParseWarning {
 /// ```
 pub fn parse(input: &str) -> Result<Ast, ParseError> {
     Parser::new(input).parse()
-}
-
-/// 解析正则表达式字符串（支持错误恢复，便捷函数）
-///
-/// # 参数
-///
-/// - `input` - 正则表达式字符串
-///
-/// # 返回
-///
-/// 返回包含 AST、警告和错误的解析结果
-///
-/// # 示例
-///
-/// ```
-/// # use lex::regex::parse::parse_with_recovery;
-///
-/// let result = parse_with_recovery("a|b");
-/// println!("{:?}", result.ast);
-/// ```
-pub fn parse_with_recovery(input: &str) -> ParseResult {
-    Parser::new(input).parse_with_recovery()
 }
 
 // ==================== 测试 ====================

@@ -39,6 +39,6 @@ pub mod visitor;
 
 pub use ast::{Ast, Flags};
 pub use hir::Hir;
-pub use parse::{parse, Parser, ParseError, ParseResult};
+pub use parse::{parse, Parser, ParseError};
 pub use translate::{Translate, Translator};
 pub use optimize::Optimizer;
