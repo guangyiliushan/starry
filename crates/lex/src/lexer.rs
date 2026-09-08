@@ -92,7 +92,84 @@ impl Lexer {
         Ok(Lexer { dfa })
     }
 
-    pub fn dfa(&self) -> &DFA {
+    /// Starry v0.3 全套词法规则表（操作符 + 标点 + 字面量）
+    ///
+    /// 冲突组由 DFA 最长匹配自动择优（机械推导 + 人工示例双验证）。
+    /// 关键字不在规则表内——ident 规则 + lookup_keyword 后分类。
+    pub fn starry_rules() -> Vec<(&'static str, TokenKind)> {
+        use ast::token::{OperatorKind, PunctuationKind, LiteralKind};
+        vec![
+            // 标识符与数字
+            ("[a-zA-Z_][a-zA-Z0-9_]*", TokenKind::Identifier),
+            ("0[xX][0-9a-fA-F][_0-9a-fA-F]*|[0-9][_0-9]*", TokenKind::Literal(LiteralKind::Integer)),
+            ("[0-9][_0-9]*\\.[0-9][_0-9]*([eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+", TokenKind::Literal(LiteralKind::Float)),
+            // 字符串（含插值 raw 文本，转义解码归 parser 子扫描）
+            ("\"(\\\\[^\\r\\n]|[^\"\\\\\\r\\n])*\"", TokenKind::Literal(LiteralKind::String)),
+            // 字符
+            ("'(\\\\u\\{[0-9a-fA-F]{1,6}\\}|\\\\[^\\r\\n]|[^'\\\\\\r\\n])'", TokenKind::Literal(LiteralKind::Char)),
+            // 复合赋值（必须在单字符 = 之前）
+            ("\\+=", TokenKind::Operator(OperatorKind::PlusEq)),
+            ("-=", TokenKind::Operator(OperatorKind::MinusEq)),
+            ("\\*=", TokenKind::Operator(OperatorKind::StarEq)),
+            ("/=", TokenKind::Operator(OperatorKind::SlashEq)),
+            ("%=", TokenKind::Operator(OperatorKind::PercentEq)),
+            ("&=", TokenKind::Operator(OperatorKind::BitAndEq)),
+            ("\\|=", TokenKind::Operator(OperatorKind::BitOrEq)),
+            ("\\^=", TokenKind::Operator(OperatorKind::BitXorEq)),
+            ("<<=", TokenKind::Operator(OperatorKind::ShlEq)),
+            (">>=", TokenKind::Operator(OperatorKind::ShrEq)),
+            // 逻辑
+            ("&&", TokenKind::Operator(OperatorKind::And)),
+            ("\\|\\|", TokenKind::Operator(OperatorKind::Or)),
+            // 比较复合（在单字符 < > ! 之前）
+            ("==", TokenKind::Operator(OperatorKind::EqEq)),
+            ("!=", TokenKind::Operator(OperatorKind::BangEq)),
+            ("<=", TokenKind::Operator(OperatorKind::LtEq)),
+            (">=", TokenKind::Operator(OperatorKind::GtEq)),
+            // 移位（在 < > 之前）
+            ("<<", TokenKind::Operator(OperatorKind::Shl)),
+            (">>", TokenKind::Operator(OperatorKind::Shr)),
+            // 范围（在 . 之前）
+            ("\\.\\.", TokenKind::Operator(OperatorKind::DotDot)),
+            ("\\.\\.=", TokenKind::Operator(OperatorKind::DotDotEq)),
+            // 箭头（在 - 之前）
+            ("->", TokenKind::Operator(OperatorKind::Arrow)),
+            ("=>", TokenKind::Operator(OperatorKind::FatArrow)),
+            // as 系列与 ?. / !!（在 ? ! 之前）
+            ("\\?\\.", TokenKind::Operator(OperatorKind::QuestionDot)),
+            ("!!", TokenKind::Operator(OperatorKind::BangBang)),
+            ("\\?\\?", TokenKind::Operator(OperatorKind::QuestionQuestion)),
+            // 单字符操作符
+            ("\\+", TokenKind::Operator(OperatorKind::Plus)),
+            ("-", TokenKind::Operator(OperatorKind::Minus)),
+            ("\\*", TokenKind::Operator(OperatorKind::Star)),
+            ("/", TokenKind::Operator(OperatorKind::Slash)),
+            ("%", TokenKind::Operator(OperatorKind::Percent)),
+            ("<", TokenKind::Operator(OperatorKind::Lt)),
+            (">", TokenKind::Operator(OperatorKind::Gt)),
+            ("&", TokenKind::Operator(OperatorKind::BitAnd)),
+            ("\\|", TokenKind::Operator(OperatorKind::BitOr)),
+            ("\\^", TokenKind::Operator(OperatorKind::BitXor)),
+            ("!", TokenKind::Operator(OperatorKind::Bang)),
+            ("~", TokenKind::Operator(OperatorKind::BitXor)),
+            ("\\?", TokenKind::Operator(OperatorKind::Question)),
+            ("=", TokenKind::Operator(OperatorKind::Eq)),
+            // 标点
+            ("\\(", TokenKind::Punctuation(PunctuationKind::LParen)),
+            ("\\)", TokenKind::Punctuation(PunctuationKind::RParen)),
+            ("\\{", TokenKind::Punctuation(PunctuationKind::LBrace)),
+            ("\\}", TokenKind::Punctuation(PunctuationKind::RBrace)),
+            ("\\[", TokenKind::Punctuation(PunctuationKind::LBracket)),
+            ("\\]", TokenKind::Punctuation(PunctuationKind::RBracket)),
+            (",", TokenKind::Punctuation(PunctuationKind::Comma)),
+            ("\\.", TokenKind::Punctuation(PunctuationKind::Dot)),
+            (":", TokenKind::Punctuation(PunctuationKind::Colon)),
+            ("::", TokenKind::Punctuation(PunctuationKind::ColonColon)),
+            (";", TokenKind::Punctuation(PunctuationKind::Semicolon)),
+            ("#", TokenKind::Punctuation(PunctuationKind::Hash)),
+            ("@", TokenKind::Punctuation(PunctuationKind::At)),
+        ]
+    }    pub fn dfa(&self) -> &DFA {
         &self.dfa
     }
 

@@ -89,6 +89,8 @@ pub enum TokenKind {
     Punctuation(PunctuationKind),
 
     // ==================== 特殊 Token ====================
+    /// 换行符（语句分隔，由驱动层合成）
+    Nl,
     /// 文件结束
     Eof,
     /// 未知/无效 Token
@@ -104,6 +106,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Operator(kind) => write!(f, "operator '{}'", kind),
             TokenKind::Punctuation(kind) => write!(f, "punctuation '{}'", kind),
             TokenKind::Eof => write!(f, "end of file"),
+            TokenKind::Nl => write!(f, "newline"),
             TokenKind::Unknown => write!(f, "unknown"),
         }
     }

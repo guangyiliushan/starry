@@ -1,0 +1,267 @@
+(* ================================================================
+ * Starry v0.3 canonical grammar (frozen).
+ * Wirth EBNF: :=  |  ( ) [ ] { }
+ * Notation:
+ *   "if"   = hard keyword (lexer-reserved token)
+ *   «grow» = slot/modifier word (lexically IDENTIFIER; parser predicate)
+ *   NL     = line terminator token (suppressed inside () [] {} by lexer;
+ *            statement separator consumed by parser at statement boundaries)
+ * Terminals marked [SPEC] are Identifier lexemes, not reserved tokens.
+ * Truth hierarchy: integration tests > this EBNF > ANTLR4 reference.
+ * ================================================================ *)
+
+(* ---------- Module ---------- *)
+
+Module       := { NL } { TopLevelDecl { NL } } ;
+
+TopLevelDecl := ImportDecl
+              | ExternDecl
+              | Declaration ;
+
+ImportDecl   := "import" Path ( ".*" | "::{**}" )? ;
+
+ExternDecl   := "extern" StringLiteral
+              , ( ExternFunDecl | ExternNamespace ) ;
+ExternFunDecl    := «modifier»* "fun" IDENT "(" ParamTypeList ")" ReturnType? ;
+ExternNamespace  := "namespace" IDENT "{" { ExternMember } "}" ;
+ExternMember     := FunSig ;                        (* v1: FunSig only *)
+FunSig           := «modifier»* "fun" IDENT "(" ParamTypeList ")" ReturnType? ;
+
+(* ---------- Declarations (space: Decl) ---------- *)
+
+Declaration  := FunDecl | BindingDecl | ClassDecl | StructDecl
+              | EnumDecl | UnionDecl | TraitDecl | TypeAliasDecl
+              | ComptimeDecl | AspectDecl | ProvideDecl | MacroDecl
+              | ImplDecl ;
+
+FunDecl      := «modifier»* "fun" IDENT TypeParams?
+              , "(" ParamTypeList ")" ReturnType?
+              , ( Block | ";" ) ;
+ReturnType   := ":" Type ;
+
+BindingDecl  := «modifier»* ( "val" | "var" ) Binding ;
+Binding      := IDENT ( ":" Type )? ( "=" Expr )? ;
+
+ClassDecl    := «modifier»* "class" IDENT TypeParams?
+              , PrimaryConstructor?
+              , ( ":" TypeRefList )?
+              , ClassBody? ;
+PrimaryConstructor := "(" ParamTypeList ")" ;
+TypeRefList  := Type { "," Type } ;
+ClassBody    := "{" NL* { ClassMember NL* } "}" ;
+
+ClassMember  := Declaration
+              | ConstructorDecl
+              | AccessorDecl
+              | InitBlock ;
+ConstructorDecl := «modifier»* «init» "(" ParamTypeList ")" Block? ;
+AccessorDecl := «get» "(" ")" Block
+              | «set» "(" IDENT? ")" Block
+              | «get» Block «set» Block? ;
+InitBlock    := «init» Block ;
+
+StructDecl   := «modifier»* "struct" IDENT TypeParams?
+              , "{" NL* { StructField NL* } "}" ;
+StructField  := «modifier»* IDENT ":" Type ;
+
+EnumDecl     := «modifier»* "enum" IDENT TypeParams?
+              , "{" NL* EnumVariant { "," NL* EnumVariant } [ "," ] NL* "}" ;
+EnumVariant  := IDENT [ "(" ParamTypeList ")" ] ;
+
+UnionDecl    := «modifier»* "union" IDENT TypeParams?
+              , "{" NL* { StructField NL* } "}" ;
+
+TraitDecl    := «modifier»* "trait" IDENT TypeParams?
+              , ( ":" TypeRefList )?
+              , "{" NL* { ClassMember NL* } "}" ;
+
+TypeAliasDecl := «modifier»* "type" IDENT TypeParams? "=" Type ;
+
+ComptimeDecl := «comptime» Block ;                   (* [NARROWED: stmt-position only;
+                                                        top-level use is a semantic error] *)
+
+AspectDecl   := «aspect» IDENT TypeParams? "{" NL* { AspectMember NL* } "}" ;
+AspectMember := Declaration | PointcutDecl | AdviceDecl ;
+PointcutDecl := «before» | «after» | «around» ;
+AdviceDecl   := PointcutDecl "(" ParamTypeList ")" [ Block ] ;
+
+ProvideDecl  := «provide» [ «singleton» | «scoped» | «transient» ]
+              , TypeRef [ «bind» BindPair { "," BindPair } ]
+              , Block ;
+BindPair     := IDENT «to» Expr ;
+
+MacroDecl    := «macro» IDENT "(" MacroParams? ")" Block ;
+MacroParams  := IDENT { "," IDENT } ;
+
+ImplDecl     := «impl» TypeRef [ «by» TypeRef ]
+              , "{" NL* { ClassMember NL* } "}" ;
+
+(* ---------- Generics ---------- *)
+
+TypeParams   := "<" TypeParam { "," TypeParam } ">" ;
+TypeParam    := [ Variance ] IDENT [ ":" Type ] [ "=" Type ] ;
+Variance     := [ «out» ] | ( "in" "out" ) ;           (* in = hard token; out = slot word *)
+
+(* ---------- Types (space: Type) ---------- *)
+
+Type         := UnionType ;
+UnionType    := AtomicType { "|" AtomicType } ;
+AtomicType   := NullableType | FnType | TupleType | NamedType | UnitType ;
+NullableType := AtomicType "?" ;
+FnType       := "(" ParamTypeList ")" "->" Type ;
+TupleType    := "(" Type "," Type { "," Type } ")" ;
+UnitType     := "(" ")" ;
+NamedType    := Path [ TypeArgs ] ;
+TypeArgs     := "<" TypeArg { "," TypeArg } ">" ;
+TypeArg      := Type | IDENT "=" Type ;                (* associated-type binding [HIGH-RISK] *)
+
+(* ---------- Statements ---------- *)
+
+Block        := "{" NL* { Statement NL* } [ Expr ] NL* "}" ;
+
+Statement    := ExprStmt
+              | AssignmentStmt
+              | BindingDecl
+              | IfExpr
+              | WhenExpr
+              | ForStmt
+              | WhileStmt
+              | DoWhileStmt
+              | LoopStmt
+              | JumpStmt
+              | ComptimeBlock
+              | GrowStmt ;
+
+ExprStmt     := Expr ;
+AssignmentStmt := Place AssignOp Expr ;
+Place        := Path { ( "." IDENT ) | ( "[" Expr "]" ) } ;
+AssignOp     := "=" | "+=" | "-=" | "*=" | "/=" | "%="
+              | "<<=" | ">>=" | "&=" | "|=" | "^=" ;   (* v1: no "??=" *)
+
+IfExpr       := "if" ( "let" Pattern "=" Expr | Expr ) Block
+              , { NL* "else" "if" Expr Block }
+              , [ NL* "else" Block ] ;
+
+WhenExpr     := "when" ( "{" NL* { WhenBranch NL* } "}"
+                       | Expr "{" NL* { WhenBranch NL* } "}" ) ;
+WhenBranch   := ( WhenPattern { "," WhenPattern } )
+              , ( "->" ( Expr | Block ) ) ;             (* [HIGH-RISK: Expr | Block] *)
+WhenPattern  := Expr | "else" ;
+
+ForStmt      := "for" "(" Pattern "in" Expr ")" Block ;
+WhileStmt    := "while" "(" Expr ")" Block
+              | "while" "let" Pattern "=" Expr Block ;
+DoWhileStmt  := "do" Block "while" "(" Expr ")" ;
+LoopStmt     := "loop" Block ;
+
+JumpStmt     := "break" Expr?
+              | "continue"
+              | "return" [ Expr ]
+              | "defer" Expr ;
+
+GrowStmt     := «grow» Expr [ «bits» INTEGER ] ;
+
+(* ---------- Expressions (space: Expr; Pratt binding powers) ---------- *)
+
+Expr         := LambdaExpr
+              | WhenExpr
+              | IfExpr
+              | ControlExpr
+              | ConcurrencyExpr
+              | MacroCall
+              | BinExpr ;
+
+(* 12-level BinExpr layering (top-down; each level left-associative) *)
+BinExpr      := NullishExpr { "||" NullishExpr } ;
+NullishExpr  := LogicalOrExpr { "??" LogicalOrExpr } ;
+LogicalOrExpr  := LogicalAndExpr { "||" LogicalAndExpr } ;
+LogicalAndExpr := BitOrExpr { "&&" BitOrExpr } ;
+BitOrExpr    := BitXorExpr { "|" BitXorExpr } ;
+BitXorExpr   := BitAndExpr { "^" BitAndExpr } ;
+BitAndExpr   := EqExpr { "&" EqExpr } ;
+EqExpr       := RelExpr { ( "==" | "!=" ) RelExpr } ;
+RelExpr      := RangeExpr { ( "<" | ">" | "<=" | ">=" | "is" Pattern
+                            | [ "!" ] "in" Pattern ) RangeExpr } ;
+RangeExpr    := ShiftExpr [ ( ".." | "..=" ) ShiftExpr ] ;
+ShiftExpr    := AddExpr { ( "<<" | ">>" ) AddExpr } ;
+AddExpr      := MulExpr { ( "+" | "-" ) MulExpr } ;
+MulExpr      := CastExpr { ( "*" | "/" | "%" ) CastExpr } ;
+
+CastExpr     := UnaryExpr { ( "as" | "as?" | "as!" ) Type } ;
+UnaryExpr    := { ( "!" | "-" | "~" | "&" | "*" | "await" ) } PostfixExpr ;
+PostfixExpr  := Primary
+              , { "." IDENT
+                | "[" Expr "]"
+                | CallSuffix
+                | "?" | "?." | "!!"
+                } ;
+CallSuffix   := TypeArgs? "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+Arg          := [ IDENT "=" ] Expr ;
+
+(* ---------- Primary ---------- *)
+
+Primary      := Literal
+              | "null"
+              | "true" | "false"
+              | "self" | "super" [ SuperSuffix ]
+              | Path
+              | "(" ")"                          (* unit *)
+              | "(" Expr ( "," Expr )* [ "," ] ")"   (* paren / tuple *)
+              | "[" [ Expr { "," Expr } [ "," ] ] "]"  (* array [DOD] *)
+              | LambdaExpr
+              | MoveLambda ;
+
+SuperSuffix  := "." IDENT | "(" [ Arg { "," Arg } ] ")" ;  (* [HIGH-RISK: ctor args] *)
+Path         := IDENT { ( "." | "::" ) IDENT } ;
+
+(* ---------- Lambda (sugar preserved; no desugaring) ---------- *)
+
+LambdaExpr   := «move»? "{" NL*
+              , ( LambdaParams "->" )?                  (* [HIGH-RISK: speculative parse;
+                                                           depth-0 arrow scan; when's ->
+                                                           lives at depth > 0] *)
+              , Block NL* "}" ;
+LambdaParams := IDENT { "," IDENT } | "it" ;            (* [SPEC] it = omitted single param;
+                                                           { -> ... } = explicit zero-arg *)
+MoveLambda   := «move» LambdaExpr ;                     (* [SPEC] move is slot word *)
+
+(* ---------- Concurrency ---------- *)
+
+ConcurrencyExpr := "spawn" [ "detached" | "concurrent" ]
+                 , ( "thread" | "fiber" | "process" )? Block
+              | "async" Expr
+              , "await" Expr ;
+
+(* ---------- Macro call ---------- *)
+
+MacroCall    := IDENT "!" "(" [ TokenTree ] ")" ;
+TokenTree    := { IDENT | LITERAL | PUNCT | TokenTree } ;
+
+(* ---------- Patterns (space: Pattern) ---------- *)
+
+Pattern      := BindingPattern | IsPattern | InPattern
+              | LiteralPattern | TuplePattern | WildcardPattern ;
+BindingPattern := [ "mut" ] IDENT [ ":" Type ] ;
+IsPattern    := "is" Type ;                             (* [HIGH-RISK: GenericArgs] *)
+InPattern    := [ "!" ] "in" Expr ;                     (* [HIGH-RISK: ! = Bang token + is word;
+                                                           !is does NOT exist as a token] *)
+LiteralPattern := INTEGER | FLOAT | STRING | "true" | "false" | "null" ;
+TuplePattern := "(" [ Pattern { "," Pattern } [ "," ] ] ")" ;
+WildcardPattern := "_" ;                               (* [SPEC] *)
+
+(* ---------- Lexical (see starryc rule table for full regex) ---------- *)
+
+INTEGER := ? decimal 123 | hex 0x1F | binary 0b01 ? ;
+FLOAT   := ? 1.0 | 1e10 | 1.5e-3 (leading . rejected) ? ;
+STRING  := ? raw source text incl. $IDENT / ${Expr} interpolation and
+             \$ escape; escape decoding deferred to parser sub-scan ? ;
+CHAR    := ? 'a' | '\n' | '\u{1F600}' ? ;
+IDENT   := ? [a-zA-Z_][a-zA-Z0-9_]* (underscore start legal) ? ;
+PUNCT   := ? operator/punctuation token per rule table ? ;
+LITERAL := ? literal token ? ;
+
+(* ---------- NL convention (front matter; NOT per-production) ---------- *)
+(* Statements are separated by NL or ';'. The parser consumes NL runs at
+ * statement boundaries. NL suppression inside (), [], {} is a lexer
+ * property. Dangling/leading binary operators suppress NL at the
+ * driver level. EOF flushes pending NL. *)

@@ -82,6 +82,14 @@ pub enum OperatorKind {
     DotDotEq,
 
     // 其他运算符
+    /// as?
+    AsQuestion,
+    /// as!
+    AsBang,
+    /// ?.
+    QuestionDot,
+    /// !!
+    BangBang,
     /// ?
     Question,
     /// ??
@@ -90,8 +98,6 @@ pub enum OperatorKind {
     Arrow,
     /// =>
     FatArrow,
-    /// ..
-    Range,
 }
 
 impl fmt::Display for OperatorKind {
@@ -133,7 +139,10 @@ impl fmt::Display for OperatorKind {
             OperatorKind::QuestionQuestion => "??",
             OperatorKind::Arrow => "->",
             OperatorKind::FatArrow => "=>",
-            OperatorKind::Range => "..",
+            OperatorKind::AsQuestion => "as?",
+            OperatorKind::AsBang => "as!",
+            OperatorKind::QuestionDot => "?.",
+            OperatorKind::BangBang => "!!",
         };
         write!(f, "{s}")
     }
@@ -179,7 +188,10 @@ impl OperatorKind {
             OperatorKind::QuestionQuestion => "??",
             OperatorKind::Arrow => "->",
             OperatorKind::FatArrow => "=>",
-            OperatorKind::Range => "..",
+            OperatorKind::AsQuestion => "as?",
+            OperatorKind::AsBang => "as!",
+            OperatorKind::QuestionDot => "?.",
+            OperatorKind::BangBang => "!!",
         }
     }
 }

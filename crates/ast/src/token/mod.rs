@@ -10,17 +10,29 @@
 
 mod error;
 mod kind;
-mod keyword;
+pub mod keyword_gen;
 mod literal;
 mod operator;
 
 pub use error::{TokenError, TokenResult};
 pub use kind::{PunctuationKind, TokenKind};
-pub use keyword::{is_keyword, lookup_keyword, KeywordKind};
+pub use keyword_gen::{
+    lookup_hard_keyword as lookup_keyword, lookup_modifier_word, lookup_slot_word,
+    HardKeyword as KeywordKind, HardKeyword, ModifierWord, SlotWord, MODIFIER_WORD_COUNT,
+    HARD_KEYWORD_COUNT, SLOT_WORD_COUNT,
+};
 pub use literal::LiteralKind;
 pub use operator::OperatorKind;
 
 use std::fmt;
+
+impl fmt::Display for HardKeyword {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+
 
 /// 源码字节区间（`end` exclusive；`end - start` = lexeme 字节数）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
