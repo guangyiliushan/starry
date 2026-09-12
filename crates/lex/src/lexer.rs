@@ -175,25 +175,84 @@ impl Lexer {
         &self.dfa
     }
 
-    /// tokenize：空白跳过 + 最长匹配 + 关键字后分类
+    /// tokenize：NL 合成 + 注释跳过 + 括号深度抑制 + 最长匹配
+    /// + 关键字后分类 + 未知字符恢复
     ///
-    /// 空白先于匹配尝试跳过（规则永远无法认领空白）；未命中字符按
-    /// **字符**推进（`len_utf8`，多字节安全），产出
-    /// [`TokenKind::Unknown`] 单字符 token。
+    /// - NL（\n 或 \r\n）在括号深度 0 时产出 [`TokenKind::Nl`] token
+    ///   （语句分隔），括号内吞掉（深度抑制）；
+    /// - 空白集 {' ', '\t', '\r'} 先于匹配跳过（\n 归 NL 处理器）；
+    /// - 行注释 // 跳到行尾（不吃 NL）；块注释 /* */ 嵌套计数；
+    /// - 未命中字符按**字符**推进（`len_utf8`，多字节安全）；
+    /// - 未知产出 [`TokenKind::Unknown`] 单字符 token（错误恢复）。
     pub fn tokenize(&self, source: &str) -> Vec<Token> {
         let mut tokens = Vec::new();
         let mut i = 0usize;
+        let mut paren_depth = 0usize;
+
         while i < source.len() {
             let rest = &source[i..];
             let first = match rest.chars().next() {
                 Some(c) => c,
                 None => break,
             };
-            // 空白先于匹配尝试
-            if matches!(first, ' ' | '\t' | '\r' | '\n') {
+
+            // 空白（不含 \n——\n 归 NL 处理器）
+            if matches!(first, ' ' | '\t' | '\r') {
                 i += first.len_utf8();
                 continue;
             }
+
+            // NL：括号深度 0 → 发 Nl token；括号内吞掉
+            if first == '\n' {
+                i += 1;
+                if paren_depth == 0 {
+                    tokens.push(Token::new(TokenKind::Nl, "\n", Span::new(i as u32 - 1, i as u32)));
+                }
+                continue;
+            }
+
+            // 行注释 //：跳到行尾（不吃 NL——NL 由下方处理器接管）
+            if rest.starts_with("//") {
+                if let Some(nl) = rest.find('\n') {
+                    i += nl;
+                } else {
+                    i = source.len();
+                }
+                continue;
+            }
+
+            // 块注释 /* */：嵌套计数
+            if rest.starts_with("/*") {
+                let mut depth = 1usize;
+                let mut pos = 2usize;
+                let bytes = rest.as_bytes();
+                while pos + 1 < bytes.len() && depth > 0 {
+                    if bytes[pos] == b'/' && bytes[pos + 1] == b'*' {
+                        depth += 1;
+                        pos += 2;
+                    } else if bytes[pos] == b'*' && bytes[pos + 1] == b'/' {
+                        depth -= 1;
+                        pos += 2;
+                    } else {
+                        pos += 1;
+                    }
+                }
+                i += pos;
+                continue;
+            }
+
+            // 括号深度追踪
+            match first {
+                '(' | '[' | '{' => paren_depth += 1,
+                ')' | ']' | '}' => {
+                    if paren_depth > 0 {
+                        paren_depth -= 1;
+                    }
+                }
+                _ => {}
+            }
+
+            // DFA 最长匹配
             match self.dfa.longest_match(rest) {
                 Some((len, mut kind)) if len > 0 => {
                     let end = i + len;
