@@ -67,11 +67,27 @@ impl fmt::Display for TokenError {
             TokenError::UnterminatedChar { line, column } => {
                 write!(f, "unterminated char literal at {}:{}", line, column)
             }
-            TokenError::InvalidNumber { message, line, column } => {
-                write!(f, "invalid number literal: {} at {}:{}", message, line, column)
+            TokenError::InvalidNumber {
+                message,
+                line,
+                column,
+            } => {
+                write!(
+                    f,
+                    "invalid number literal: {} at {}:{}",
+                    message, line, column
+                )
             }
-            TokenError::InvalidEscapeSequence { sequence, line, column } => {
-                write!(f, "invalid escape sequence '{}' at {}:{}", sequence, line, column)
+            TokenError::InvalidEscapeSequence {
+                sequence,
+                line,
+                column,
+            } => {
+                write!(
+                    f,
+                    "invalid escape sequence '{}' at {}:{}",
+                    sequence, line, column
+                )
             }
             TokenError::UnexpectedEof { line, column } => {
                 write!(f, "unexpected end of file at {}:{}", line, column)

@@ -16,7 +16,7 @@ cargo run -p syntaxgen -- --check
 
 Generated files:
 
-- `crates/ast/src/token/keyword_gen.rs`
+- `crates/ast/src/token/keyword.rs`
 - `docs/syntax/generated/StarryLexerTerms.g4`
 - `docs/syntax/generated/lexicon.md`
 

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const LEXICON_PATH: &str = "docs/syntax/lexicon.txt";
-pub const KEYWORD_GEN_PATH: &str = "crates/ast/src/token/keyword_gen.rs";
+pub const KEYWORD_PATH: &str = "crates/ast/src/token/keyword.rs";
 pub const ANTLR_TERMS_PATH: &str = "docs/syntax/generated/StarryLexerTerms.g4";
 pub const MARKDOWN_TABLE_PATH: &str = "docs/syntax/generated/lexicon.md";
 
@@ -422,7 +422,7 @@ pub fn workspace_root() -> &'static Path {
 #[must_use]
 pub fn paths(root: &Path) -> [PathBuf; 3] {
     [
-        root.join(KEYWORD_GEN_PATH),
+        root.join(KEYWORD_PATH),
         root.join(ANTLR_TERMS_PATH),
         root.join(MARKDOWN_TABLE_PATH),
     ]

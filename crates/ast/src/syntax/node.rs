@@ -39,6 +39,17 @@ pub trait AstNode {
     fn span(&self) -> Span;
 }
 
+macro_rules! impl_ast_node {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl AstNode for $ty {
+                fn id(&self) -> NodeId { self.id }
+                fn span(&self) -> Span { self.span }
+            }
+        )*
+    };
+}
+
 /// 共享路径段
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathSegment {
@@ -74,6 +85,7 @@ pub struct SourceFile {
 /// Error 节点：携带 DiagId 回指诊断（抑制级联报错）
 #[derive(Debug, Clone)]
 pub struct ErrorNode {
+    pub id: NodeId,
     pub span: Span,
     pub err: DiagId,
 }
@@ -81,6 +93,7 @@ pub struct ErrorNode {
 /// Missing 节点：插入点空 Span
 #[derive(Debug, Clone)]
 pub struct MissingNode {
+    pub id: NodeId,
     pub span: Span,
 }
 
@@ -128,3 +141,13 @@ impl DiagCollector {
         &self.diags
     }
 }
+
+impl_ast_node!(
+    crate::syntax::decl::DeclNode,
+    crate::syntax::expr::ExprWrap,
+    crate::syntax::ty::TypeWrap,
+    crate::syntax::pat::PatWrap,
+    SourceFile,
+    ErrorNode,
+    MissingNode,
+);

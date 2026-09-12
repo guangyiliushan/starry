@@ -46,6 +46,8 @@ pub enum OperatorKind {
     BitOr,
     /// ^
     BitXor,
+    /// ~
+    BitNot,
     /// <<
     Shl,
     /// >>
@@ -120,6 +122,7 @@ impl fmt::Display for OperatorKind {
             OperatorKind::BitAnd => "&",
             OperatorKind::BitOr => "|",
             OperatorKind::BitXor => "^",
+            OperatorKind::BitNot => "~",
             OperatorKind::Shl => "<<",
             OperatorKind::Shr => ">>",
             OperatorKind::Eq => "=",
@@ -169,6 +172,7 @@ impl OperatorKind {
             OperatorKind::BitAnd => "&",
             OperatorKind::BitOr => "|",
             OperatorKind::BitXor => "^",
+            OperatorKind::BitNot => "~",
             OperatorKind::Shl => "<<",
             OperatorKind::Shr => ">>",
             OperatorKind::Eq => "=",

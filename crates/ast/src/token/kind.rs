@@ -236,7 +236,10 @@ mod tests {
 
     #[test]
     fn test_convenience_constructors() {
-        assert_eq!(TokenKind::integer(), TokenKind::Literal(LiteralKind::Integer));
+        assert_eq!(
+            TokenKind::integer(),
+            TokenKind::Literal(LiteralKind::Integer)
+        );
         assert_eq!(TokenKind::float(), TokenKind::Literal(LiteralKind::Float));
         assert_eq!(TokenKind::eof(), TokenKind::Eof);
     }

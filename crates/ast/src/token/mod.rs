@@ -9,18 +9,18 @@
 //! - [`PunctuationKind`] - 标点符号类型
 
 mod error;
+pub mod keyword;
 mod kind;
-pub mod keyword_gen;
 mod literal;
 mod operator;
 
 pub use error::{TokenError, TokenResult};
-pub use kind::{PunctuationKind, TokenKind};
-pub use keyword_gen::{
-    lookup_hard_keyword as lookup_keyword, lookup_modifier_word, lookup_slot_word,
-    HardKeyword as KeywordKind, HardKeyword, ModifierWord, SlotWord, MODIFIER_WORD_COUNT,
-    HARD_KEYWORD_COUNT, SLOT_WORD_COUNT,
+pub use keyword::{
+    HARD_KEYWORD_COUNT, HardKeyword as KeywordKind, HardKeyword, MODIFIER_WORD_COUNT, ModifierWord,
+    SLOT_WORD_COUNT, SlotWord, lookup_hard_keyword as lookup_keyword, lookup_modifier_word,
+    lookup_slot_word,
 };
+pub use kind::{PunctuationKind, TokenKind};
 pub use literal::LiteralKind;
 pub use operator::OperatorKind;
 
@@ -31,8 +31,6 @@ impl fmt::Display for HardKeyword {
         f.write_str(self.as_str())
     }
 }
-
-
 
 /// 源码字节区间（`end` exclusive；`end - start` = lexeme 字节数）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

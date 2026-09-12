@@ -1,6 +1,6 @@
 //! 类型空间
 
-use super::node::{NodeId, Span};
+use super::node::{NodeId, Span, Symbol};
 
 #[derive(Debug, Clone)]
 pub struct TypeWrap {
@@ -11,7 +11,9 @@ pub struct TypeWrap {
 
 #[derive(Debug, Clone)]
 pub enum TypeKind {
-    Named(String),
+    Named {
+        path: super::node::Path,
+    },
     Nullable(Box<TypeWrap>),
     Fn {
         params: Vec<TypeWrap>,

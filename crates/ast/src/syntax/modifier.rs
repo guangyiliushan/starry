@@ -17,7 +17,9 @@ pub struct Modifier {
 
 impl ModifierList {
     pub fn new() -> Self {
-        Self { modifiers: Vec::new() }
+        Self {
+            modifiers: Vec::new(),
+        }
     }
 
     pub fn push(&mut self, word: ModifierWord, span: Span) {

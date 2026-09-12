@@ -7,16 +7,13 @@
 //! 本测试手构而非 parse，确定性由测试自身保证。
 
 use ast::interner::Interner;
-use ast::syntax::node::{
-    DiagCollector, DiagSeverity, ErrorNode, NodeId, NodeIdGen,
-};
-use ast::syntax::ty::{TypeKind, TypeWrap};
-use ast::syntax::decl::{DeclKind, DeclNode, Param};
-use ast::syntax::expr::{ExprKind, ExprWrap};
+use ast::syntax::decl::{BindingDecl, DeclKind, DeclNode, FunDecl, FunctionBody, Param};
+use ast::syntax::expr::{ExprKind, ExprStmt, ExprWrap};
 use ast::syntax::modifier::ModifierList;
-use ast::token::{LiteralKind, TokenKind};
-use ast::token::Span;
 use ast::syntax::node::AstNode;
+use ast::syntax::node::{DiagCollector, DiagId, DiagSeverity, Diagnostic, NodeId, NodeIdGen};
+use ast::syntax::ty::{TypeKind, TypeWrap};
+use ast::token::{OperatorKind, Span};
 
 fn span(start: u32, end: u32) -> Span {
     Span::new(start, end)
@@ -24,101 +21,110 @@ fn span(start: u32, end: u32) -> Span {
 
 #[test]
 fn fun_decl_snapshot() {
-    let mut generator = NodeIdGen::new();
+    let mut id_gen = NodeIdGen::new();
     let mut interner = Interner::new();
     let mut collector = DiagCollector::new();
 
-    // fun double(x: int) -> int { return x + x }
-    let _id_fn = generator.next();
-    let id_param = generator.next();
-    let id_body = generator.next();
-    let id_binary = generator.next();
-    let id_lhs = generator.next();
-    let id_rhs = generator.next();
+    let sym_double = interner.intern("double");
+    let sym_x = interner.intern("x");
+    let sym_int = interner.intern("int");
 
+    // fun double(x: int) -> int { return x + x }
+    let param_ty = TypeWrap {
+        id: id_gen.next(),
+        span: span(14, 17),
+        kind: TypeKind::Named {
+            path: ast::syntax::node::Path::single(sym_int, span(14, 17)),
+        },
+    };
     let param = Param {
         mutable: false,
-        name: "x".to_string(),
-        ty: Some(TypeWrap {
-            id: id_param,
-            span: span(11, 14),
-            kind: ast::syntax::ty::TypeKind::Named("int".to_string()),
-        }),
+        name: sym_x,
+        ty: Some(param_ty),
+        default: None,
     };
 
     let lhs = ExprWrap {
-        id: id_lhs,
-        span: span(27, 28),
-        kind: ExprKind::Ident("x".to_string()),
+        id: id_gen.next(),
+        span: span(29, 30),
+        kind: ExprKind::Ident(sym_x),
     };
     let rhs = ExprWrap {
-        id: id_rhs,
-        span: span(31, 32),
-        kind: ExprKind::Ident("x".to_string()),
+        id: id_gen.next(),
+        span: span(33, 34),
+        kind: ExprKind::Ident(sym_x),
     };
-    let binary = ExprWrap {
-        id: id_binary,
-        span: span(27, 32),
+    let add = ExprWrap {
+        id: id_gen.next(),
+        span: span(29, 34),
         kind: ExprKind::Binary {
-            op: ast::token::OperatorKind::Plus,
+            op: OperatorKind::Plus,
             lhs: Box::new(lhs),
             rhs: Box::new(rhs),
         },
     };
 
-    let _diag_id = collector.emit(ast::syntax::node::Diagnostic {
-        span: span(0, 32),
-        severity: DiagSeverity::Warning,
+    let diag = Diagnostic {
+        span: span(0, 34),
+        severity: ast::syntax::node::DiagSeverity::Warning,
         message: "placeholder".to_string(),
-    });
+    };
+    let _did = collector.emit(diag);
 
-    // Symbol 表头行（可读锚点）
-    let sym_x = interner.intern("x");
-    let sym_double = interner.intern("double");
-    let sym_int = interner.intern("int");
-
-    // 手构 decl_class 树
-    let fun = DeclNode {
-        id: generator.next(),
-        span: span(0, 32),
-        kind: ast::syntax::decl::DeclKind::Fun(ast::syntax::decl::FunDecl {
-            modifiers: ModifierList::new(),
-            name: "double".to_string(),
-            params: vec![param],
-            ret: None,
-            body: Some(vec![]),
-        }),
+    let fun_decl = FunDecl {
+        modifiers: ModifierList::new(),
+        name: sym_double,
+        type_params: Vec::new(),
+        params: vec![param],
+        ret: None,
+        body: Some(FunctionBody::Block(ast::syntax::expr::Block {
+            stmts: vec![],
+            tail: None,
+        })),
     };
 
-        // 验证：interner resolve 正确
-    assert_eq!(interner.resolve(sym_x), "x");
+    let decl = DeclNode {
+        id: id_gen.next(),
+        span: span(0, 34),
+        kind: DeclKind::Fun(fun_decl),
+    };
+
+    // AstNode trait 可访问
+    assert_eq!(decl.id(), NodeId(id_gen.count() - 1));
+    assert_eq!(decl.span(), span(0, 34));
+
+    // Debug 输出确定
+    let d1 = format!("{:#?}", decl);
+    let d2 = format!("{:#?}", decl);
+    assert_eq!(d1, d2);
+
+    // interner resolve 正确
     assert_eq!(interner.resolve(sym_double), "double");
+    assert_eq!(interner.resolve(sym_x), "x");
     assert_eq!(interner.resolve(sym_int), "int");
 
-    // 验证：Debug 输出确定
-    let debug1 = format!("{:#?}", fun);
-    let debug2 = format!("{:#?}", fun);
-    assert_eq!(debug1, debug2);
-
-    // 验证：walk 可达
-    assert!(debug1.len() > 50);
+    // DiagCollector 可 resolve
+    assert_eq!(collector.all().len(), 1);
 }
 
 #[test]
-fn test_partial_ast_with_error() {
-    let mut generator = NodeIdGen::new();
+fn partial_ast_with_error() {
+    let mut id_gen = NodeIdGen::new();
     let mut collector = DiagCollector::new();
 
-    let err_id = collector.emit(ast::syntax::node::Diagnostic {
+    let did = collector.emit(Diagnostic {
         span: span(5, 10),
-        severity: DiagSeverity::Error,
+        severity: ast::syntax::node::DiagSeverity::Error,
         message: "unexpected token".to_string(),
     });
 
-    let err_node = ErrorNode {
+    let err_node = ast::syntax::node::ErrorNode {
+        id: id_gen.next(),
         span: span(5, 10),
-        err: err_id,
+        err: did,
     };
-    assert_eq!(err_node.err, err_id);
-    assert_eq!(collector.get(err_id).message, "unexpected token");
+
+    assert_eq!(err_node.err, did);
+    assert_eq!(collector.get(did).message, "unexpected token");
+    assert_eq!(collector.all().len(), 1, "partial-AST 诊断唯一性");
 }

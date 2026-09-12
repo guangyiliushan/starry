@@ -23,7 +23,7 @@ ImportDecl   := "import" Path ( ".*" | "::{**}" )? ;
 ExternDecl   := "extern" StringLiteral
               , ( ExternFunDecl | ExternNamespace ) ;
 ExternFunDecl    := «modifier»* "fun" IDENT "(" ParamTypeList ")" ReturnType? ;
-ExternNamespace  := "namespace" IDENT "{" { ExternMember } "}" ;
+ExternNamespace  := «namespace» IDENT "{" { ExternMember } "}" ;
 ExternMember     := FunSig ;                        (* v1: FunSig only *)
 FunSig           := «modifier»* "fun" IDENT "(" ParamTypeList ")" ReturnType? ;
 
@@ -227,8 +227,8 @@ MoveLambda   := «move» LambdaExpr ;                     (* [SPEC] move is slot
 
 (* ---------- Concurrency ---------- *)
 
-ConcurrencyExpr := "spawn" [ "detached" | "concurrent" ]
-                 , ( "thread" | "fiber" | "process" )? Block
+ConcurrencyExpr := «spawn» [ «detached» | «concurrent» ]
+                 , ( «thread» | «fiber» | «process» )? Block
               | "async" Expr
               , "await" Expr ;
 

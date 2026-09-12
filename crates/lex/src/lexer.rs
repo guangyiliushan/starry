@@ -136,6 +136,8 @@ impl Lexer {
             ("->", TokenKind::Operator(OperatorKind::Arrow)),
             ("=>", TokenKind::Operator(OperatorKind::FatArrow)),
             // as 系列与 ?. / !!（在 ? ! 之前）
+            ("as\\?", TokenKind::Operator(OperatorKind::AsQuestion)),
+            ("as!", TokenKind::Operator(OperatorKind::AsBang)),
             ("\\?\\.", TokenKind::Operator(OperatorKind::QuestionDot)),
             ("!!", TokenKind::Operator(OperatorKind::BangBang)),
             ("\\?\\?", TokenKind::Operator(OperatorKind::QuestionQuestion)),
@@ -151,7 +153,7 @@ impl Lexer {
             ("\\|", TokenKind::Operator(OperatorKind::BitOr)),
             ("\\^", TokenKind::Operator(OperatorKind::BitXor)),
             ("!", TokenKind::Operator(OperatorKind::Bang)),
-            ("~", TokenKind::Operator(OperatorKind::BitXor)),
+            ("~", TokenKind::Operator(OperatorKind::BitNot)),
             ("\\?", TokenKind::Operator(OperatorKind::Question)),
             ("=", TokenKind::Operator(OperatorKind::Eq)),
             // 标点
