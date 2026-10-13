@@ -1,10 +1,10 @@
 //! 端到端集成测试：regex 字符串 → parse → translate → optimize（from_hir 内部）
 //! → NFA → match_prefix 全链路。
 
-use lex::nfa::NFA;
-use lex::regex::parse::parse;
-use lex::regex::Translate;
 use lex::TokenKind;
+use lex::nfa::NFA;
+use lex::regex::Translate;
+use lex::regex::parse::parse;
 
 fn match_len(pattern: &str, input: &str) -> Option<usize> {
     let ast = parse(pattern).unwrap();
@@ -106,10 +106,7 @@ fn multi_rule_same_length_first_rule_wins() {
     let hir1 = Translate::new().translate(&parse("a").unwrap());
     let hir2 = Translate::new().translate(&parse("a").unwrap());
 
-    let nfa = NFA::from_hir_multi(vec![
-        (hir1, TokenKind::Identifier),
-        (hir2, TokenKind::Eof),
-    ]);
+    let nfa = NFA::from_hir_multi(vec![(hir1, TokenKind::Identifier), (hir2, TokenKind::Eof)]);
 
     let current = nfa.step(&nfa.epsilon_closure_of(nfa.start_state()), 'a');
     let winner = current

@@ -243,7 +243,14 @@ mod tests {
             max: Some(0),
         };
         let (optimized, passes) = Optimizer::new().optimize(&hir);
-        assert!(matches!(optimized, Hir::Repeat { min: 0, max: Some(0), .. }));
+        assert!(matches!(
+            optimized,
+            Hir::Repeat {
+                min: 0,
+                max: Some(0),
+                ..
+            }
+        ));
         assert_eq!(passes, 1);
     }
 
@@ -251,9 +258,21 @@ mod tests {
     fn test_extract_prefix_converges_within_budget() {
         // abc|abd|abe：pass1 提 a，pass2 提 b，pass3 不动点
         let hir = Hir::choice(vec![
-            Hir::sequence(vec![Hir::literal('a'), Hir::literal('b'), Hir::literal('c')]),
-            Hir::sequence(vec![Hir::literal('a'), Hir::literal('b'), Hir::literal('d')]),
-            Hir::sequence(vec![Hir::literal('a'), Hir::literal('b'), Hir::literal('e')]),
+            Hir::sequence(vec![
+                Hir::literal('a'),
+                Hir::literal('b'),
+                Hir::literal('c'),
+            ]),
+            Hir::sequence(vec![
+                Hir::literal('a'),
+                Hir::literal('b'),
+                Hir::literal('d'),
+            ]),
+            Hir::sequence(vec![
+                Hir::literal('a'),
+                Hir::literal('b'),
+                Hir::literal('e'),
+            ]),
         ]);
 
         let (optimized, passes) = Optimizer::new().optimize(&hir);
@@ -275,7 +294,7 @@ mod tests {
             ]),
         ]);
         assert_eq!(optimized, expected);
-        assert!(passes >= 2 && passes <= MAX_PASSES);
+        assert!((2..=MAX_PASSES).contains(&passes));
     }
 
     #[test]

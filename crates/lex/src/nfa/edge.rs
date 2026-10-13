@@ -115,7 +115,6 @@ impl Edge {
     pub fn matches(&self, c: char) -> bool {
         self.trans.matches(c)
     }
-
 }
 
 impl fmt::Display for Edge {

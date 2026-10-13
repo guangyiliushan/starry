@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ast::token::TokenKind;
 
-use crate::dfa::{DfaError, DfaState, DFA, MAX_DFA_STATES};
+use crate::dfa::{DFA, DfaError, DfaState, MAX_DFA_STATES};
 use crate::nfa::NFA;
 use crate::state::{State, StateGenerator, StateId};
 use crate::transition::{next_char, prev_char};
@@ -151,4 +151,3 @@ fn alphabet_atoms(nfa: &NFA) -> Vec<(char, char)> {
     }
     atoms
 }
-

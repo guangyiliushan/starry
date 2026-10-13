@@ -90,4 +90,3 @@ IDENTIFIER : [A-Za-z_][A-Za-z0-9_]*;
 // slot: Get = 'get' in accessor
 // slot: Set = 'set' in accessor
 // slot: Out = 'out' in type_variance
-// slot: Let = 'let' in condition_binding

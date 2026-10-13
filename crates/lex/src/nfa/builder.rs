@@ -21,11 +21,11 @@
 //! assert_eq!(builder.state_count(), 2);
 //! ```
 
+use super::edge::Edge;
+use super::state::NFAState;
 use crate::regex::hir::Hir;
 use crate::state::StateId;
 use crate::transition::Transition;
-use super::edge::Edge;
-use super::state::NFAState;
 
 /// 编译结果：一个 NFA 片段（start 与 end 状态）
 #[derive(Debug, Clone, Copy)]
@@ -75,9 +75,7 @@ impl Default for Builder {
 impl Builder {
     /// 创建新的 Builder
     pub fn new() -> Self {
-        Self {
-            states: Vec::new(),
-        }
+        Self { states: Vec::new() }
     }
 
     // ==================== 状态管理 ====================

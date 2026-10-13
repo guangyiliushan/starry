@@ -8,15 +8,18 @@ pub mod expr;
 pub mod modifier;
 pub mod node;
 pub mod pat;
+pub mod stmt;
 pub mod ty;
 
 pub use decl::DeclNode;
 pub use expr::ExprWrap;
 pub use expr::{Block, ExprStmt};
 pub use node::{
-    AstNode, DiagCollector, DiagId, DiagSeverity, Diagnostic, ErrorNode, MissingNode, SourceFile,
+    AstNode, DiagCode, DiagCollector, DiagId, DiagSeverity, Diagnostic, ErrorNode, MissingNode,
+    SourceFile,
 };
 pub use pat::PatWrap;
+pub use stmt::StmtWrap;
 pub use ty::TypeWrap;
 
 /// 解析结果（ast + interner + diagnostics + node_count 同船旅行；

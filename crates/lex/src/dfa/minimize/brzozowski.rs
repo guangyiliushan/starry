@@ -2,7 +2,7 @@
 
 use ast::token::TokenKind;
 
-use crate::dfa::{DfaError, DFA};
+use crate::dfa::{DFA, DfaError};
 use crate::nfa::{Builder, NFA};
 use crate::transition::Transition;
 
@@ -33,13 +33,17 @@ pub(crate) fn reverse(dfa: &DFA) -> NFA {
     // 占位颜色：接受态颜色恰一种 → 保持；多种/无 → Unknown（kind 盲）
     let mut colors: Vec<TokenKind> = Vec::new();
     for i in 0..dfa.state_count() {
-        if let Some(k) = dfa.token_kind(i) {
-            if !colors.contains(&k) {
-                colors.push(k);
-            }
+        if let Some(k) = dfa.token_kind(i)
+            && !colors.contains(&k)
+        {
+            colors.push(k);
         }
     }
-    let placeholder = if colors.len() == 1 { colors[0] } else { TokenKind::Unknown };
+    let placeholder = if colors.len() == 1 {
+        colors[0]
+    } else {
+        TokenKind::Unknown
+    };
 
     let mut builder = Builder::new();
     for _ in 0..dfa.state_count() {

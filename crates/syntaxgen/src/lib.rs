@@ -11,7 +11,7 @@ pub const MARKDOWN_TABLE_PATH: &str = "docs/syntax/generated/lexicon.md";
 
 pub const HARD_KEYWORD_COUNT: usize = 39;
 pub const MODIFIER_WORD_COUNT: usize = 14;
-pub const SLOT_WORD_COUNT: usize = 31;
+pub const SLOT_WORD_COUNT: usize = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WordKind {
@@ -506,6 +506,12 @@ mod tests {
     }
 
     #[test]
+    fn excludes_let_condition_binding() {
+        let words = lexicon();
+        assert!(words.words().iter().all(|word| word.lexeme != "let"));
+    }
+
+    #[test]
     fn rejects_duplicate_lexeme_before_count_validation() {
         let source = "hard x X global\nhard x X global\n";
         assert_eq!(
@@ -536,7 +542,7 @@ mod tests {
         let markdown = generate_markdown(&words);
         assert!(markdown.contains("## Hard keyword (39)"));
         assert!(markdown.contains("## Modifier word (14)"));
-        assert!(markdown.contains("## Slot word (31)"));
+        assert!(markdown.contains("## Slot word (30)"));
     }
 
     #[test]

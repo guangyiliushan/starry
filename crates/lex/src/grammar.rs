@@ -64,7 +64,7 @@ impl RegularGrammar {
         let mut productions: Vec<(NonTerminalId, Production)> = Vec::new();
         let mut accept_kinds = vec![None; n];
 
-        for q in 0..n {
+        for (q, accept_kind) in accept_kinds.iter_mut().enumerate() {
             let closure = nfa.epsilon_closure_of(q);
             for &q2 in &closure {
                 for edge in &nfa.states()[q2].edges {
@@ -83,7 +83,7 @@ impl RegularGrammar {
             // 接受：闭包含接受态 → 最小 id 接受态的 kind（min-id 对称）
             let acc = closure.iter().filter(|&&s| nfa.is_accepting(s)).min();
             if let Some(&s) = acc {
-                accept_kinds[q] = nfa.token_kind(s);
+                *accept_kind = nfa.token_kind(s);
             }
         }
 
@@ -176,10 +176,10 @@ impl fmt::Display for RegularGrammar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dfa::test_support::{assert_colored_equivalent, nfa_from};
     use crate::dfa::DFA;
-    use crate::regex::parse::parse;
+    use crate::dfa::test_support::{assert_colored_equivalent, nfa_from};
     use crate::regex::Translate;
+    use crate::regex::parse::parse;
     use ast::token::{KeywordKind, TokenKind};
 
     fn dfa_of(nfa: &NFA) -> DFA {
@@ -214,12 +214,10 @@ mod tests {
         let grammar = RegularGrammar::from_nfa(&nfa);
         let has_ident = grammar
             .accept_kinds()
-            .iter()
-            .any(|k| *k == Some(TokenKind::Identifier));
+            .contains(&Some(TokenKind::Identifier));
         let has_if = grammar
             .accept_kinds()
-            .iter()
-            .any(|k| *k == Some(TokenKind::Keyword(KeywordKind::If)));
+            .contains(&Some(TokenKind::Keyword(KeywordKind::If)));
         assert!(has_ident && has_if);
 
         let dfa = grammar.to_nfa();
@@ -247,10 +245,11 @@ mod tests {
         let hir = crate::regex::Hir::Empty;
         let nfa = NFA::from_hir(&hir, TokenKind::Identifier);
         let grammar = RegularGrammar::from_nfa(&nfa);
-        assert!(grammar
-            .accept_kinds()
-            .iter()
-            .any(|k| *k == Some(TokenKind::Identifier)));
+        assert!(
+            grammar
+                .accept_kinds()
+                .contains(&Some(TokenKind::Identifier))
+        );
         let back = grammar.to_nfa();
         assert!(back.is_accepting(back.start_state()));
     }

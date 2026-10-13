@@ -1,0 +1,73 @@
+SOURCE
+val x = 1
+
+SYMBOLS
+0 = x
+
+DIAGNOSTICS
+
+NODES
+4
+
+AST
+SourceFile {
+    id: NodeId(
+        0,
+    ),
+    span: Span {
+        start: 0,
+        end: 9,
+    },
+    package: None,
+    module: None,
+    items: [
+        DeclNode {
+            id: NodeId(
+                1,
+            ),
+            span: Span {
+                start: 0,
+                end: 9,
+            },
+            kind: Binding(
+                BindingDecl {
+                    modifiers: ModifierList {
+                        modifiers: [],
+                    },
+                    immutable: true,
+                    pattern: PatWrap {
+                        id: NodeId(
+                            2,
+                        ),
+                        span: Span {
+                            start: 4,
+                            end: 5,
+                        },
+                        kind: Binding {
+                            mutable: false,
+                            name: Symbol(
+                                0,
+                            ),
+                            ty: None,
+                        },
+                    },
+                    ty: None,
+                    init: Some(
+                        ExprWrap {
+                            id: NodeId(
+                                3,
+                            ),
+                            span: Span {
+                                start: 8,
+                                end: 9,
+                            },
+                            kind: Literal(
+                                Integer,
+                            ),
+                        },
+                    ),
+                },
+            ),
+        },
+    ],
+}

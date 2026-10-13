@@ -33,7 +33,7 @@ impl fmt::Display for HardKeyword {
 }
 
 /// 源码字节区间（`end` exclusive；`end - start` = lexeme 字节数）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Span {
     /// 起始字节偏移（含）
     pub start: u32,
@@ -47,9 +47,17 @@ impl Span {
     /// # Panics (debug)
     ///
     /// `start > end` 时断言失败。
-    pub fn new(start: u32, end: u32) -> Self {
+    pub const fn new(start: u32, end: u32) -> Self {
         debug_assert!(start <= end);
         Self { start, end }
+    }
+
+    pub fn slice<'a>(&self, source: &'a str) -> &'a str {
+        let start = self.start as usize;
+        let end = self.end as usize;
+        debug_assert!(end <= source.len());
+        debug_assert!(source.is_char_boundary(start) && source.is_char_boundary(end));
+        source.get(start..end).unwrap_or_default()
     }
 }
 
@@ -61,55 +69,33 @@ impl fmt::Display for Span {
 
 /// 词法单元
 ///
-/// 表示源代码中的一个词法单元，包含类型、位置和词素信息
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// 表示源代码中的一个词法单元；文本由 source + span 取得，Token 保持 Copy。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Token {
     /// Token 类型
     pub kind: TokenKind,
-    /// 词素（Token 的文本内容）
-    pub lexeme: Box<str>,
     /// 位置信息
     pub span: Span,
 }
 
 impl Token {
     /// 创建新的 Token
-    pub fn new(kind: TokenKind, lexeme: impl Into<Box<str>>, span: Span) -> Self {
-        Self {
-            kind,
-            lexeme: lexeme.into(),
-            span,
-        }
+    pub const fn new(kind: TokenKind, span: Span) -> Self {
+        Self { kind, span }
     }
 
-    /// 创建标识符 Token
-    pub fn identifier(name: impl Into<Box<str>>, span: Span) -> Self {
-        Self::new(TokenKind::Identifier, name, span)
-    }
-
-    /// 创建关键字 Token
-    pub fn keyword(kind: KeywordKind, span: Span) -> Self {
-        Self::new(TokenKind::Keyword(kind), kind.as_str(), span)
-    }
-
-    /// 创建字面量 Token
-    pub fn literal(kind: LiteralKind, value: impl Into<Box<str>>, span: Span) -> Self {
-        Self::new(TokenKind::Literal(kind), value, span)
-    }
-
-    /// 创建运算符 Token
-    pub fn operator(kind: OperatorKind, span: Span) -> Self {
-        Self::new(TokenKind::Operator(kind), kind.as_str(), span)
-    }
-
-    /// 创建标点符号 Token
-    pub fn punctuation(kind: PunctuationKind, span: Span) -> Self {
-        Self::new(TokenKind::Punctuation(kind), kind.as_str(), span)
+    /// Token 对应的源码文本；越界是 lexer bug，release 走空切片避免 panic。
+    pub fn text<'a>(&self, source: &'a str) -> &'a str {
+        self.span.slice(source)
     }
 
     /// 创建 EOF Token
     pub fn eof(span: Span) -> Self {
-        Self::new(TokenKind::Eof, "", span)
+        Self::eof_with_kind(span)
+    }
+
+    const fn eof_with_kind(span: Span) -> Self {
+        Self::new(TokenKind::Eof, span)
     }
 
     /// 检查是否为指定类型的 Token
@@ -145,11 +131,7 @@ impl Token {
 
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Token {{ kind: {}, lexeme: \"{}\", span: {} }}",
-            self.kind, self.lexeme, self.span
-        )
+        write!(f, "Token {{ kind: {}, span: {} }}", self.kind, self.span)
     }
 }
 
@@ -171,15 +153,11 @@ mod tests {
     fn test_token_creation() {
         let span = Span::new(1, 1);
 
-        // 标识符
-        let token = Token::identifier("foo", span);
+        let token = Token::new(TokenKind::Identifier, span);
         assert!(token.is_identifier());
-        assert_eq!(&*token.lexeme, "foo");
 
-        // 关键字
-        let token = Token::keyword(KeywordKind::If, span);
+        let token = Token::new(TokenKind::Keyword(KeywordKind::If), span);
         assert!(token.is_keyword());
-        assert_eq!(&*token.lexeme, "if");
 
         // EOF
         let token = Token::eof(span);
@@ -189,10 +167,8 @@ mod tests {
     #[test]
     fn test_token_display() {
         let span = Span::new(0, 1);
-        let token = Token::identifier("x", span);
-        assert_eq!(
-            token.to_string(),
-            "Token { kind: identifier, lexeme: \"x\", span: 0..1 }"
-        );
+        let token = Token::new(TokenKind::Identifier, span);
+        assert_eq!(token.to_string(), "Token { kind: identifier, span: 0..1 }");
+        assert_eq!(token.text("x"), "x");
     }
 }

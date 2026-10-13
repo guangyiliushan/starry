@@ -32,13 +32,13 @@
 
 pub mod ast;
 pub mod hir;
+pub mod optimize;
 pub mod parse;
 pub mod translate;
-pub mod optimize;
 pub mod visitor;
 
 pub use ast::{Ast, Flags};
 pub use hir::Hir;
-pub use parse::{parse, Parser, ParseError};
-pub use translate::{Translate, Translator};
 pub use optimize::Optimizer;
+pub use parse::{ParseError, Parser, parse};
+pub use translate::{Translate, Translator};

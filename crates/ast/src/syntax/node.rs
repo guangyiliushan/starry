@@ -11,21 +11,26 @@ pub use crate::token::Span;
 pub struct NodeId(pub u32);
 
 /// 节点 ID 生成器（解析期分配；回绕 debug_assert）
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct NodeIdGen {
     next: u32,
 }
 
 impl NodeIdGen {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { next: 0 }
     }
 
-    pub fn next(&mut self) -> NodeId {
-        debug_assert!(self.next < u32::MAX, "NodeId 回绕");
-        let id = NodeId(self.next);
-        self.next += 1;
-        id
+    pub fn try_allocate(&mut self) -> Option<NodeId> {
+        self.next.checked_add(1).map(|next| {
+            let id = NodeId(self.next);
+            self.next = next;
+            id
+        })
+    }
+
+    pub fn allocate(&mut self) -> NodeId {
+        self.try_allocate().expect("NodeId space exhausted")
     }
 
     pub fn count(&self) -> u32 {
@@ -79,6 +84,8 @@ pub use crate::interner::Symbol;
 pub struct SourceFile {
     pub id: NodeId,
     pub span: Span,
+    pub package: Option<Path>,
+    pub module: Option<Path>,
     pub items: Vec<crate::syntax::decl::DeclNode>,
 }
 
@@ -108,12 +115,32 @@ pub enum DiagSeverity {
     Warning,
 }
 
+/// 稳定诊断类别；message 仅用于人类展示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagCode {
+    UnexpectedToken,
+    ExpectedToken,
+    DepthLimitExceeded,
+}
+
 /// 最小诊断
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
+    pub code: DiagCode,
     pub span: Span,
     pub severity: DiagSeverity,
     pub message: String,
+}
+
+impl Diagnostic {
+    pub fn error(code: DiagCode, span: Span, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            span,
+            severity: DiagSeverity::Error,
+            message: message.into(),
+        }
+    }
 }
 
 /// 诊断收集器（append-only，emit → DiagId）
@@ -133,6 +160,15 @@ impl DiagCollector {
         id
     }
 
+    /// 投机解析 checkpoint；失败分支整体回滚，成功分支无需动作。
+    pub fn checkpoint(&self) -> usize {
+        self.diags.len()
+    }
+
+    pub fn rollback(&mut self, checkpoint: usize) {
+        self.diags.truncate(checkpoint);
+    }
+
     pub fn get(&self, id: DiagId) -> &Diagnostic {
         &self.diags[id.0 as usize]
     }
@@ -146,7 +182,10 @@ impl_ast_node!(
     crate::syntax::decl::DeclNode,
     crate::syntax::expr::ExprWrap,
     crate::syntax::ty::TypeWrap,
+    crate::syntax::ty::TypeArg,
+    crate::syntax::ty::TypeParam,
     crate::syntax::pat::PatWrap,
+    crate::syntax::stmt::StmtWrap,
     SourceFile,
     ErrorNode,
     MissingNode,

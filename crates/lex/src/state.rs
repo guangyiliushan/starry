@@ -181,6 +181,7 @@ impl StateGenerator {
     }
 
     /// 生成下一个状态 ID
+    #[allow(clippy::should_implement_trait)] // generator API, not Iterator
     pub fn next(&mut self) -> StateId {
         let id = self.next_id;
         self.next_id += 1;

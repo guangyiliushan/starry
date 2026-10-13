@@ -1,4 +1,4 @@
-﻿//! NFA 模块
+//! NFA 模块
 //!
 //! 非确定性有限自动机（NFA）的定义和操作。
 //!
@@ -12,13 +12,13 @@
 
 use std::collections::VecDeque;
 
+pub mod builder;
 pub mod edge;
 pub mod state;
-pub mod builder;
 
+pub use builder::{Builder, Fragment};
 pub use edge::Edge;
 pub use state::NFAState;
-pub use builder::{Builder, Fragment};
 
 use crate::regex::hir::Hir;
 use crate::regex::optimize::Optimizer;

@@ -1,8 +1,11 @@
-//! 表达式空间（Pratt 解析产物，糖全保留）
+//! 表达式与 block 空间（Pratt 解析产物，糖全保留；v0.3 文法对齐中）
 
-use super::node::{ErrorNode, MissingNode, NodeId, Span, Symbol};
+use super::node::{ErrorNode, MissingNode, NodeId, Path, Span, Symbol};
+use super::pat::PatWrap;
+use super::stmt::StmtWrap;
+use super::ty::TypeArg;
 use super::ty::TypeWrap;
-use crate::token::{LiteralKind, OperatorKind};
+use crate::token::{LiteralKind, OperatorKind, Token};
 
 #[derive(Debug, Clone)]
 pub struct ExprWrap {
@@ -11,28 +14,55 @@ pub struct ExprWrap {
     pub kind: ExprKind,
 }
 
-/// 语句：表达式 + 可选分号（Block 的成员）
+impl ExprWrap {
+    pub const fn new(id: NodeId, span: Span, kind: ExprKind) -> Self {
+        Self { id, span, kind }
+    }
+
+    pub fn missing(id: NodeId, span: Span) -> Self {
+        Self::new(id, span, ExprKind::Missing(MissingNode { id, span }))
+    }
+}
+
+/// 表达式语句；分号/NL 分隔符不进入 AST。
 #[derive(Debug, Clone)]
 pub struct ExprStmt {
     pub expr: ExprWrap,
 }
 
-/// 块：语句序列 + 可选尾表达式（块尾取值）
 #[derive(Debug, Clone)]
 pub struct Block {
-    pub stmts: Vec<ExprStmt>,
+    pub stmts: Vec<StmtWrap>,
     pub tail: Option<Box<ExprWrap>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum LambdaParams {
+    /// `«it»` sugar，保留原形。
+    It,
+    Explicit(Vec<PatWrap>),
 }
 
 #[derive(Debug, Clone)]
 pub enum ExprKind {
     Literal(LiteralKind),
+    Bool(bool),
+    Null,
     Ident(Symbol),
-    Path(super::node::Path),
+    Path(Path),
     Binary {
         op: OperatorKind,
         lhs: Box<ExprWrap>,
         rhs: Box<ExprWrap>,
+    },
+    Is {
+        lhs: Box<ExprWrap>,
+        pattern: Box<PatWrap>,
+    },
+    In {
+        lhs: Box<ExprWrap>,
+        pattern: Box<PatWrap>,
+        negated: bool,
     },
     Unary {
         op: OperatorKind,
@@ -40,11 +70,12 @@ pub enum ExprKind {
     },
     Cast {
         expr: Box<ExprWrap>,
-        ty: Box<super::ty::TypeWrap>,
+        ty: Box<TypeWrap>,
         kind: CastKind,
     },
     Call {
         callee: Box<ExprWrap>,
+        type_args: Vec<TypeArg>,
         args: Vec<ExprWrap>,
     },
     Index {
@@ -56,8 +87,8 @@ pub enum ExprKind {
         name: Symbol,
     },
     Lambda {
-        params: Vec<Symbol>,
-        body: Box<ExprWrap>,
+        params: LambdaParams,
+        body: Box<Block>,
     },
     StringInterp {
         parts: Vec<ExprWrap>,
@@ -67,9 +98,9 @@ pub enum ExprKind {
         branches: Vec<WhenBranch>,
     },
     If {
-        cond: Box<ExprWrap>,
+        cond: Box<Condition>,
         then_block: Box<Block>,
-        else_block: Option<Box<ExprWrap>>,
+        else_block: Option<Box<Block>>,
     },
     Range {
         lo: Box<ExprWrap>,
@@ -78,15 +109,80 @@ pub enum ExprKind {
     },
     Tuple(Vec<ExprWrap>),
     Array(Vec<ExprWrap>),
+    Spawn(SpawnExpr),
+    Async {
+        expr: Box<ExprWrap>,
+    },
+    Await {
+        expr: Box<ExprWrap>,
+    },
+    Comptime {
+        block: Box<Block>,
+    },
+    Super {
+        suffix: SuperSuffix,
+    },
+    MacroCall {
+        name: Path,
+        tokens: Vec<TokenTree>,
+    },
     Error(ErrorNode),
     Missing(MissingNode),
 }
 
-/// when 分支
+/// Refutable condition: ordinary expression or `val Pattern = Expr`.
+#[derive(Debug, Clone)]
+pub enum Condition {
+    Expr(Box<ExprWrap>),
+    Val {
+        pattern: Box<PatWrap>,
+        expr: Box<ExprWrap>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum SpawnScheduler {
+    Detached,
+    Concurrent,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SpawnKind {
+    Thread,
+    Fiber,
+    Process,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpawnExpr {
+    pub scheduler: Option<SpawnScheduler>,
+    pub kind: Option<SpawnKind>,
+    pub body: Box<Block>,
+}
+
+#[derive(Debug, Clone)]
+pub enum SuperSuffix {
+    Member(Symbol),
+    Call(Vec<ExprWrap>),
+}
+
+/// Raw token tree；宏展开不在 parser 内进行。
+#[derive(Debug, Clone, Copy)]
+pub enum TokenTree {
+    Token(Token),
+}
+
 #[derive(Debug, Clone)]
 pub struct WhenBranch {
-    pub pattern: ExprWrap,
+    pub pattern: WhenPattern,
     pub body: WhenBody,
+}
+
+#[derive(Debug, Clone)]
+pub enum WhenPattern {
+    Expression(ExprWrap),
+    Pattern(PatWrap),
+    Else,
 }
 
 #[derive(Debug, Clone)]

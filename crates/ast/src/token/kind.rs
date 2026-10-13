@@ -199,16 +199,6 @@ impl TokenKind {
         TokenKind::Literal(LiteralKind::Char)
     }
 
-    /// 创建布尔字面量 Token
-    pub const fn bool_() -> Self {
-        TokenKind::Literal(LiteralKind::Bool)
-    }
-
-    /// 创建空值字面量 Token
-    pub const fn null() -> Self {
-        TokenKind::Literal(LiteralKind::Null)
-    }
-
     /// 创建 EOF Token
     pub const fn eof() -> Self {
         TokenKind::Eof

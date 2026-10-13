@@ -26,8 +26,8 @@
 //! - **稀疏跳转表**：为热点路径使用数组表，为冷门路径使用更节省空间的结构
 //! - **位掩码缓存**：对于小规模的字符类，使用位掩码加速匹配
 
-use std::ops::RangeInclusive;
 use std::fmt;
+use std::ops::RangeInclusive;
 
 use crate::display::write_escaped_char;
 
@@ -123,18 +123,13 @@ impl PredefinedClass {
     pub fn to_ranges(self) -> Vec<RangeInclusive<char>> {
         match self {
             PredefinedClass::Digit => vec!['0'..='9'],
-            PredefinedClass::Word => vec![
-                '0'..='9',
-                'A'..='Z',
-                'a'..='z',
-                '_'..='_',
-            ],
+            PredefinedClass::Word => vec!['0'..='9', 'A'..='Z', 'a'..='z', '_'..='_'],
             PredefinedClass::Whitespace => vec![
-                ' '..=' ',        // 空格
-                '\t'..='\t',      // 制表符
-                '\n'..='\n',      // 换行符
-                '\r'..='\r',      // 回车符
-                '\x0C'..='\x0C',  // 换页符
+                ' '..=' ',       // 空格
+                '\t'..='\t',     // 制表符
+                '\n'..='\n',     // 换行符
+                '\r'..='\r',     // 回车符
+                '\x0C'..='\x0C', // 换页符
             ],
         }
     }
@@ -209,9 +204,7 @@ impl CharClass {
     /// assert!(!empty.contains('a'));
     /// ```
     pub fn new() -> Self {
-        Self {
-            ranges: Vec::new(),
-        }
+        Self { ranges: Vec::new() }
     }
 
     /// 从 (start, end) 区间列表创建字符类（smart constructor）
@@ -264,9 +257,9 @@ impl CharClass {
 
     /// 检查规范化不变量：有序、不重叠、码点不相邻
     fn is_normalized(&self) -> bool {
-        self.ranges.windows(2).all(|w| {
-            *w[0].end() < *w[1].start() && *w[0].end() as u32 + 1 != *w[1].start() as u32
-        })
+        self.ranges
+            .windows(2)
+            .all(|w| *w[0].end() < *w[1].start() && *w[0].end() as u32 + 1 != *w[1].start() as u32)
     }
 
     /// 从单个字符创建字符类
@@ -343,7 +336,12 @@ impl CharClass {
     /// assert!(digit.contains('5'));
     /// ```
     pub fn predefined(class: PredefinedClass) -> Self {
-        Self::from_ranges(class.to_ranges().into_iter().map(|r| (*r.start(), *r.end())))
+        Self::from_ranges(
+            class
+                .to_ranges()
+                .into_iter()
+                .map(|r| (*r.start(), *r.end())),
+        )
     }
 
     /// 检查字符是否属于该字符类
@@ -547,12 +545,11 @@ impl CharClass {
 
         for range in &self.ranges {
             let start = *range.start();
-            if let Some(c) = cursor {
-                if c < start {
-                    if let Some(gap_end) = prev_char(start) {
-                        result.push((c, gap_end));
-                    }
-                }
+            if let Some(c) = cursor
+                && c < start
+                && let Some(gap_end) = prev_char(start)
+            {
+                result.push((c, gap_end));
             }
             cursor = next_char(*range.end());
         }
@@ -884,7 +881,7 @@ impl Transition {
     /// ```
     pub fn matches(&self, c: char) -> bool {
         match self {
-            Transition::Epsilon => false,  // Epsilon 不匹配任何字符
+            Transition::Epsilon => false, // Epsilon 不匹配任何字符
             Transition::Char(ch) => *ch == c,
             Transition::Range(start, end) => c >= *start && c <= *end,
             Transition::CharClass(class) => class.contains(c),
@@ -914,7 +911,6 @@ impl Transition {
                 .collect(),
         }
     }
-
 }
 
 impl fmt::Display for Transition {
@@ -1122,10 +1118,7 @@ mod tests {
         assert_eq!(class.ranges(), &['a'..='f']);
 
         // 代理区缺口：码点不相邻，不合并，len() 精确
-        let class = CharClass::from_ranges([
-            ('\u{D7FF}', '\u{D7FF}'),
-            ('\u{E000}', '\u{E000}'),
-        ]);
+        let class = CharClass::from_ranges([('\u{D7FF}', '\u{D7FF}'), ('\u{E000}', '\u{E000}')]);
         assert_eq!(
             class.ranges(),
             &['\u{D7FF}'..='\u{D7FF}', '\u{E000}'..='\u{E000}']

@@ -13,10 +13,6 @@ pub enum LiteralKind {
     String,
     /// 字符字面量
     Char,
-    /// 布尔字面量
-    Bool,
-    /// 空值字面量
-    Null,
 }
 
 impl fmt::Display for LiteralKind {
@@ -26,8 +22,6 @@ impl fmt::Display for LiteralKind {
             LiteralKind::Float => write!(f, "float"),
             LiteralKind::String => write!(f, "string"),
             LiteralKind::Char => write!(f, "char"),
-            LiteralKind::Bool => write!(f, "bool"),
-            LiteralKind::Null => write!(f, "null"),
         }
     }
 }

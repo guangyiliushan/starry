@@ -2,8 +2,8 @@
 //!
 //! 定义 NFA 中的单个状态，包含 epsilon 转移和非 epsilon 转移的分离存储。
 
-use crate::state::StateId;
 use super::edge::Edge;
+use crate::state::StateId;
 
 /// NFA 状态
 ///

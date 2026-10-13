@@ -7,11 +7,11 @@
 //! 本测试手构而非 parse，确定性由测试自身保证。
 
 use ast::interner::Interner;
-use ast::syntax::decl::{BindingDecl, DeclKind, DeclNode, FunDecl, FunctionBody, Param};
-use ast::syntax::expr::{ExprKind, ExprStmt, ExprWrap};
+use ast::syntax::decl::{DeclKind, DeclNode, FunDecl, FunctionBody, Param};
+use ast::syntax::expr::{ExprKind, ExprWrap};
 use ast::syntax::modifier::ModifierList;
 use ast::syntax::node::AstNode;
-use ast::syntax::node::{DiagCollector, DiagId, DiagSeverity, Diagnostic, NodeId, NodeIdGen};
+use ast::syntax::node::{DiagCode, DiagCollector, Diagnostic, NodeId, NodeIdGen};
 use ast::syntax::ty::{TypeKind, TypeWrap};
 use ast::token::{OperatorKind, Span};
 
@@ -31,10 +31,11 @@ fn fun_decl_snapshot() {
 
     // fun double(x: int) -> int { return x + x }
     let param_ty = TypeWrap {
-        id: id_gen.next(),
+        id: id_gen.allocate(),
         span: span(14, 17),
         kind: TypeKind::Named {
             path: ast::syntax::node::Path::single(sym_int, span(14, 17)),
+            type_args: Vec::new(),
         },
     };
     let param = Param {
@@ -45,17 +46,17 @@ fn fun_decl_snapshot() {
     };
 
     let lhs = ExprWrap {
-        id: id_gen.next(),
+        id: id_gen.allocate(),
         span: span(29, 30),
         kind: ExprKind::Ident(sym_x),
     };
     let rhs = ExprWrap {
-        id: id_gen.next(),
+        id: id_gen.allocate(),
         span: span(33, 34),
         kind: ExprKind::Ident(sym_x),
     };
-    let add = ExprWrap {
-        id: id_gen.next(),
+    let _add = ExprWrap {
+        id: id_gen.allocate(),
         span: span(29, 34),
         kind: ExprKind::Binary {
             op: OperatorKind::Plus,
@@ -65,6 +66,7 @@ fn fun_decl_snapshot() {
     };
 
     let diag = Diagnostic {
+        code: DiagCode::UnexpectedToken,
         span: span(0, 34),
         severity: ast::syntax::node::DiagSeverity::Warning,
         message: "placeholder".to_string(),
@@ -77,6 +79,7 @@ fn fun_decl_snapshot() {
         type_params: Vec::new(),
         params: vec![param],
         ret: None,
+        where_clause: Vec::new(),
         body: Some(FunctionBody::Block(ast::syntax::expr::Block {
             stmts: vec![],
             tail: None,
@@ -84,7 +87,7 @@ fn fun_decl_snapshot() {
     };
 
     let decl = DeclNode {
-        id: id_gen.next(),
+        id: id_gen.allocate(),
         span: span(0, 34),
         kind: DeclKind::Fun(fun_decl),
     };
@@ -113,13 +116,14 @@ fn partial_ast_with_error() {
     let mut collector = DiagCollector::new();
 
     let did = collector.emit(Diagnostic {
+        code: DiagCode::UnexpectedToken,
         span: span(5, 10),
         severity: ast::syntax::node::DiagSeverity::Error,
         message: "unexpected token".to_string(),
     });
 
     let err_node = ast::syntax::node::ErrorNode {
-        id: id_gen.next(),
+        id: id_gen.allocate(),
         span: span(5, 10),
         err: did,
     };

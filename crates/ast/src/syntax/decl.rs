@@ -1,12 +1,9 @@
-//! 声明空间
-//!
-//! Decl → Expr / Type / Pattern 的语法边在此连通：
-//! 函数体 / 绑定初始化 / 参数默认值均引用 ExprWrap。
+//! 声明空间：Decl → Expr / Type / Pattern 的语法边。
 
-use super::expr::{Block, ExprStmt, ExprWrap};
+use super::expr::{Block, ExprWrap};
 use super::modifier::ModifierList;
-use super::node::{NodeId, Span, Symbol};
-use super::ty::TypeWrap;
+use super::node::{ErrorNode, MissingNode, NodeId, Path, Span, Symbol};
+use super::ty::{TypeParam, TypeWrap};
 
 #[derive(Debug, Clone)]
 pub struct DeclNode {
@@ -15,9 +12,10 @@ pub struct DeclNode {
     pub kind: DeclKind,
 }
 
-/// 声明种类（与 EBNF Declaration + TopLevelDecl 对齐，13 + 7 = 全量）
 #[derive(Debug, Clone)]
 pub enum DeclKind {
+    Import(ImportDecl),
+    Extern(ExternDecl),
     Fun(FunDecl),
     Binding(BindingDecl),
     Class(ClassDecl),
@@ -26,33 +24,90 @@ pub enum DeclKind {
     Union(UnionDecl),
     Trait(TraitDecl),
     TypeAlias(TypeAliasDecl),
-    /// extern "C" fun / extern "C++" namespace（占位）
-    Extern(ExternDecl),
-    /// aspect 声明（AOP）
     Aspect(AspectDecl),
-    /// provide 声明（DI）
     Provide(ProvideDecl),
-    /// macro 声明（占位）
     Macro(MacroDecl),
-    /// impl 块
     Impl(ImplDecl),
-    /// comptime 块（仅语句位置；顶层不允许）
-    Comptime(ComptimeDecl),
-    /// actor 声明
     Actor(ActorDecl),
+    Comptime(ComptimeDecl),
+    Error(ErrorNode),
+    Missing(MissingNode),
+}
+
+#[derive(Debug, Clone)]
+pub enum ImportSuffix {
+    None,
+    Star,
+    DoubleStar,
+    Alias(Symbol),
+}
+
+#[derive(Debug, Clone)]
+pub enum ImportKind {
+    Module {
+        path: Path,
+        suffix: ImportSuffix,
+    },
+    Native {
+        language: NativeLanguage,
+        path: Symbol,
+        alias: Option<Symbol>,
+        members: Vec<FunSignature>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportDecl {
+    pub kind: ImportKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum NativeLanguage {
+    C,
+    Cpp,
+}
+
+#[derive(Debug, Clone)]
+pub struct FunSignature {
+    pub modifiers: ModifierList,
+    pub name: Symbol,
+    pub type_params: Vec<TypeParam>,
+    pub params: Vec<Param>,
+    pub ret: Option<TypeWrap>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ExternBody {
+    Fun(FunSignature),
+    Namespace {
+        name: Symbol,
+        members: Vec<FunSignature>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternDecl {
+    pub language: Symbol,
+    pub body: ExternBody,
+}
+
+#[derive(Debug, Clone)]
+pub struct WhereConstraint {
+    pub ty: TypeWrap,
+    pub bounds: Vec<TypeWrap>,
 }
 
 #[derive(Debug, Clone)]
 pub struct FunDecl {
     pub modifiers: ModifierList,
     pub name: Symbol,
-    pub type_params: Vec<String>,
+    pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
     pub ret: Option<TypeWrap>,
+    pub where_clause: Vec<WhereConstraint>,
     pub body: Option<FunctionBody>,
 }
 
-/// 函数体两种形态（EBNF: Block | "=" Expr）
 #[derive(Debug, Clone)]
 pub enum FunctionBody {
     Block(Block),
@@ -61,8 +116,9 @@ pub enum FunctionBody {
 
 #[derive(Debug, Clone)]
 pub struct BindingDecl {
+    pub modifiers: ModifierList,
     pub immutable: bool,
-    pub name: Symbol,
+    pub pattern: crate::syntax::pat::PatWrap,
     pub ty: Option<TypeWrap>,
     pub init: Option<Box<ExprWrap>>,
 }
@@ -79,10 +135,10 @@ pub struct Param {
 pub struct ClassDecl {
     pub modifiers: ModifierList,
     pub name: Symbol,
-    pub type_params: Vec<String>,
+    pub type_params: Vec<TypeParam>,
     pub primary_ctor: Option<PrimaryConstructor>,
-    pub supertypes: Vec<super::ty::TypeWrap>,
-    pub members: Vec<DeclNode>,
+    pub supertypes: Vec<SuperItem>,
+    pub members: Vec<ClassMember>,
 }
 
 #[derive(Debug, Clone)]
@@ -91,10 +147,38 @@ pub struct PrimaryConstructor {
 }
 
 #[derive(Debug, Clone)]
+pub struct SuperItem {
+    pub ty: TypeWrap,
+    pub args: Option<Vec<ExprWrap>>,
+    pub by: Option<Box<ExprWrap>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ClassMember {
+    Declaration(Box<DeclNode>),
+    Constructor(Box<ConstructorDecl>),
+    Accessor(Box<AccessorDecl>),
+    Init(Block),
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstructorDecl {
+    pub modifiers: ModifierList,
+    pub params: Vec<Param>,
+    pub body: Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct AccessorDecl {
+    pub getter: Option<Block>,
+    pub setter: Option<Block>,
+}
+
+#[derive(Debug, Clone)]
 pub struct StructDecl {
     pub modifiers: ModifierList,
     pub name: Symbol,
-    pub type_params: Vec<String>,
+    pub type_params: Vec<TypeParam>,
     pub fields: Vec<StructField>,
 }
 
@@ -109,7 +193,7 @@ pub struct StructField {
 pub struct EnumDecl {
     pub modifiers: ModifierList,
     pub name: Symbol,
-    pub type_params: Vec<String>,
+    pub type_params: Vec<TypeParam>,
     pub variants: Vec<EnumVariant>,
 }
 
@@ -123,7 +207,7 @@ pub struct EnumVariant {
 pub struct UnionDecl {
     pub modifiers: ModifierList,
     pub name: Symbol,
-    pub type_params: Vec<String>,
+    pub type_params: Vec<TypeParam>,
     pub fields: Vec<StructField>,
 }
 
@@ -131,61 +215,135 @@ pub struct UnionDecl {
 pub struct TraitDecl {
     pub modifiers: ModifierList,
     pub name: Symbol,
-    pub type_params: Vec<String>,
-    pub supertypes: Vec<super::ty::TypeWrap>,
-    pub members: Vec<DeclNode>,
+    pub type_params: Vec<TypeParam>,
+    pub supertypes: Vec<SuperItem>,
+    pub members: Vec<TraitMember>,
+}
+
+#[derive(Debug, Clone)]
+pub enum TraitMember {
+    AssociatedType(AssociatedTypeDecl),
+    Signature(FunSignature),
+    Fun(Box<FunDecl>),
+    Declaration(Box<DeclNode>),
+}
+
+#[derive(Debug, Clone)]
+pub struct AssociatedTypeDecl {
+    pub name: Symbol,
+    pub bound: Option<TypeWrap>,
+    pub default: Option<TypeWrap>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TypeAliasDecl {
     pub modifiers: ModifierList,
     pub name: Symbol,
-    pub type_params: Vec<String>,
+    pub type_params: Vec<TypeParam>,
     pub ty: TypeWrap,
 }
 
-/// extern "C" fun 签名（占位）
 #[derive(Debug, Clone)]
-pub struct ExternDecl {
-    pub language: String,
-    pub is_namespace: bool,
-    pub name: Symbol,
+pub enum AspectMember {
+    Declaration(DeclNode),
+    Advice(AdviceDecl),
 }
 
-/// aspect 声明（AOP 占位）
+#[derive(Debug, Clone)]
+pub enum Pointcut {
+    Name(Path),
+    Member {
+        ty: TypeWrap,
+        member: PointcutMember,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum PointcutMember {
+    Wildcard,
+    Name(Symbol),
+}
+
+#[derive(Debug, Clone)]
+pub enum AdviceKind {
+    Before,
+    After,
+    Around,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdviceDecl {
+    pub kind: AdviceKind,
+    pub target: Pointcut,
+    pub body: Block,
+}
+
 #[derive(Debug, Clone)]
 pub struct AspectDecl {
     pub name: Symbol,
-    pub members: Vec<DeclNode>,
+    pub type_params: Vec<TypeParam>,
+    pub members: Vec<AspectMember>,
 }
 
-/// provide 声明（DI 占位）
+#[derive(Debug, Clone)]
+pub enum ProviderLifetime {
+    Singleton,
+    Scoped,
+    Transient,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderDecl {
+    pub lifetime: ProviderLifetime,
+    pub ty: TypeWrap,
+    pub constructor: ExprWrap,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderBinding {
+    pub interface: TypeWrap,
+    pub implementation: TypeWrap,
+}
+
+#[derive(Debug, Clone)]
+pub enum ProviderItem {
+    Decl(ProviderDecl),
+    Binding(ProviderBinding),
+}
+
 #[derive(Debug, Clone)]
 pub struct ProvideDecl {
     pub name: Symbol,
+    pub items: Vec<ProviderItem>,
 }
 
-/// macro 声明（占位）
 #[derive(Debug, Clone)]
-pub struct MacroDecl {
+pub struct ActorDecl {
     pub name: Symbol,
+    pub primary_ctor: Option<PrimaryConstructor>,
+    pub body: ClassBody,
 }
 
-/// impl 块
 #[derive(Debug, Clone)]
-pub struct ImplDecl {
-    pub type_ref: TypeWrap,
-    pub members: Vec<DeclNode>,
+pub struct ClassBody {
+    pub members: Vec<ClassMember>,
 }
 
-/// comptime 块（仅语句位置；顶层不允许）
 #[derive(Debug, Clone)]
 pub struct ComptimeDecl {
     pub block: Block,
 }
 
-/// actor 声明
 #[derive(Debug, Clone)]
-pub struct ActorDecl {
+pub struct MacroDecl {
     pub name: Symbol,
+    pub params: Vec<Symbol>,
+    pub body: Block,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImplDecl {
+    pub type_ref: TypeWrap,
+    pub trait_ref: TypeWrap,
+    pub members: Vec<ClassMember>,
 }

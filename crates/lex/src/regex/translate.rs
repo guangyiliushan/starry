@@ -153,10 +153,10 @@ impl Translator {
     /// 翻译序列
     fn translate_sequence(&mut self, seq: &[Ast]) -> Hir {
         let mut elements = Vec::new();
-        
+
         for sub in seq {
             let hir = self.translate(sub);
-            
+
             // 扁平化：如果翻译结果也是序列，直接展开
             if let Hir::Sequence(inner) = hir {
                 elements.extend(inner);
@@ -164,17 +164,15 @@ impl Translator {
                 elements.push(hir);
             }
         }
-        
+
         // 智能构造：使用 Hir::sequence 自动扁平化
         Hir::sequence(elements)
     }
 
     /// 翻译选择
     fn translate_choice(&mut self, choices: &[Ast]) -> Hir {
-        let translated: Vec<Hir> = choices.iter()
-            .map(|c| self.translate(c))
-            .collect();
-        
+        let translated: Vec<Hir> = choices.iter().map(|c| self.translate(c)).collect();
+
         // 智能构造：使用 Hir::choice 自动扁平化
         Hir::choice(translated)
     }
@@ -187,7 +185,7 @@ impl Translator {
         }
 
         let hir = self.translate(expr);
-        
+
         // 优化：展开小次数的精确重复为序列
         if max == Some(min) && min <= 10 {
             let mut seq = Vec::with_capacity(min as usize);
@@ -196,22 +194,22 @@ impl Translator {
             }
             return Hir::sequence(seq);
         }
-        
+
         // 优化：展开 {0,1} 为 ?
         if min == 0 && max == Some(1) {
             return Hir::zero_or_one(hir);
         }
-        
+
         // 优化：展开 {1,} 为 +
         if min == 1 && max.is_none() {
             return Hir::one_or_more(hir);
         }
-        
+
         // 优化：展开 {0,} 为 *
         if min == 0 && max.is_none() {
             return Hir::zero_or_more(hir);
         }
-        
+
         Hir::Repeat {
             expr: Box::new(hir),
             min,
@@ -236,7 +234,7 @@ mod tests {
         let ast = parse("a").unwrap();
         let mut translator = Translator::new();
         let hir = translator.translate(&ast);
-        
+
         assert_eq!(hir, Hir::Literal('a'));
     }
 
@@ -245,11 +243,11 @@ mod tests {
         let ast = parse("ab").unwrap();
         let mut translator = Translator::new();
         let hir = translator.translate(&ast);
-        
-        assert_eq!(hir, Hir::sequence(vec![
-            Hir::literal('a'),
-            Hir::literal('b'),
-        ]));
+
+        assert_eq!(
+            hir,
+            Hir::sequence(vec![Hir::literal('a'), Hir::literal('b'),])
+        );
     }
 
     #[test]
@@ -257,11 +255,11 @@ mod tests {
         let ast = parse("a|b").unwrap();
         let mut translator = Translator::new();
         let hir = translator.translate(&ast);
-        
-        assert_eq!(hir, Hir::choice(vec![
-            Hir::literal('a'),
-            Hir::literal('b'),
-        ]));
+
+        assert_eq!(
+            hir,
+            Hir::choice(vec![Hir::literal('a'), Hir::literal('b'),])
+        );
     }
 
     #[test]
@@ -269,7 +267,7 @@ mod tests {
         let ast = parse("a*").unwrap();
         let mut translator = Translator::new();
         let hir = translator.translate(&ast);
-        
+
         assert_eq!(hir, Hir::zero_or_more(Hir::literal('a')));
     }
 
@@ -278,7 +276,7 @@ mod tests {
         let ast = parse("a+").unwrap();
         let mut translator = Translator::new();
         let hir = translator.translate(&ast);
-        
+
         assert_eq!(hir, Hir::one_or_more(Hir::literal('a')));
     }
 
@@ -287,7 +285,7 @@ mod tests {
         let ast = parse("a?").unwrap();
         let mut translator = Translator::new();
         let hir = translator.translate(&ast);
-        
+
         assert_eq!(hir, Hir::zero_or_one(Hir::literal('a')));
     }
 
@@ -304,13 +302,16 @@ mod tests {
         let ast = parse("a{3}").unwrap();
         let mut translator = Translator::new();
         let hir = translator.translate(&ast);
-        
+
         // 应该展开为序列
-        assert_eq!(hir, Hir::sequence(vec![
-            Hir::literal('a'),
-            Hir::literal('a'),
-            Hir::literal('a'),
-        ]));
+        assert_eq!(
+            hir,
+            Hir::sequence(vec![
+                Hir::literal('a'),
+                Hir::literal('a'),
+                Hir::literal('a'),
+            ])
+        );
     }
 
     #[test]
@@ -318,8 +319,15 @@ mod tests {
         let ast = parse("a{2,5}").unwrap();
         let mut translator = Translator::new();
         let hir = translator.translate(&ast);
-        
-        assert!(matches!(hir, Hir::Repeat { min: 2, max: Some(5), .. }));
+
+        assert!(matches!(
+            hir,
+            Hir::Repeat {
+                min: 2,
+                max: Some(5),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -327,8 +335,15 @@ mod tests {
         let ast = parse("a{3,}").unwrap();
         let mut translator = Translator::new();
         let hir = translator.translate(&ast);
-        
-        assert!(matches!(hir, Hir::Repeat { min: 3, max: None, .. }));
+
+        assert!(matches!(
+            hir,
+            Hir::Repeat {
+                min: 3,
+                max: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -336,11 +351,11 @@ mod tests {
         let ast = parse("(a|b)").unwrap();
         let mut translator = Translator::new();
         let hir = translator.translate(&ast);
-        
-        assert_eq!(hir, Hir::choice(vec![
-            Hir::literal('a'),
-            Hir::literal('b'),
-        ]));
+
+        assert_eq!(
+            hir,
+            Hir::choice(vec![Hir::literal('a'), Hir::literal('b'),])
+        );
     }
 
     #[test]
@@ -348,7 +363,7 @@ mod tests {
         let ast = parse("[a-zA-Z][a-zA-Z0-9_]*").unwrap();
         let mut translator = Translator::new();
         let hir = translator.translate(&ast);
-        
+
         // 验证 HIR 结构
         assert!(matches!(hir, Hir::Sequence(_)));
     }
@@ -358,7 +373,7 @@ mod tests {
         let ast = parse("[a-z]").unwrap();
         let mut translator = Translator::new();
         let hir = translator.translate(&ast);
-        
+
         assert!(matches!(hir, Hir::Class(_)));
     }
 
@@ -367,7 +382,7 @@ mod tests {
         let ast = parse("\\d").unwrap();
         let mut translator = Translator::new();
         let hir = translator.translate(&ast);
-        
+
         assert!(matches!(hir, Hir::Class(_)));
     }
 
@@ -376,11 +391,11 @@ mod tests {
         let ast = parse("((a)(b))").unwrap();
         let mut translator = Translator::new();
         let hir = translator.translate(&ast);
-        
+
         // 嵌套的组应该在翻译时展开
-        assert_eq!(hir, Hir::sequence(vec![
-            Hir::literal('a'),
-            Hir::literal('b'),
-        ]));
+        assert_eq!(
+            hir,
+            Hir::sequence(vec![Hir::literal('a'), Hir::literal('b'),])
+        );
     }
 }

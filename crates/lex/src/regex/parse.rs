@@ -32,9 +32,9 @@
 //! let ast = parser.parse().unwrap();
 //! ```
 
-use std::fmt;
 use crate::regex::ast::{Ast, Flags};
 use crate::transition::{CharClass, PredefinedClass};
+use std::fmt;
 
 /// 重复次数上限（与主流正则引擎同量级），在 `parse_number` 内对 min/max 统一设卡
 const MAX_REPEAT: u32 = 1_000;
@@ -179,10 +179,7 @@ impl Parser {
 
     /// 检查是否到达序列结束
     fn is_end_of_sequence(&self) -> bool {
-        match self.peek() {
-            None | Some('|') | Some(')') => true,
-            _ => false,
-        }
+        matches!(self.peek(), None | Some('|') | Some(')'))
     }
 
     /// 解析重复（repeat）
@@ -216,14 +213,14 @@ impl Parser {
                 let repeat = Ast::repeat_range(atom, min, max);
 
                 // 校验 Repeat 语义
-                if let Some(max_val) = max {
-                    if min > max_val {
-                        return Err(ParseError::InvalidRepeatRange {
-                            min,
-                            max: max_val,
-                            message: "最小重复次数不能大于最大重复次数".to_string(),
-                        });
-                    }
+                if let Some(max_val) = max
+                    && min > max_val
+                {
+                    return Err(ParseError::InvalidRepeatRange {
+                        min,
+                        max: max_val,
+                        message: "最小重复次数不能大于最大重复次数".to_string(),
+                    });
                 }
 
                 Ok(repeat)
@@ -283,10 +280,12 @@ impl Parser {
             });
         }
 
-        let n: u64 = digits.parse().map_err(|_| ParseError::RepeatCountTooLarge {
-            limit: MAX_REPEAT,
-            position: start,
-        })?;
+        let n: u64 = digits
+            .parse()
+            .map_err(|_| ParseError::RepeatCountTooLarge {
+                limit: MAX_REPEAT,
+                position: start,
+            })?;
         if n > u64::from(MAX_REPEAT) {
             return Err(ParseError::RepeatCountTooLarge {
                 limit: MAX_REPEAT,
@@ -482,7 +481,9 @@ impl Parser {
                 match c {
                     'd' => Ok(Ast::Class(CharClass::predefined(PredefinedClass::Digit))),
                     'w' => Ok(Ast::Class(CharClass::predefined(PredefinedClass::Word))),
-                    's' => Ok(Ast::Class(CharClass::predefined(PredefinedClass::Whitespace))),
+                    's' => Ok(Ast::Class(CharClass::predefined(
+                        PredefinedClass::Whitespace,
+                    ))),
                     'n' => Ok(Ast::Literal('\n')),
                     'r' => Ok(Ast::Literal('\r')),
                     't' => Ok(Ast::Literal('\t')),
@@ -503,7 +504,7 @@ impl Parser {
 
     /// 检查下一个字符是否在给定集合中
     fn peek_one_of(&self, chars: &str) -> bool {
-        self.peek().map_or(false, |c| chars.contains(c))
+        self.peek().is_some_and(|c| chars.contains(c))
     }
 
     /// 消耗一个字符
@@ -563,10 +564,7 @@ pub enum ParseError {
     UnclosedGroup,
 
     /// 无效的转义字符
-    InvalidEscape {
-        char: char,
-        message: String,
-    },
+    InvalidEscape { char: char, message: String },
 
     /// 无效的字符范围
     InvalidRange {
@@ -576,28 +574,16 @@ pub enum ParseError {
     },
 
     /// 无效的重复次数
-    InvalidRepeatRange {
-        min: u32,
-        max: u32,
-        message: String,
-    },
+    InvalidRepeatRange { min: u32, max: u32, message: String },
 
     /// 重复次数过大
-    RepeatCountTooLarge {
-        limit: u32,
-        position: usize,
-    },
+    RepeatCountTooLarge { limit: u32, position: usize },
 
     /// 超过嵌套深度限制
-    NestLimitExceeded {
-        limit: usize,
-    },
+    NestLimitExceeded { limit: usize },
 
     /// 无效的控制标记
-    InvalidFlag {
-        flag: char,
-        message: String,
-    },
+    InvalidFlag { flag: char, message: String },
 }
 
 impl fmt::Display for ParseError {
@@ -606,11 +592,31 @@ impl fmt::Display for ParseError {
             ParseError::UnexpectedEof => {
                 write!(f, "Unexpected end of file")
             }
-            ParseError::UnexpectedChar { found, expected, position } => {
-                write!(f, "Position {}: expected '{}', found '{}'", position + 1, expected, found)
+            ParseError::UnexpectedChar {
+                found,
+                expected,
+                position,
+            } => {
+                write!(
+                    f,
+                    "Position {}: expected '{}', found '{}'",
+                    position + 1,
+                    expected,
+                    found
+                )
             }
-            ParseError::Expected { expected, found, position } => {
-                write!(f, "Position {}: expected {}, found {}", position + 1, expected, found)
+            ParseError::Expected {
+                expected,
+                found,
+                position,
+            } => {
+                write!(
+                    f,
+                    "Position {}: expected {}, found {}",
+                    position + 1,
+                    expected,
+                    found
+                )
             }
             ParseError::UnclosedGroup => {
                 write!(f, "Unclosed group")
@@ -618,14 +624,23 @@ impl fmt::Display for ParseError {
             ParseError::InvalidEscape { char, message } => {
                 write!(f, "Invalid escape '\\{}': {}", char, message)
             }
-            ParseError::InvalidRange { start, end, message } => {
+            ParseError::InvalidRange {
+                start,
+                end,
+                message,
+            } => {
                 write!(f, "Invalid range '{}-{}': {}", start, end, message)
             }
             ParseError::InvalidRepeatRange { min, max, message } => {
                 write!(f, "Invalid repeat count {{{},{}}}: {}", min, max, message)
             }
             ParseError::RepeatCountTooLarge { limit, position } => {
-                write!(f, "Position {}: repeat count exceeds limit {}", position + 1, limit)
+                write!(
+                    f,
+                    "Position {}: repeat count exceeds limit {}",
+                    position + 1,
+                    limit
+                )
             }
             ParseError::NestLimitExceeded { limit } => {
                 write!(f, "Nesting depth limit {} exceeded", limit)
@@ -680,20 +695,20 @@ mod tests {
     fn test_parse_sequence() {
         let mut parser = Parser::new("ab");
         let ast = parser.parse().unwrap();
-        assert_eq!(ast, Ast::sequence(vec![
-            Ast::Literal('a'),
-            Ast::Literal('b'),
-        ]));
+        assert_eq!(
+            ast,
+            Ast::sequence(vec![Ast::Literal('a'), Ast::Literal('b'),])
+        );
     }
 
     #[test]
     fn test_parse_choice() {
         let mut parser = Parser::new("a|b");
         let ast = parser.parse().unwrap();
-        assert_eq!(ast, Ast::Choice(vec![
-            Ast::Literal('a'),
-            Ast::Literal('b'),
-        ]));
+        assert_eq!(
+            ast,
+            Ast::Choice(vec![Ast::Literal('a'), Ast::Literal('b'),])
+        );
     }
 
     #[test]
@@ -742,10 +757,10 @@ mod tests {
     fn test_parse_group() {
         let mut parser = Parser::new("(a|b)");
         let ast = parser.parse().unwrap();
-        assert_eq!(ast, Ast::group(Ast::choice(vec![
-            Ast::literal('a'),
-            Ast::literal('b'),
-        ])));
+        assert_eq!(
+            ast,
+            Ast::group(Ast::choice(vec![Ast::literal('a'), Ast::literal('b'),]))
+        );
     }
 
     #[test]
@@ -847,16 +862,21 @@ mod tests {
     #[test]
     fn test_parse_convenience() {
         let ast = parse("a|b").unwrap();
-        assert_eq!(ast, Ast::Choice(vec![
-            Ast::Literal('a'),
-            Ast::Literal('b'),
-        ]));
+        assert_eq!(
+            ast,
+            Ast::Choice(vec![Ast::Literal('a'), Ast::Literal('b'),])
+        );
     }
 
     #[test]
     fn test_repeat_count_limit() {
         // 超过 MAX_REPEAT(1_000)：u32 溢出与天文数字统一走同一错误
-        for pattern in ["a{1001}", "a{4294967296}", "a{2,4000000000}", "a{99999999999999999999999}"] {
+        for pattern in [
+            "a{1001}",
+            "a{4294967296}",
+            "a{2,4000000000}",
+            "a{99999999999999999999999}",
+        ] {
             let err = parse(pattern).unwrap_err();
             assert!(
                 matches!(err, ParseError::RepeatCountTooLarge { limit: 1_000, .. }),
@@ -877,7 +897,14 @@ mod tests {
         ));
         assert!(parse("a{0}").is_ok());
         let ast = parse("a{0000005}").unwrap();
-        assert!(matches!(ast, Ast::Repeat { min: 5, max: Some(5), .. }));
+        assert!(matches!(
+            ast,
+            Ast::Repeat {
+                min: 5,
+                max: Some(5),
+                ..
+            }
+        ));
         assert!(matches!(parse("a{}"), Err(ParseError::Expected { .. })));
         assert!(matches!(parse("a{,5}"), Err(ParseError::Expected { .. })));
         assert!(matches!(parse("a{3,x}"), Err(ParseError::Expected { .. })));
@@ -919,7 +946,11 @@ mod tests {
         // 反序字符区间是用户输入错误，解析期报错而非进入构造层
         assert!(matches!(
             parse("[z-a]"),
-            Err(ParseError::InvalidRange { start: 'z', end: 'a', .. })
+            Err(ParseError::InvalidRange {
+                start: 'z',
+                end: 'a',
+                ..
+            })
         ));
     }
 

@@ -4,7 +4,7 @@ use super::node::Span;
 use crate::token::ModifierWord;
 
 /// 修饰符列表（保序，双指位诊断需要）
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModifierList {
     pub modifiers: Vec<Modifier>,
 }

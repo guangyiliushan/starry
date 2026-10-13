@@ -23,6 +23,7 @@
 | 4 | UnaryExpr (含 await) | ExprKind::Unary | operand | !/-/~/&/*/await | ✓ |
 | 5 | PostfixExpr (. / [] / call / ?. / !!) | ExprKind::Call/Index/Member | base, args/index | . / [ / ( / ?. / !! | ✓ |
 | 6 | Primary (unit/tuple/array/null/self/super/Path) | ExprKind::Literal/Ident/Path | — | null/self/super ∈ hard | ✓ |
+| 6a | `true` / `false` / `null` | ExprKind::Bool(bool) / ExprKind::Null | operand | hard keywords are not LiteralKind duplicates | ✓ |
 | 7 | WhenExpr (两种形态) | ExprKind::When（待 parser） | subject, branches | "when" ∈ hard | ✓ |
 | 8 | WhenBranch → (Expr \| Block) [HIGH-RISK] | WhenBranch | pattern, body | -> ∈ 规则表 | ✓ |
 | 9 | GenericArgs 关联绑定 [HIGH-RISK] | TypeArg = Type or IDENT=Type | args | < > ∈ 标点 | ✓ |
@@ -39,3 +40,7 @@
 | NL 前言约定（不逐产生式塞 NL） | EBNF 前言声明 |
 | mutable 模式 | pat.rs BindingPattern mutable 字段 |
 | 参数默认值（Decl→Expr walk 边） | decl.rs Param 默认值字段 |
+| 条件绑定无 `let` | RefutableCondition = Expr \| "val" Pattern "=" Expr |
+| provider `->` 保留 | ProviderDecl lifecycle construction rule |
+| declaration 全量 | DeclKind / ClassMember / TraitMember / ProviderItem |
+| `ParameterList` 显式化 | Parameter / ParameterList 前言定义 |

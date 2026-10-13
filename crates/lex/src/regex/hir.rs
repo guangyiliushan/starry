@@ -26,8 +26,8 @@
 //! println!("HIR: {:?}", hir);
 //! ```
 
-use std::fmt;
 use crate::transition::CharClass;
+use std::fmt;
 
 // ==================== HIR 枚举 ====================
 
@@ -409,14 +409,11 @@ mod tests {
 
     #[test]
     fn test_hir_sequence() {
-        let seq = Hir::sequence(vec![
-            Hir::literal('a'),
-            Hir::literal('b'),
-        ]);
-        assert_eq!(seq, Hir::Sequence(vec![
-            Hir::literal('a'),
-            Hir::literal('b'),
-        ]));
+        let seq = Hir::sequence(vec![Hir::literal('a'), Hir::literal('b')]);
+        assert_eq!(
+            seq,
+            Hir::Sequence(vec![Hir::literal('a'), Hir::literal('b'),])
+        );
         assert_eq!(seq.to_string(), "(a b)");
     }
 
@@ -427,23 +424,23 @@ mod tests {
             Hir::sequence(vec![Hir::literal('a'), Hir::literal('b')]),
             Hir::literal('c'),
         ]);
-        assert_eq!(seq, Hir::Sequence(vec![
-            Hir::literal('a'),
-            Hir::literal('b'),
-            Hir::literal('c'),
-        ]));
+        assert_eq!(
+            seq,
+            Hir::Sequence(vec![
+                Hir::literal('a'),
+                Hir::literal('b'),
+                Hir::literal('c'),
+            ])
+        );
     }
 
     #[test]
     fn test_hir_choice() {
-        let choice = Hir::choice(vec![
-            Hir::literal('a'),
-            Hir::literal('b'),
-        ]);
-        assert_eq!(choice, Hir::Choice(vec![
-            Hir::literal('a'),
-            Hir::literal('b'),
-        ]));
+        let choice = Hir::choice(vec![Hir::literal('a'), Hir::literal('b')]);
+        assert_eq!(
+            choice,
+            Hir::Choice(vec![Hir::literal('a'), Hir::literal('b'),])
+        );
         assert_eq!(choice.to_string(), "(a | b)");
     }
 

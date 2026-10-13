@@ -65,7 +65,7 @@
 | `Infix` | `infix` | `modifier` |
 | `Vararg` | `vararg` | `modifier` |
 
-## Slot word (31)
+## Slot word (30)
 
 | Variant | Lexeme | Grammar slot |
 |---|---|---|
@@ -99,5 +99,4 @@
 | `Get` | `get` | `accessor` |
 | `Set` | `set` | `accessor` |
 | `Out` | `out` | `type_variance` |
-| `Let` | `let` | `condition_binding` |
 

@@ -12,14 +12,14 @@
 use std::fmt;
 
 use ast::token::Token;
-use ast::token::lookup_keyword;
 use ast::token::TokenKind;
+use ast::token::lookup_keyword;
 
-use crate::dfa::{DfaError, DFA};
+use crate::dfa::{DFA, DfaError};
 use crate::nfa::NFA;
-use crate::regex::parse::parse;
-use crate::regex::parse::ParseError;
 use crate::regex::Translate;
+use crate::regex::parse::ParseError;
+use crate::regex::parse::parse;
 use ast::token::Span;
 
 /// lexer 构建错误：正则解析、DFA 上限、ε-规则三种座位
@@ -92,21 +92,38 @@ impl Lexer {
         Ok(Lexer { dfa })
     }
 
+    /// 构建冻结的 Starry 全量 lexer。
+    pub fn starry() -> Result<Lexer, LexerError> {
+        Self::build(Self::starry_rules())
+    }
+
     /// Starry v0.3 全套词法规则表（操作符 + 标点 + 字面量）
     ///
     /// 冲突组由 DFA 最长匹配自动择优（机械推导 + 人工示例双验证）。
     /// 关键字不在规则表内——ident 规则 + lookup_keyword 后分类。
     pub fn starry_rules() -> Vec<(&'static str, TokenKind)> {
-        use ast::token::{OperatorKind, PunctuationKind, LiteralKind};
+        use ast::token::{LiteralKind, OperatorKind, PunctuationKind};
         vec![
             // 标识符与数字
             ("[a-zA-Z_][a-zA-Z0-9_]*", TokenKind::Identifier),
-            ("0[xX][0-9a-fA-F][_0-9a-fA-F]*|[0-9][_0-9]*", TokenKind::Literal(LiteralKind::Integer)),
-            ("[0-9][_0-9]*\\.[0-9][_0-9]*([eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+", TokenKind::Literal(LiteralKind::Float)),
+            (
+                "0[xX][0-9a-fA-F][_0-9a-fA-F]*|0[oO][0-7][_0-7]*|0[bB][01][_01]*|[0-9][_0-9]*",
+                TokenKind::Literal(LiteralKind::Integer),
+            ),
+            (
+                "[0-9][_0-9]*\\.[0-9][_0-9]*([eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+",
+                TokenKind::Literal(LiteralKind::Float),
+            ),
             // 字符串（含插值 raw 文本，转义解码归 parser 子扫描）
-            ("\"(\\\\[^\\r\\n]|[^\"\\\\\\r\\n])*\"", TokenKind::Literal(LiteralKind::String)),
+            (
+                "\"(\\\\[^\\r\\n]|[^\"\\\\\\r\\n])*\"",
+                TokenKind::Literal(LiteralKind::String),
+            ),
             // 字符
-            ("'(\\\\u\\{[0-9a-fA-F]{1,6}\\}|\\\\[^\\r\\n]|[^'\\\\\\r\\n])'", TokenKind::Literal(LiteralKind::Char)),
+            (
+                "'(\\\\u\\{[0-9a-fA-F]{1,6}\\}|\\\\[^\\r\\n]|[^'\\\\\\r\\n])'",
+                TokenKind::Literal(LiteralKind::Char),
+            ),
             // 复合赋值（必须在单字符 = 之前）
             ("\\+=", TokenKind::Operator(OperatorKind::PlusEq)),
             ("-=", TokenKind::Operator(OperatorKind::MinusEq)),
@@ -140,7 +157,10 @@ impl Lexer {
             ("as!", TokenKind::Operator(OperatorKind::AsBang)),
             ("\\?\\.", TokenKind::Operator(OperatorKind::QuestionDot)),
             ("!!", TokenKind::Operator(OperatorKind::BangBang)),
-            ("\\?\\?", TokenKind::Operator(OperatorKind::QuestionQuestion)),
+            (
+                "\\?\\?",
+                TokenKind::Operator(OperatorKind::QuestionQuestion),
+            ),
             // 单字符操作符
             ("\\+", TokenKind::Operator(OperatorKind::Plus)),
             ("-", TokenKind::Operator(OperatorKind::Minus)),
@@ -171,7 +191,8 @@ impl Lexer {
             ("#", TokenKind::Punctuation(PunctuationKind::Hash)),
             ("@", TokenKind::Punctuation(PunctuationKind::At)),
         ]
-    }    pub fn dfa(&self) -> &DFA {
+    }
+    pub fn dfa(&self) -> &DFA {
         &self.dfa
     }
 
@@ -206,7 +227,7 @@ impl Lexer {
             if first == '\n' {
                 i += 1;
                 if paren_depth == 0 {
-                    tokens.push(Token::new(TokenKind::Nl, "\n", Span::new(i as u32 - 1, i as u32)));
+                    tokens.push(Token::new(TokenKind::Nl, Span::new(i as u32 - 1, i as u32)));
                 }
                 continue;
             }
@@ -244,11 +265,7 @@ impl Lexer {
             // 括号深度追踪
             match first {
                 '(' | '[' | '{' => paren_depth += 1,
-                ')' | ']' | '}' => {
-                    if paren_depth > 0 {
-                        paren_depth -= 1;
-                    }
-                }
+                ')' | ']' | '}' if paren_depth > 0 => paren_depth = paren_depth.saturating_sub(1),
                 _ => {}
             }
 
@@ -258,16 +275,12 @@ impl Lexer {
                     let end = i + len;
                     debug_assert!(end <= u32::MAX as usize);
                     // 关键字后分类：ident lexeme 查表
-                    if kind == TokenKind::Identifier {
-                        if let Some(kw) = lookup_keyword(&source[i..end]) {
-                            kind = TokenKind::Keyword(kw);
-                        }
+                    if kind == TokenKind::Identifier
+                        && let Some(kw) = lookup_keyword(&source[i..end])
+                    {
+                        kind = TokenKind::Keyword(kw);
                     }
-                    tokens.push(Token::new(
-                        kind,
-                        &source[i..end],
-                        Span::new(i as u32, end as u32),
-                    ));
+                    tokens.push(Token::new(kind, Span::new(i as u32, end as u32)));
                     i = end;
                 }
                 _ => {
@@ -276,7 +289,6 @@ impl Lexer {
                     debug_assert!(end <= u32::MAX as usize);
                     tokens.push(Token::new(
                         TokenKind::Unknown,
-                        &source[i..end],
                         Span::new(i as u32, end as u32),
                     ));
                     i = end;
@@ -290,8 +302,8 @@ impl Lexer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ast::token::LiteralKind;
     use ast::token::KeywordKind;
+    use ast::token::LiteralKind;
 
     #[test]
     fn test_build_rejects_epsilon_rules() {
@@ -354,9 +366,20 @@ mod tests {
         let tokens = lexer.tokenize("🦀if");
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].kind, TokenKind::Unknown);
-        assert_eq!(&*tokens[0].lexeme, "🦀");
+        assert_eq!(tokens[0].text("🦀if"), "🦀");
         assert_eq!((tokens[0].span.start, tokens[0].span.end), (0, 4));
         assert_eq!(tokens[1].kind, TokenKind::Keyword(KeywordKind::If));
         assert_eq!((tokens[1].span.start, tokens[1].span.end), (4, 6));
+    }
+
+    #[test]
+    fn tokenize_octal_and_binary_without_splitting() {
+        let lexer = Lexer::starry().unwrap();
+        let tokens = lexer.tokenize("0o777 0b1010");
+        assert_eq!(tokens.len(), 2, "{tokens:?}");
+        assert_eq!(tokens[0].kind, TokenKind::Literal(LiteralKind::Integer));
+        assert_eq!(tokens[0].text("0o777 0b1010"), "0o777");
+        assert_eq!(tokens[1].kind, TokenKind::Literal(LiteralKind::Integer));
+        assert_eq!(tokens[1].text("0o777 0b1010"), "0b1010");
     }
 }

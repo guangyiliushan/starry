@@ -17,7 +17,7 @@ pub mod brzozowski;
 pub mod hopcroft;
 pub mod moore;
 
-use super::{build, initial_blocks, total_target, Block};
+use super::{Block, build, initial_blocks, total_target};
 
 pub use brzozowski::brzozowski;
 pub use hopcroft::hopcroft;
@@ -26,10 +26,10 @@ pub use moore::moore;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dfa::test_support::{assert_colored_equivalent, nfa_from};
     use crate::dfa::DFA;
-    use crate::regex::parse::parse;
+    use crate::dfa::test_support::{assert_colored_equivalent, nfa_from};
     use crate::regex::Translate;
+    use crate::regex::parse::parse;
     use ast::token::{KeywordKind, TokenKind};
 
     fn dfa_from(pattern: &str) -> DFA {

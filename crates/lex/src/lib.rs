@@ -23,12 +23,12 @@ pub mod regex;
 pub mod state;
 pub mod transition;
 
-pub use dfa::{DfaError, DFA};
+pub use dfa::{DFA, DfaError};
 pub use display::{write_escaped_char, write_escaped_str};
 pub use grammar::{NonTerminalId, Production, RegularGrammar, SymbolId};
 pub use lexer::{Lexer, LexerError};
-pub use nfa::{NFA, Edge, NFAState, Builder, Fragment};
-pub use regex::{Ast, Hir, Parser, ParseError, Flags};
+pub use nfa::{Builder, Edge, Fragment, NFA, NFAState};
+pub use regex::{Ast, Flags, Hir, ParseError, Parser};
 pub use state::{State, StateGenerator, StateId, StateSet};
 pub use transition::{CharClass, PredefinedClass, Transition};
 

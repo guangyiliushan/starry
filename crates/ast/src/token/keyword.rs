@@ -230,7 +230,6 @@ pub enum SlotWord {
     Get,
     Set,
     Out,
-    Let,
 }
 
 impl SlotWord {
@@ -267,7 +266,6 @@ impl SlotWord {
             Self::Get => "get",
             Self::Set => "set",
             Self::Out => "out",
-            Self::Let => "let",
         }
     }
 }
@@ -305,11 +303,10 @@ pub fn lookup_slot_word(word: &str) -> Option<SlotWord> {
         "get" => Some(SlotWord::Get),
         "set" => Some(SlotWord::Set),
         "out" => Some(SlotWord::Out),
-        "let" => Some(SlotWord::Let),
         _ => None,
     }
 }
 
 pub const HARD_KEYWORD_COUNT: usize = 39;
 pub const MODIFIER_WORD_COUNT: usize = 14;
-pub const SLOT_WORD_COUNT: usize = 31;
+pub const SLOT_WORD_COUNT: usize = 30;

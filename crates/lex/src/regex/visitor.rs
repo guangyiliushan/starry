@@ -35,9 +35,9 @@
 //! assert_eq!(count, 3);
 //! ```
 
-use std::collections::VecDeque;
 use crate::regex::ast::Ast;
 use crate::regex::parse::ParseError;
+use std::collections::VecDeque;
 
 // ==================== 迭代访问器 ====================
 
@@ -128,13 +128,13 @@ where
     pub fn dfs(&mut self) -> Result<(), ParseError> {
         while let Some(node) = self.stack.pop() {
             (self.visit)(node)?;
-            
+
             // 反向压栈，保证 DFS 顺序
             for child in node.children().into_iter().rev() {
                 self.stack.push(child);
             }
         }
-        
+
         Ok(())
     }
 
@@ -162,16 +162,16 @@ where
     /// ```
     pub fn bfs(&mut self) -> Result<(), ParseError> {
         let mut queue: VecDeque<&'a Ast> = self.stack.drain(..).collect();
-        
+
         while let Some(node) = queue.pop_front() {
             (self.visit)(node)?;
-            
+
             // 添加子节点到队列末尾
             for child in node.children() {
                 queue.push_back(child);
             }
         }
-        
+
         Ok(())
     }
 }
@@ -266,7 +266,8 @@ pub fn collect(ast: &Ast) -> Vec<Ast> {
     visit(ast, |node| {
         nodes.push(node.clone());
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     nodes
 }
 
@@ -384,10 +385,7 @@ mod tests {
 
     #[test]
     fn test_visitor_dfs() {
-        let ast = Ast::sequence(vec![
-            literal('a'),
-            literal('b'),
-        ]);
+        let ast = Ast::sequence(vec![literal('a'), literal('b')]);
 
         let mut nodes = Vec::new();
         let mut visitor = Visitor::new(&ast, |node| {
@@ -396,7 +394,7 @@ mod tests {
         });
 
         visitor.dfs().unwrap();
-        
+
         // DFS 顺序：Sequence, Literal('b'), Literal('a')
         assert!(nodes.iter().any(|s| s.contains("Sequence")));
         assert!(nodes.iter().any(|s| s.contains("Literal('a')")));
@@ -405,10 +403,7 @@ mod tests {
 
     #[test]
     fn test_visitor_bfs() {
-        let ast = Ast::sequence(vec![
-            literal('a'),
-            literal('b'),
-        ]);
+        let ast = Ast::sequence(vec![literal('a'), literal('b')]);
 
         let mut nodes = Vec::new();
         let mut visitor = Visitor::new(&ast, |node| {
@@ -417,7 +412,7 @@ mod tests {
         });
 
         visitor.bfs().unwrap();
-        
+
         // BFS 顺序：Sequence, Literal('a'), Literal('b')
         assert!(nodes.iter().any(|s| s.contains("Sequence")));
         assert!(nodes.iter().any(|s| s.contains("Literal('a')")));
@@ -427,13 +422,14 @@ mod tests {
     #[test]
     fn test_visit() {
         let ast = Ast::sequence(vec![literal('a'), literal('b')]);
-        
+
         let mut count = 0;
         visit(&ast, |_node| {
             count += 1;
             Ok(())
-        }).unwrap();
-        
+        })
+        .unwrap();
+
         assert_eq!(count, 3);
     }
 
@@ -441,7 +437,7 @@ mod tests {
     fn test_collect() {
         let ast = Ast::sequence(vec![literal('a'), literal('b')]);
         let nodes = collect(&ast);
-        
+
         assert_eq!(nodes.len(), 3);
     }
 
@@ -449,47 +445,39 @@ mod tests {
     fn test_count() {
         let ast = Ast::sequence(vec![literal('a'), literal('b')]);
         let count = count(&ast);
-        
+
         assert_eq!(count, 3);
     }
 
     #[test]
     fn test_any() {
         let ast = Ast::sequence(vec![literal('a'), literal('b')]);
-        let has_literal = any(&ast, |node| {
-            matches!(node, Ast::Literal(_))
-        });
-        
+        let has_literal = any(&ast, |node| matches!(node, Ast::Literal(_)));
+
         assert!(has_literal);
     }
 
     #[test]
     fn test_any_false() {
         let ast = Ast::sequence(vec![literal('a'), literal('b')]);
-        let has_choice = any(&ast, |node| {
-            matches!(node, Ast::Choice(_))
-        });
-        
+        let has_choice = any(&ast, |node| matches!(node, Ast::Choice(_)));
+
         assert!(!has_choice);
     }
 
     #[test]
     fn test_all() {
         let ast = Ast::sequence(vec![literal('a'), literal('b')]);
-        let not_all_literal = all(&ast, |node| {
-            matches!(node, Ast::Literal(_))
-        });
-        
+        let not_all_literal = all(&ast, |node| matches!(node, Ast::Literal(_)));
+
         assert!(!not_all_literal); // Sequence 节点不满足
     }
 
     #[test]
     fn test_all_true() {
         let ast = Ast::sequence(vec![literal('a'), literal('b')]);
-        let all_not_empty = all(&ast, |node| {
-            !matches!(node, Ast::Empty)
-        });
-        
+        let all_not_empty = all(&ast, |node| !matches!(node, Ast::Empty));
+
         assert!(all_not_empty);
     }
 
@@ -500,7 +488,7 @@ mod tests {
         for _ in 0..1000 {
             ast = Ast::sequence(vec![ast, Ast::literal('b')]);
         }
-        
+
         let count = count(&ast);
         assert_eq!(count, 1002); // Sequence + Literal('a') + 1000 * Literal('b')
     }

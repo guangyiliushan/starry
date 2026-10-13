@@ -15,8 +15,8 @@
 //! - [`Repeat`] - 重复构造（如 `{n,m}`）
 //! - [`Flags`] - 控制标记（如 `(?i)`）
 
-use std::fmt;
 use crate::transition::{CharClass, PredefinedClass};
+use std::fmt;
 
 // ==================== AST 枚举 ====================
 
@@ -412,18 +412,10 @@ impl fmt::Display for Ast {
 /// let flags = Flags::case_insensitive();
 /// assert!(flags.is_case_insensitive());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Flags {
     /// 忽略大小写
     pub case_insensitive: bool,
-}
-
-impl Default for Flags {
-    fn default() -> Self {
-        Self {
-            case_insensitive: false,
-        }
-    }
 }
 
 impl Flags {
@@ -515,11 +507,14 @@ mod tests {
             Ast::literal('b'),
             Ast::literal('c'),
         ]);
-        assert_eq!(seq, Ast::Sequence(vec![
-            Ast::literal('a'),
-            Ast::literal('b'),
-            Ast::literal('c'),
-        ]));
+        assert_eq!(
+            seq,
+            Ast::Sequence(vec![
+                Ast::literal('a'),
+                Ast::literal('b'),
+                Ast::literal('c'),
+            ])
+        );
         assert_eq!(seq.to_string(), "(a b c)");
     }
 
@@ -530,11 +525,14 @@ mod tests {
             Ast::sequence(vec![Ast::literal('a'), Ast::literal('b')]),
             Ast::literal('c'),
         ]);
-        assert_eq!(seq, Ast::Sequence(vec![
-            Ast::literal('a'),
-            Ast::literal('b'),
-            Ast::literal('c'),
-        ]));
+        assert_eq!(
+            seq,
+            Ast::Sequence(vec![
+                Ast::literal('a'),
+                Ast::literal('b'),
+                Ast::literal('c'),
+            ])
+        );
     }
 
     #[test]
@@ -556,11 +554,14 @@ mod tests {
             Ast::literal('b'),
             Ast::literal('c'),
         ]);
-        assert_eq!(choice, Ast::Choice(vec![
-            Ast::literal('a'),
-            Ast::literal('b'),
-            Ast::literal('c'),
-        ]));
+        assert_eq!(
+            choice,
+            Ast::Choice(vec![
+                Ast::literal('a'),
+                Ast::literal('b'),
+                Ast::literal('c'),
+            ])
+        );
         assert_eq!(choice.to_string(), "(a | b | c)");
     }
 
@@ -571,11 +572,14 @@ mod tests {
             Ast::choice(vec![Ast::literal('a'), Ast::literal('b')]),
             Ast::literal('c'),
         ]);
-        assert_eq!(choice, Ast::Choice(vec![
-            Ast::literal('a'),
-            Ast::literal('b'),
-            Ast::literal('c'),
-        ]));
+        assert_eq!(
+            choice,
+            Ast::Choice(vec![
+                Ast::literal('a'),
+                Ast::literal('b'),
+                Ast::literal('c'),
+            ])
+        );
     }
 
     #[test]
@@ -602,33 +606,42 @@ mod tests {
     #[test]
     fn test_repeat_exact() {
         let repeat = Ast::repeat_exact(Ast::literal('a'), 3);
-        assert_eq!(repeat, Ast::Repeat {
-            expr: Box::new(Ast::literal('a')),
-            min: 3,
-            max: Some(3),
-        });
+        assert_eq!(
+            repeat,
+            Ast::Repeat {
+                expr: Box::new(Ast::literal('a')),
+                min: 3,
+                max: Some(3),
+            }
+        );
         assert_eq!(repeat.to_string(), "(a){3}");
     }
 
     #[test]
     fn test_repeat_range() {
         let repeat = Ast::repeat_range(Ast::literal('a'), 2, Some(5));
-        assert_eq!(repeat, Ast::Repeat {
-            expr: Box::new(Ast::literal('a')),
-            min: 2,
-            max: Some(5),
-        });
+        assert_eq!(
+            repeat,
+            Ast::Repeat {
+                expr: Box::new(Ast::literal('a')),
+                min: 2,
+                max: Some(5),
+            }
+        );
         assert_eq!(repeat.to_string(), "(a){2,5}");
     }
 
     #[test]
     fn test_repeat_unbounded() {
         let repeat = Ast::repeat_range(Ast::literal('a'), 3, None);
-        assert_eq!(repeat, Ast::Repeat {
-            expr: Box::new(Ast::literal('a')),
-            min: 3,
-            max: None,
-        });
+        assert_eq!(
+            repeat,
+            Ast::Repeat {
+                expr: Box::new(Ast::literal('a')),
+                min: 3,
+                max: None,
+            }
+        );
         assert_eq!(repeat.to_string(), "(a){3,}");
     }
 
@@ -641,10 +654,7 @@ mod tests {
 
     #[test]
     fn test_children() {
-        let seq = Ast::sequence(vec![
-            Ast::literal('a'),
-            Ast::literal('b'),
-        ]);
+        let seq = Ast::sequence(vec![Ast::literal('a'), Ast::literal('b')]);
         let children = seq.children();
         assert_eq!(children.len(), 2);
         assert_eq!(children[0], &Ast::literal('a'));

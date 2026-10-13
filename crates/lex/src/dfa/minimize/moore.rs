@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use super::{initial_blocks, Block};
+use super::{Block, initial_blocks};
 use crate::dfa::DFA;
 
 pub fn moore(dfa: &DFA) -> DFA {

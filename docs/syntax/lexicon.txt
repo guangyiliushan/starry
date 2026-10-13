@@ -60,7 +60,7 @@ modifier operator OperatorWord modifier
 modifier infix Infix modifier
 modifier vararg Vararg modifier
 
-# 31 slot words, recognized only in their named parser slot.
+# 30 slot words, recognized only in their named parser slot.
 slot actor Actor declaration_or_spawn
 slot aspect Aspect declaration
 slot provide Provide declaration
@@ -91,4 +91,3 @@ slot init Init class_initializer
 slot get Get accessor
 slot set Set accessor
 slot out Out type_variance
-slot let Let condition_binding

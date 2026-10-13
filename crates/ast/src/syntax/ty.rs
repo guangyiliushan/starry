@@ -1,6 +1,6 @@
 //! 类型空间
 
-use super::node::{NodeId, Span, Symbol};
+use super::node::{ErrorNode, MissingNode, NodeId, Path, Span, Symbol};
 
 #[derive(Debug, Clone)]
 pub struct TypeWrap {
@@ -10,23 +10,48 @@ pub struct TypeWrap {
 }
 
 #[derive(Debug, Clone)]
+pub struct TypeArg {
+    pub id: NodeId,
+    pub span: Span,
+    /// `IDENT "=" Type` associated binding；普通 type arg 为 `None`。
+    pub associated: Option<Symbol>,
+    pub ty: Box<TypeWrap>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeParam {
+    pub id: NodeId,
+    pub span: Span,
+    pub variance: Option<Variance>,
+    pub name: Symbol,
+    pub bound: Option<Box<TypeWrap>>,
+    pub default: Option<Box<TypeWrap>>,
+}
+
+#[derive(Debug, Clone)]
 pub enum TypeKind {
+    Union(Vec<TypeWrap>),
     Named {
-        path: super::node::Path,
+        path: Path,
+        type_args: Vec<TypeArg>,
     },
+    Dyn(Box<TypeWrap>),
+    SelfType,
     Nullable(Box<TypeWrap>),
     Fn {
         params: Vec<TypeWrap>,
         ret: Box<TypeWrap>,
     },
     Tuple(Vec<TypeWrap>),
+    Unit,
+    Error(ErrorNode),
+    Missing(MissingNode),
 }
 
-/// 类型变异性（in 硬关键字 / «out» 槽位词——记法不对称是词汇冻结后果）
+/// 类型变异性（`in` 硬关键字 / `out` slot word）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Variance {
-    /// `in`（硬关键字 token）
     In,
-    /// «out»（槽位词 Identifier）
     Out,
+    InOut,
 }

@@ -44,7 +44,10 @@ impl fmt::Display for DfaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DfaError::StateLimitExceeded { limit } => {
-                write!(f, "子集构造状态数超过上限 {limit}（语言的 DFA 可能指数膨胀）")
+                write!(
+                    f,
+                    "子集构造状态数超过上限 {limit}（语言的 DFA 可能指数膨胀）"
+                )
             }
         }
     }
@@ -82,8 +85,7 @@ impl DfaState {
         for (lo, hi, target) in edges {
             match merged.last_mut() {
                 Some((_, last_hi, last_t))
-                    if *last_t == target
-                        && (*last_hi >= lo || next_char(*last_hi) == Some(lo)) =>
+                    if *last_t == target && (*last_hi >= lo || next_char(*last_hi) == Some(lo)) =>
                 {
                     if hi > *last_hi {
                         *last_hi = hi;
@@ -92,7 +94,10 @@ impl DfaState {
                 _ => merged.push((lo, hi, target)),
             }
         }
-        Self { state, edges: merged }
+        Self {
+            state,
+            edges: merged,
+        }
     }
 
     /// c 命中的区间边（至多一个：有序 + 不相交）
@@ -227,9 +232,9 @@ impl DFA {
         let n = self.state_count();
         let mut keep = vec![false; n];
         let mut queue = VecDeque::new();
-        for i in 0..n {
+        for (i, reachable) in keep.iter_mut().enumerate() {
             if self.is_accepting(i) {
-                keep[i] = true;
+                *reachable = true;
                 queue.push_back(i);
             }
         }
@@ -261,9 +266,7 @@ impl DFA {
             let id = new_id[i];
             for &(lo, hi, t) in &s.edges {
                 if keep[t] {
-                    states[id]
-                        .edges
-                        .push((lo, hi, new_id[t]));
+                    states[id].edges.push((lo, hi, new_id[t]));
                 }
             }
         }
@@ -315,7 +318,7 @@ pub(super) fn initial_blocks(dfa: &DFA, dead_i: usize) -> (Vec<Block>, Vec<usize
     let total = dead_i + 1;
     let mut blocks: Vec<Block> = Vec::new();
     let mut block_of = vec![0usize; total];
-    for i in 0..total {
+    for (i, block) in block_of.iter_mut().enumerate() {
         let color = if i == dead_i { None } else { dfa.token_kind(i) };
         let b = blocks
             .iter()
@@ -327,7 +330,7 @@ pub(super) fn initial_blocks(dfa: &DFA, dead_i: usize) -> (Vec<Block>, Vec<usize
                 });
                 blocks.len() - 1
             });
-        block_of[i] = b;
+        *block = b;
         blocks[b].members.push(i);
     }
     (blocks, block_of)
@@ -384,10 +387,10 @@ pub(crate) mod test_support {
 
     use ast::token::TokenKind;
 
-    use crate::dfa::{DFA, DEAD};
+    use crate::dfa::{DEAD, DFA};
     use crate::nfa::NFA;
-    use crate::regex::parse::parse;
     use crate::regex::Translate;
+    use crate::regex::parse::parse;
     use crate::state::StateId;
     use crate::transition::next_char;
 
@@ -415,11 +418,7 @@ pub(crate) mod test_support {
         let probes: Vec<char> = cuts.into_iter().collect();
 
         let color = |dfa: &DFA, s: StateId| -> Option<TokenKind> {
-            if s == DEAD {
-                None
-            } else {
-                dfa.token_kind(s)
-            }
+            if s == DEAD { None } else { dfa.token_kind(s) }
         };
         let step = |dfa: &DFA, s: StateId, c: char| -> StateId {
             if s == DEAD {
@@ -477,8 +476,8 @@ impl fmt::Display for DFA {
 mod tests {
     use super::*;
     use crate::nfa::NFA;
-    use crate::regex::parse::parse;
     use crate::regex::Translate;
+    use crate::regex::parse::parse;
 
     fn nfa_from(pattern: &str) -> NFA {
         let ast = parse(pattern).unwrap();
@@ -583,10 +582,7 @@ mod tests {
     #[test]
     fn test_longest_match_color() {
         let dfa = dfa_from("ab");
-        assert_eq!(
-            dfa.longest_match("ab"),
-            Some((2, TokenKind::Identifier))
-        );
+        assert_eq!(dfa.longest_match("ab"), Some((2, TokenKind::Identifier)));
         assert_eq!(dfa.longest_match("a"), None);
     }
 }

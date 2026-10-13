@@ -4,10 +4,53 @@
 generates the Rust definitions, the reserved-token fragment for the ANTLR4
 lexer reference, and the Markdown table.
 
-The frozen counts are 39 hard keywords, 14 modifier words, and 31 slot words.
+The frozen counts are 39 hard keywords, 14 modifier words, and 30 slot words.
 Only hard keywords are reserved by the lexer. Modifier and slot words remain
 identifiers and are recognized by parser predicates only in their listed
 grammar slots.
+
+## Frozen syntax decisions
+
+`let` is not a Starry keyword and is not a declaration form. Simple refutable
+conditions use `is`:
+
+```starry
+if value is Some(v) {
+    use(v)
+}
+```
+
+For complex destructuring conditions, reuse the existing `val` binding form in
+the condition slot:
+
+```starry
+if val Some(Response { status, body: Json(data) }) = response {
+    accept(data)
+}
+
+while val Some((key, value)) = queue.next() {
+    handle(key, value)
+}
+```
+
+The `val` in this condition slot is a refutable binding: the branch runs only
+when the pattern matches. There is no `let` declaration and no `let` condition.
+
+DI providers retain `->` because the right side is a lifecycle construction
+rule, not an ordinary assignment or a function type:
+
+```starry
+provide AppServices {
+    singleton Clock -> SystemClock()
+    scoped Session -> Session.open(user)
+}
+```
+
+Use `bind ... to ...` for an interface-to-implementation relationship:
+
+```starry
+bind Clock to SystemClock
+```
 
 ```bash
 cargo run -p syntaxgen

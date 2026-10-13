@@ -1,6 +1,7 @@
-//! 模式空间
+//! 模式空间（与冻结 EBNF Pattern 产生式一一对应）
 
-use super::node::{NodeId, Span, Symbol};
+use super::node::{ErrorNode, MissingNode, NodeId, Path, Span, Symbol};
+use super::ty::TypeWrap;
 use crate::token::LiteralKind;
 
 #[derive(Debug, Clone)]
@@ -10,28 +11,42 @@ pub struct PatWrap {
     pub kind: PatKind,
 }
 
+impl PatWrap {
+    pub const fn new(id: NodeId, span: Span, kind: PatKind) -> Self {
+        Self { id, span, kind }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PatKind {
+    Or(Vec<PatWrap>),
     Binding {
         mutable: bool,
         name: Symbol,
-        ty: Option<Box<super::ty::TypeWrap>>,
+        ty: Option<Box<TypeWrap>>,
     },
     Literal(LiteralKind),
-    Is(Box<super::ty::TypeWrap>),
+    Bool(bool),
+    Null,
     Wildcard,
     Tuple(Vec<PatWrap>),
-    Array(Vec<PatWrap>),
+    Array {
+        elements: Vec<PatWrap>,
+        rest: bool,
+    },
     Constructor {
-        path: super::node::Path,
+        path: Path,
         args: Vec<PatWrap>,
     },
     Struct {
-        path: super::node::Path,
+        path: Path,
         fields: Vec<(Symbol, PatWrap)>,
     },
     Range {
-        lo: Box<super::pat::PatWrap>,
-        hi: Box<super::pat::PatWrap>,
+        lo: Box<PatWrap>,
+        hi: Box<PatWrap>,
+        inclusive: bool,
     },
+    Error(ErrorNode),
+    Missing(MissingNode),
 }

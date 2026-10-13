@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use super::{initial_blocks, Block};
+use super::{Block, initial_blocks};
 use crate::dfa::DFA;
 
 pub fn hopcroft(dfa: &DFA) -> DFA {
@@ -75,18 +75,12 @@ pub fn hopcroft(dfa: &DFA) -> DFA {
                     .collect();
                 let (b1_len, b2_len) = (b1.len(), b2.len());
                 let color = blocks[b].color;
-                blocks[b] = Block {
-                    color,
-                    members: b2,
-                };
+                blocks[b] = Block { color, members: b2 };
                 for &p in &blocks[b].members {
                     block_of[p] = b;
                 }
                 let new_id = blocks.len();
-                blocks.push(Block {
-                    color,
-                    members: b1,
-                });
+                blocks.push(Block { color, members: b1 });
                 for &p in &blocks[new_id].members {
                     block_of[p] = new_id;
                 }
@@ -99,10 +93,7 @@ pub fn hopcroft(dfa: &DFA) -> DFA {
                     worklist.push_back(b);
                     in_worklist.push(true);
                     worklist.push_back(new_id);
-                } else if in_worklist[b] {
-                    in_worklist.push(true);
-                    worklist.push_back(new_id);
-                } else if b1_len < b2_len {
+                } else if in_worklist[b] || b1_len < b2_len {
                     in_worklist.push(true);
                     worklist.push_back(new_id);
                 } else {
