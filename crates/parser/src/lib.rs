@@ -69,8 +69,8 @@ impl Parser {
         let source_len = u32::try_from(source.len())
             .map_err(|_| ParserError::SourceTooLarge { len: source.len() })?;
         let tokens = self.lexer.tokenize(source);
-        let mut session = ParseSession::new(source, tokens, source_len);
-        let ast = session.parse_module()?;
+        let mut session = ParseSession::new(source, tokens, source_len, &self.lexer);
+        let ast = session.parse_compilation_unit()?;
         Ok(ParseOutput {
             ast,
             interner: session.interner,
@@ -92,10 +92,11 @@ pub(crate) struct ParseSession<'src> {
     pub(crate) id_gen: NodeIdGen,
     pub(crate) diags: DiagCollector,
     pub(crate) depth: usize,
+    pub(crate) lexer: &'src Lexer,
 }
 
 impl<'src> ParseSession<'src> {
-    fn new(source: &'src str, tokens: Vec<Token>, source_len: u32) -> Self {
+    fn new(source: &'src str, tokens: Vec<Token>, source_len: u32, lexer: &'src Lexer) -> Self {
         Self {
             source,
             source_len,
@@ -104,14 +105,30 @@ impl<'src> ParseSession<'src> {
             id_gen: NodeIdGen::new(),
             diags: DiagCollector::new(),
             depth: 0,
+            lexer,
         }
     }
 
-    fn parse_module(&mut self) -> Result<SourceFile, ParserError> {
+    /// 对源码切片做词法分析，并把 token span 平移回全文坐标。
+    pub(crate) fn tokenize_range(&self, start: usize, end: usize) -> Vec<Token> {
+        let inner = &self.source[start..end];
+        self.lexer
+            .tokenize(inner)
+            .into_iter()
+            .map(|mut token| {
+                token.span = Span::new(
+                    token.span.start + start as u32,
+                    token.span.end + start as u32,
+                );
+                token
+            })
+            .collect()
+    }
+
+    fn parse_compilation_unit(&mut self) -> Result<SourceFile, ParserError> {
         let id = self.next_node()?;
         self.cursor.skip_nl();
         let package = self.parse_named_prefix(ast::token::HardKeyword::Package)?;
-        let module = self.parse_named_prefix(ast::token::HardKeyword::Module)?;
         let mut items = Vec::new();
         while !self.cursor.is_eof() {
             if self.cursor.check(&TokenKind::Nl) {
@@ -145,7 +162,6 @@ impl<'src> ParseSession<'src> {
             id,
             span: Span::new(0, self.source_len),
             package,
-            module,
             items,
         })
     }

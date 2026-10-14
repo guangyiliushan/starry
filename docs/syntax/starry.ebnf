@@ -1,5 +1,5 @@
 (* ==================================================================
- * Starry v0.3 canonical grammar
+ * Starry v0.4 canonical grammar
  *
  * Notation:
  *   "val"       hard keyword, globally reserved by the lexer
@@ -12,19 +12,23 @@
  *
  * Truth hierarchy:
  *   integration tests > starry.ebnf > ANTLR4 reference grammar
+ *
+ * Namespace decisions (v0.4):
+ *   single "package" header; no "module" declaration (package =
+ *   namespace + compilation unit, exact-name membership); qualified
+ *   names use "." only; import suffixes are ".*" and "as" IDENT.
  * ================================================================== *)
 
 (* ---------- Compilation unit ---------- *)
 
-CompilationUnit := [ PackageDecl ] [ ModuleDecl ]
+CompilationUnit := [ PackageDecl ]
                    { ImportDecl } { TopLevelDecl } ;
 
 PackageDecl := "package" QualifiedName ;
-ModuleDecl  := "module" QualifiedName ;
 
-ImportDecl    := ModuleImport | NativeImport ;
-ModuleImport  := "import" QualifiedName [ ModuleImportSuffix ] ;
-ModuleImportSuffix := ".*" | "::*" | "as" IDENT ;
+ImportDecl    := QualifiedImport | NativeImport ;
+QualifiedImport := "import" QualifiedName [ ImportSuffix ] ;
+ImportSuffix := ".*" | "as" IDENT ;
 
 NativeImport  := "import" NativeLanguage StringLiteral
                  [ "as" IDENT ] [ "{" ImportMember { "," ImportMember } [ "," ] "}" ] ;
@@ -77,7 +81,7 @@ ClassDecl    := Modifiers "class" IDENT TypeParams?
                 PrimaryConstructor? Supertypes? ClassBody? ;
 PrimaryConstructor := "(" ParameterList ")" ;
 Supertypes   := ":" SuperItem { "," SuperItem } ;
-SuperItem    := Type [ "(" ArgumentList? ")" ] [ "by" Expr ] ;
+SuperItem    := Type [ "(" ArgumentList? ")" ] [ «by» Expr ] ;
 ClassBody    := "{" { ClassMember } "}" ;
 ClassMember  := Declaration | ConstructorDecl | AccessorDecl | InitBlock ;
 
@@ -85,7 +89,7 @@ ConstructorDecl := Modifiers «init» "(" ParameterList ")" Block ;
 InitBlock       := «init» Block ;
 AccessorDecl    := «get» Block [ «set» Block ] | «set» Block [ «get» Block ] ;
 
-StructDecl  := Modifiers "struct" IDENT TypeParams? "{" { StructField } "}" ;
+StructDecl  := Modifiers "struct" IDENT TypeParams? "{" { StructField [ "," ] } "}" ;
 StructField := Modifiers IDENT ":" Type ;
 
 EnumDecl        := Modifiers "enum" IDENT TypeParams? "{" EnumVariantList "}" ;
@@ -143,11 +147,13 @@ Type         := FunctionType ;
 FunctionType := UnionType [ "->" FunctionType ] ;
 UnionType    := PostfixType { "|" PostfixType } ;
 PostfixType  := PrimaryType { "?" } ;
-PrimaryType  := NamedType | TupleType | UnitType | "Self" | "dyn" Bound | "(" Type ")" ;
+PrimaryType  := NamedType | TupleType | UnitType | "Self" | "dyn" Bound
+             | ArrayType | "(" Type ")" ;
+ArrayType    := "[" Type ";" INTEGER "]" ;
 NamedType    := QualifiedName [ TypeArgs ] ;
 TupleType    := "(" Type "," Type { "," Type } [ "," ] ")" ;
 UnitType     := "(" ")" ;
-QualifiedName := IDENT { ( "." | "::" ) IDENT } ;
+QualifiedName := IDENT { "." IDENT } ;
 
 (* ---------- Statements ---------- *)
 
@@ -188,7 +194,7 @@ LoopStatement  := [ Label ":" ] "loop" Block ;
 
 JumpStatement  := "break" [ Label ] [ Expr ] | "continue" [ Label ] | "return" [ Expr ] ;
 DeferStatement := "defer" Block ;
-GrowStatement  := «grow» Expr "to" INTEGER «bits» ;
+GrowStatement  := «grow» Expr «to» INTEGER «bits» ;
 Label          := IDENT ;
 
 (* ---------- Expressions ---------- *)
@@ -207,8 +213,8 @@ LambdaExpr       := [ «move» ] "{" [ LambdaParameters "->" ] Block "}" ;
 LambdaParameters := ParameterPattern { "," ParameterPattern } ;
 ParameterPattern := [ "mut" ] IDENT [ ":" Type ] | «it» ;
 
-WhenExpr    := "when" [ "(" Expr ")" ] "{" { WhenBranch } "}" ;
-WhenBranch  := WhenPattern "->" ( Expr | Block ) ;
+WhenExpr    := "when" [ "(" Expr ")" ] "{" { WhenBranch [ "," ] } "}" ;
+WhenBranch  := WhenPattern "->" ( Expr | Block | JumpStatement ) ;
 WhenPattern := Pattern [ "if" Expr ] | Expr | "else" ;
 
 ConcurrencyExpr := SpawnExpr | AsyncExpr | ConcurrentBlock ;
@@ -221,11 +227,12 @@ ActorConstruction := QualifiedName "(" ArgumentList? ")" ;
 UnsafeBlock     := "unsafe" Block ;
 ProceedExpr     := «proceed» ;
 
-ComptimeExpr := «comptime» Expr ;
-MacroCall    := "#" QualifiedName "(" [ ArgumentList ] ")" ;
+ComptimeExpr := «comptime» Block ;
+MacroCall    := IDENT "!" "(" MacroTokenStream ")" ;
+MacroTokenStream := ? raw tokens until the matching ")" ? ;
 
 (* Pratt precedence, high to low:
- *   postfix:  . [] () ?. !! ?
+ *   postfix:  . [] () ?. !!
  *   unary:    await ! - ~ & *
  *   cast:     as as? as!
  *   multiplicative: * / %
@@ -261,8 +268,7 @@ PostfixSuffix := "." IDENT
                | "[" Expr "]"
                | CallSuffix
                | "?." IDENT
-               | "!!"
-               | "?" ;
+               | "!!" ;
 CallSuffix   := TypeArgs? "(" ArgumentList? ")" ;
 ArgumentList := Argument { "," Argument } [ "," ] ;
 Argument     := [ IDENT "=" ] Expr ;
@@ -279,7 +285,7 @@ Primary := Literal
 
 SuperExpression := "super" ( "." IDENT | CallSuffix ) ;
 TupleExpression := "(" [ Expr { "," Expr } [ "," ] ] ")" ;
-ArrayExpression := "[" [ Expr { "," Expr } [ "," ] ] "]" ;
+ArrayExpression := "[" [ ( Expr { "," Expr } [ "," ] ) | ( Expr ";" INTEGER ) ] "]" ;
 
 (* ---------- Patterns ---------- *)
 
@@ -321,8 +327,10 @@ CHAR    := ? Unicode character literal with escapes ? ;
 IDENT   := ? [A-Za-z_][A-Za-z0-9_]* ? ;
 
 (* The lexer emits one or more newlines as a single NL token. Spaces, tabs,
- * and comments do not become tokens. Newlines are suppressed inside (), [],
- * and {}. Generic argument lists do not suppress newlines in v0.3. *)
+* and comments do not become tokens. Newlines are suppressed inside ( and [
+* only; inside {} a newline terminates the statement. An expression continues
+* across a newline only when the line ends with a binary operator or the next
+* line starts with a binary-only operator or ".". *)
 NL := ? one or more line terminators ? ;
 
 (* Hard-keyword terminals are generated from docs/syntax/lexicon.txt into

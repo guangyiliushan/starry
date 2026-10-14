@@ -38,13 +38,12 @@ pub enum DeclKind {
 pub enum ImportSuffix {
     None,
     Star,
-    DoubleStar,
     Alias(Symbol),
 }
 
 #[derive(Debug, Clone)]
 pub enum ImportKind {
-    Module {
+    Qualified {
         path: Path,
         suffix: ImportSuffix,
     },

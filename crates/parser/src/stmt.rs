@@ -7,7 +7,7 @@ use ast::syntax::stmt::{StmtKind, StmtWrap};
 use ast::token::{HardKeyword, PunctuationKind, TokenKind};
 
 use crate::decl::expect_keyword;
-use crate::expr::{parse_block, parse_expr, parse_identifier, parse_refutable_condition};
+use crate::expr::{parse_block, parse_expr, parse_refutable_condition};
 use crate::pat::parse_pattern;
 use crate::ty::join_span;
 use crate::{ParseSession, ParserError};
@@ -210,7 +210,7 @@ pub(crate) fn parse_statement(
 }
 
 fn parse_label(session: &mut ParseSession<'_>) -> Result<Option<Symbol>, ParserError> {
-    if let TokenKind::Identifier = session.cursor.peek().kind
+    if let TokenKind::Label = session.cursor.peek().kind
         && session
             .cursor
             .peek_ahead(1)
@@ -222,19 +222,19 @@ fn parse_label(session: &mut ParseSession<'_>) -> Result<Option<Symbol>, ParserE
                 | Some(TokenKind::Keyword(HardKeyword::Loop))
         )
     {
-        let name = parse_identifier(session).0;
+        let token = session.cursor.advance();
         session.cursor.advance();
-        return Ok(Some(name));
+        let text = session.token_text(&token);
+        return Ok(Some(session.interner.intern(&text[1..])));
     }
     Ok(None)
 }
 
 fn parse_optional_label(session: &mut ParseSession<'_>) -> Option<Symbol> {
-    if let TokenKind::Identifier = session.cursor.peek().kind
-        && !statement_has_expression(session)
-    {
+    if let TokenKind::Label = session.cursor.peek().kind {
         let token = session.cursor.advance();
-        return Some(session.interner.intern(session.token_text(&token)));
+        let text = session.token_text(&token);
+        return Some(session.interner.intern(&text[1..]));
     }
     None
 }
@@ -244,6 +244,7 @@ fn statement_has_expression(session: &ParseSession<'_>) -> bool {
         session.cursor.peek().kind,
         TokenKind::Nl
             | TokenKind::Punctuation(PunctuationKind::Semicolon)
+            | TokenKind::Punctuation(PunctuationKind::Comma)
             | TokenKind::Punctuation(PunctuationKind::RBrace)
             | TokenKind::Eof
     )

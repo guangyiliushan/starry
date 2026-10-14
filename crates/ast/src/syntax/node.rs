@@ -62,7 +62,7 @@ pub struct PathSegment {
     pub span: Span,
 }
 
-/// 共享路径（点分或 :: 分隔）
+/// 共享路径（点分）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Path {
     pub segments: Vec<PathSegment>,
@@ -85,7 +85,6 @@ pub struct SourceFile {
     pub id: NodeId,
     pub span: Span,
     pub package: Option<Path>,
-    pub module: Option<Path>,
     pub items: Vec<crate::syntax::decl::DeclNode>,
 }
 
@@ -121,6 +120,7 @@ pub enum DiagCode {
     UnexpectedToken,
     ExpectedToken,
     DepthLimitExceeded,
+    UnclosedInterpolation,
 }
 
 /// 最小诊断

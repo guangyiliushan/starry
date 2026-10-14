@@ -423,7 +423,15 @@ impl Parser {
                     }
                     Some(escaped) => {
                         self.bump();
-                        class = class.union(&CharClass::single(escaped));
+                        // 与 parse_escape 一致：\n/\r/\t 解码为控制字符，
+                        // 其余按字面处理（标点转义）。
+                        let decoded = match escaped {
+                            'n' => '\n',
+                            'r' => '\r',
+                            't' => '\t',
+                            other => other,
+                        };
+                        class = class.union(&CharClass::single(decoded));
                     }
                     None => {
                         return Err(ParseError::UnexpectedEof);
@@ -784,6 +792,22 @@ mod tests {
             assert!(!class.contains('a'));
             assert!(!class.contains('z'));
             assert!(class.contains('0'));
+        } else {
+            panic!("Expected CharClass");
+        }
+    }
+
+    #[test]
+    fn test_parse_class_control_escapes() {
+        // 回归：类内 \r \n 曾被当作字面字母 r/n（字符串词法规则因此失配）
+        let mut parser = Parser::new("[^\"\\\\\\r\\n]");
+        let ast = parser.parse().unwrap();
+        if let Ast::Class(class) = ast {
+            assert!(!class.contains('"'));
+            assert!(!class.contains('\\'));
+            assert!(!class.contains('\r'));
+            assert!(!class.contains('\n'));
+            assert!(class.contains('a'));
         } else {
             panic!("Expected CharClass");
         }

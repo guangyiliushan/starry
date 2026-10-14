@@ -19,7 +19,6 @@ SourceFile {
         end: 9,
     },
     package: None,
-    module: None,
     items: [
         DeclNode {
             id: NodeId(

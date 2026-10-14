@@ -5,7 +5,6 @@
 pub enum HardKeyword {
     Package,
     Import,
-    Module,
     Extern,
     Val,
     Var,
@@ -39,7 +38,6 @@ pub enum HardKeyword {
     As,
     Is,
     In,
-    By,
     Where,
     Mut,
 }
@@ -50,7 +48,6 @@ impl HardKeyword {
         match self {
             Self::Package => "package",
             Self::Import => "import",
-            Self::Module => "module",
             Self::Extern => "extern",
             Self::Val => "val",
             Self::Var => "var",
@@ -84,7 +81,6 @@ impl HardKeyword {
             Self::As => "as",
             Self::Is => "is",
             Self::In => "in",
-            Self::By => "by",
             Self::Where => "where",
             Self::Mut => "mut",
         }
@@ -96,7 +92,6 @@ pub fn lookup_hard_keyword(word: &str) -> Option<HardKeyword> {
     match word {
         "package" => Some(HardKeyword::Package),
         "import" => Some(HardKeyword::Import),
-        "module" => Some(HardKeyword::Module),
         "extern" => Some(HardKeyword::Extern),
         "val" => Some(HardKeyword::Val),
         "var" => Some(HardKeyword::Var),
@@ -130,7 +125,6 @@ pub fn lookup_hard_keyword(word: &str) -> Option<HardKeyword> {
         "as" => Some(HardKeyword::As),
         "is" => Some(HardKeyword::Is),
         "in" => Some(HardKeyword::In),
-        "by" => Some(HardKeyword::By),
         "where" => Some(HardKeyword::Where),
         "mut" => Some(HardKeyword::Mut),
         _ => None,
@@ -230,6 +224,7 @@ pub enum SlotWord {
     Get,
     Set,
     Out,
+    By,
 }
 
 impl SlotWord {
@@ -266,6 +261,7 @@ impl SlotWord {
             Self::Get => "get",
             Self::Set => "set",
             Self::Out => "out",
+            Self::By => "by",
         }
     }
 }
@@ -303,10 +299,11 @@ pub fn lookup_slot_word(word: &str) -> Option<SlotWord> {
         "get" => Some(SlotWord::Get),
         "set" => Some(SlotWord::Set),
         "out" => Some(SlotWord::Out),
+        "by" => Some(SlotWord::By),
         _ => None,
     }
 }
 
-pub const HARD_KEYWORD_COUNT: usize = 39;
+pub const HARD_KEYWORD_COUNT: usize = 37;
 pub const MODIFIER_WORD_COUNT: usize = 14;
-pub const SLOT_WORD_COUNT: usize = 30;
+pub const SLOT_WORD_COUNT: usize = 31;

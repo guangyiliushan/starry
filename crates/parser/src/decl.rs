@@ -147,6 +147,7 @@ pub(crate) fn parse_fun_decl(session: &mut ParseSession<'_>) -> Result<FunDecl, 
         .cursor
         .bump_if(&TokenKind::Operator(OperatorKind::Eq))
     {
+        session.cursor.skip_nl();
         Some(FunctionBody::Expr(parse_expr(session)?))
     } else {
         None
@@ -217,6 +218,7 @@ pub(crate) fn parse_binding_decl(session: &mut ParseSession<'_>) -> Result<DeclN
         .cursor
         .bump_if(&TokenKind::Operator(OperatorKind::Eq))
     {
+        session.cursor.skip_nl();
         Some(Box::new(parse_expr(session)?))
     } else {
         None
@@ -274,6 +276,20 @@ pub(crate) fn parse_import(
                 .cursor
                 .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
             {
+                session.cursor.skip_nl();
+                if session
+                    .cursor
+                    .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+                {
+                    break;
+                }
+                session.cursor.skip_nl();
+                if session
+                    .cursor
+                    .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+                {
+                    break;
+                }
                 members.push(parse_fun_signature(session)?);
                 expect_punctuation(session, PunctuationKind::Semicolon, ';');
                 if !session
@@ -300,7 +316,7 @@ pub(crate) fn parse_import(
         ));
     }
 
-    let path = parse_module_path(session)?;
+    let path = parse_import_path(session)?;
     let suffix = if session
         .cursor
         .check(&TokenKind::Punctuation(PunctuationKind::Dot))
@@ -312,17 +328,6 @@ pub(crate) fn parse_import(
         session.cursor.advance();
         session.cursor.advance();
         ImportSuffix::Star
-    } else if session
-        .cursor
-        .check(&TokenKind::Punctuation(PunctuationKind::ColonColon))
-        && session
-            .cursor
-            .peek_ahead(1)
-            .is_some_and(|token| token.kind == TokenKind::Operator(OperatorKind::Star))
-    {
-        session.cursor.advance();
-        session.cursor.advance();
-        ImportSuffix::DoubleStar
     } else if session.cursor.check(&TokenKind::Keyword(HardKeyword::As)) {
         session.cursor.advance();
         ImportSuffix::Alias(parse_identifier(session).0)
@@ -331,7 +336,7 @@ pub(crate) fn parse_import(
     };
     Ok((
         ImportDecl {
-            kind: ImportKind::Module { path, suffix },
+            kind: ImportKind::Qualified { path, suffix },
         },
         start,
     ))
@@ -345,7 +350,7 @@ fn parse_alias(session: &mut ParseSession<'_>) -> Result<Option<Symbol>, ParserE
     }
 }
 
-fn parse_module_path(session: &mut ParseSession<'_>) -> Result<Path, ParserError> {
+fn parse_import_path(session: &mut ParseSession<'_>) -> Result<Path, ParserError> {
     let first = parse_identifier(session);
     let mut segments = vec![ast::syntax::node::PathSegment {
         name: first.0,
@@ -359,20 +364,12 @@ fn parse_module_path(session: &mut ParseSession<'_>) -> Result<Path, ParserError
                 .cursor
                 .peek_ahead(1)
                 .is_some_and(|token| token.kind == TokenKind::Operator(OperatorKind::Star));
-        let wildcard_after_path = session
-            .cursor
-            .check(&TokenKind::Punctuation(PunctuationKind::ColonColon))
-            && session
-                .cursor
-                .peek_ahead(1)
-                .is_some_and(|token| token.kind == TokenKind::Operator(OperatorKind::Star));
-        if wildcard_after_dot || wildcard_after_path {
+        if wildcard_after_dot {
             break;
         }
         if matches!(
             session.cursor.peek().kind,
             TokenKind::Punctuation(PunctuationKind::Dot)
-                | TokenKind::Punctuation(PunctuationKind::ColonColon)
         ) {
             session.cursor.advance();
             let next = parse_identifier(session);
@@ -514,6 +511,13 @@ pub(crate) fn parse_top_level(session: &mut ParseSession<'_>) -> Result<DeclNode
                     .cursor
                     .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
                 {
+                    session.cursor.skip_nl();
+                    if session
+                        .cursor
+                        .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+                    {
+                        break;
+                    }
                     members.push(parse_aspect_member(session)?);
                 }
                 expect_punctuation(session, PunctuationKind::RBrace, '}');
@@ -532,6 +536,13 @@ pub(crate) fn parse_top_level(session: &mut ParseSession<'_>) -> Result<DeclNode
                     .cursor
                     .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
                 {
+                    session.cursor.skip_nl();
+                    if session
+                        .cursor
+                        .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+                    {
+                        break;
+                    }
                     items.push(parse_provider_item(session)?);
                 }
                 expect_punctuation(session, PunctuationKind::RBrace, '}');
@@ -666,11 +677,19 @@ fn parse_super_item(session: &mut ParseSession<'_>) -> Result<SuperItem, ParserE
         .cursor
         .check(&TokenKind::Punctuation(PunctuationKind::LParen))
     {
-        Some(crate::expr::parse_call_args(session)?.0)
+        Some(
+            crate::expr::parse_call_args(session)?
+                .0
+                .into_iter()
+                .map(|arg| arg.value)
+                .collect(),
+        )
     } else {
         None
     };
-    let by = if session.cursor.bump_if(&TokenKind::Keyword(HardKeyword::By)) {
+    let by = if session.cursor.check(&TokenKind::Identifier)
+        && session.token_text(session.cursor.peek()) == "by"
+    {
         Some(Box::new(parse_expr(session)?))
     } else {
         None
@@ -687,11 +706,15 @@ fn parse_class_body(session: &mut ParseSession<'_>) -> Result<ClassBody, ParserE
 
 fn parse_class_members(session: &mut ParseSession<'_>) -> Result<Vec<ClassMember>, ParserError> {
     let mut members = Vec::new();
-    while !session
-        .cursor
-        .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
-        && !session.cursor.is_eof()
-    {
+    loop {
+        session.cursor.skip_nl();
+        if session
+            .cursor
+            .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+            || session.cursor.is_eof()
+        {
+            break;
+        }
         if session.cursor.check(&TokenKind::Identifier)
             && session.token_text(session.cursor.peek()) == "init"
         {
@@ -745,11 +768,15 @@ fn parse_class_members(session: &mut ParseSession<'_>) -> Result<Vec<ClassMember
 
 fn parse_struct_fields(session: &mut ParseSession<'_>) -> Result<Vec<StructField>, ParserError> {
     let mut fields = Vec::new();
-    while !session
-        .cursor
-        .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
-        && !session.cursor.is_eof()
-    {
+    loop {
+        session.cursor.skip_nl();
+        if session
+            .cursor
+            .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+            || session.cursor.is_eof()
+        {
+            break;
+        }
         let modifiers = parse_modifier_list(session)?;
         let name = parse_identifier(session).0;
         expect_punctuation(session, PunctuationKind::Colon, ':');
@@ -759,17 +786,24 @@ fn parse_struct_fields(session: &mut ParseSession<'_>) -> Result<Vec<StructField
             name,
             ty,
         });
+        session
+            .cursor
+            .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma));
     }
     Ok(fields)
 }
 
 fn parse_enum_variants(session: &mut ParseSession<'_>) -> Result<Vec<EnumVariant>, ParserError> {
     let mut variants = Vec::new();
-    while !session
-        .cursor
-        .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
-        && !session.cursor.is_eof()
-    {
+    loop {
+        session.cursor.skip_nl();
+        if session
+            .cursor
+            .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+            || session.cursor.is_eof()
+        {
+            break;
+        }
         let name = parse_identifier(session).0;
         let args = if session
             .cursor
@@ -780,23 +814,25 @@ fn parse_enum_variants(session: &mut ParseSession<'_>) -> Result<Vec<EnumVariant
             Vec::new()
         };
         variants.push(EnumVariant { name, args });
-        if !session
+        session
             .cursor
-            .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma))
-        {
-            break;
-        }
+            .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma));
+        session.cursor.skip_nl();
     }
     Ok(variants)
 }
 
 fn parse_trait_members(session: &mut ParseSession<'_>) -> Result<Vec<TraitMember>, ParserError> {
     let mut members = Vec::new();
-    while !session
-        .cursor
-        .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
-        && !session.cursor.is_eof()
-    {
+    loop {
+        session.cursor.skip_nl();
+        if session
+            .cursor
+            .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+            || session.cursor.is_eof()
+        {
+            break;
+        }
         if session.cursor.check(&TokenKind::Keyword(HardKeyword::Type))
             && session
                 .cursor

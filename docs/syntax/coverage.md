@@ -44,3 +44,13 @@
 | provider `->` 保留 | ProviderDecl lifecycle construction rule |
 | declaration 全量 | DeclKind / ClassMember / TraitMember / ProviderItem |
 | `ParameterList` 显式化 | Parameter / ParameterList 前言定义 |
+| v0.4 插值字符串（parser 子扫描） | ExprKind::StringInterp + parse_string_literal |
+| v0.4 具名实参 | CallArg { name, value } |
+| v0.4 `?.`/`!!` 后缀 | Member { safe } / ExprKind::ForceUnwrap；无 `?` 传播 |
+| v0.4 unsafe/concurrent/proceed | ExprKind::Unsafe / Concurrent / Proceed |
+| v0.4 spawn actor 构造 | SpawnExpr.actor = ActorConstruction |
+| v0.4 循环标签 `'ident` | TokenKind::Label；break/continue/loop 标签槽位 |
+| v0.4 comptime 收窄为 Block | ComptimeExpr := «comptime» Block |
+| v0.4 宏调用 `name!(...)` | ExprKind::MacroCall + TokenTree 流 |
+| v0.4 数组 `[T; N]` / `[v; N]` | TypeKind::Array / ExprKind::ArrayRepeat |
+| v0.4 module 声明移除 | SourceFile 仅 package；`by` 降为 slot word |

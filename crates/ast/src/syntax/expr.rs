@@ -76,7 +76,7 @@ pub enum ExprKind {
     Call {
         callee: Box<ExprWrap>,
         type_args: Vec<TypeArg>,
-        args: Vec<ExprWrap>,
+        args: Vec<CallArg>,
     },
     Index {
         base: Box<ExprWrap>,
@@ -85,6 +85,10 @@ pub enum ExprKind {
     Member {
         base: Box<ExprWrap>,
         name: Symbol,
+        safe: bool,
+    },
+    ForceUnwrap {
+        expr: Box<ExprWrap>,
     },
     Lambda {
         params: LambdaParams,
@@ -109,6 +113,10 @@ pub enum ExprKind {
     },
     Tuple(Vec<ExprWrap>),
     Array(Vec<ExprWrap>),
+    ArrayRepeat {
+        value: Box<ExprWrap>,
+        count: u32,
+    },
     Spawn(SpawnExpr),
     Async {
         expr: Box<ExprWrap>,
@@ -119,6 +127,13 @@ pub enum ExprKind {
     Comptime {
         block: Box<Block>,
     },
+    Unsafe {
+        block: Box<Block>,
+    },
+    Concurrent {
+        block: Box<Block>,
+    },
+    Proceed,
     Super {
         suffix: SuperSuffix,
     },
@@ -157,7 +172,15 @@ pub enum SpawnKind {
 pub struct SpawnExpr {
     pub scheduler: Option<SpawnScheduler>,
     pub kind: Option<SpawnKind>,
+    pub actor: Option<ActorConstruction>,
     pub body: Box<Block>,
+}
+
+/// `spawn actor Name(args?)`：actor 构造点。
+#[derive(Debug, Clone)]
+pub struct ActorConstruction {
+    pub name: Path,
+    pub args: Vec<ExprWrap>,
 }
 
 #[derive(Debug, Clone)]
@@ -173,8 +196,16 @@ pub enum TokenTree {
 }
 
 #[derive(Debug, Clone)]
+/// 实参：命名（`name = value`）或位置。
+pub struct CallArg {
+    pub name: Option<Symbol>,
+    pub value: ExprWrap,
+}
+
+#[derive(Debug, Clone)]
 pub struct WhenBranch {
     pub pattern: WhenPattern,
+    pub guard: Option<Box<ExprWrap>>,
     pub body: WhenBody,
 }
 

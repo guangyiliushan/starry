@@ -69,20 +69,17 @@ fn empty_source_has_canonical_root() {
     assert_eq!(output.ast.span.start, 0);
     assert_eq!(output.ast.span.end, 0);
     assert!(output.ast.package.is_none());
-    assert!(output.ast.module.is_none());
     assert!(output.ast.items.is_empty());
     assert!(output.diagnostics.is_empty());
 }
 
 #[test]
-fn package_and_module_parse_into_dedicated_root_slots() {
-    let output = parse_source("package app.core\nmodule runtime\nval x = 1").unwrap();
+fn package_prefix_parses_into_root_slot() {
+    let output = parse_source("package app.core\nval x = 1").unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     let package = output.ast.package.as_ref().unwrap();
-    let module = output.ast.module.as_ref().unwrap();
     assert_eq!(output.interner.resolve(package.segments[0].name), "app");
     assert_eq!(output.interner.resolve(package.segments[1].name), "core");
-    assert_eq!(output.interner.resolve(module.segments[0].name), "runtime");
     assert_eq!(output.ast.items.len(), 1);
 }
 
@@ -270,7 +267,6 @@ fn type_nesting_is_bounded_without_stack_overflow() {
 fn aggregate_declarations_parse_without_placeholders() {
     let source = r#"
         package app.core
-        module runtime
         import std.io.*
         import "c" "math.h" as cmath { fun sin(x: f64) : f64; }
 
@@ -302,7 +298,6 @@ fn aggregate_declarations_parse_without_placeholders() {
     }
     assert!(output.diagnostics.is_empty(), "{:#?}", output.diagnostics);
     assert!(output.ast.package.is_some());
-    assert!(output.ast.module.is_some());
     assert_eq!(output.ast.items.len(), 11);
 }
 
@@ -331,9 +326,9 @@ fn provider_decl_parses() {
 #[test]
 fn statements_and_control_flow_parse() {
     let source = r#"fun demo() {
-        outer: for x in items {
+'outer: for x in items {
             while val Some(y) = next() {
-                if y > 10 { break outer }
+if y > 10 { break 'outer }
                 continue
             }
             loop { break }
@@ -351,7 +346,7 @@ fn statements_and_control_flow_parse() {
 fn simple_control_flow_parse() {
     for source in [
         "fun a() { loop { break } }",
-        "fun a() { outer: for x in xs { break outer } }",
+        "fun a() { 'outer: for x in xs { break 'outer } }",
         "fun a() { while val Some(x) = xs { continue } }",
         "fun a() { if x > 1 { return 1 } return 2 }",
         "fun a() { count += 1 }",
@@ -364,6 +359,115 @@ fn simple_control_flow_parse() {
             output.diagnostics
         );
     }
+}
+
+#[test]
+fn newline_terminates_block_statement() {
+    let output = parse_source("fun d() : int {\n    val a = 1\n    -2\n}").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Fun(fun) = &output.ast.items[0].kind else {
+        panic!("expected fun, got {:?}", output.ast.items[0].kind);
+    };
+    let Some(ast::syntax::decl::FunctionBody::Block(block)) = &fun.body else {
+        panic!("expected block body");
+    };
+    assert_eq!(block.stmts.len(), 1);
+    assert!(
+        block.tail.is_some(),
+        "trailing -2 must stay a separate statement"
+    );
+}
+
+#[test]
+fn trailing_operator_continues_line() {
+    let output = parse_source("fun d() {\n    val a = 1 +\n    2\n}").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Fun(fun) = &output.ast.items[0].kind else {
+        panic!("expected fun, got {:?}", output.ast.items[0].kind);
+    };
+    let Some(ast::syntax::decl::FunctionBody::Block(block)) = &fun.body else {
+        panic!("expected block body");
+    };
+    assert_eq!(block.stmts.len(), 1);
+    assert!(
+        block.tail.is_none(),
+        "trailing + must continue the initializer"
+    );
+}
+
+#[test]
+fn when_branches_separate_by_newline_without_comma() {
+    let output = parse_source(
+        "fun g(s: int) : int = when s {\n    90..=100 -> 5\n    60..89 -> 3\n    else -> 0\n}",
+    )
+    .unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+}
+
+#[test]
+fn when_pattern_branch_with_guard_parses() {
+    let output =
+        parse_source("fun f(s: int) : int = when s { 1..=9 if flag -> 1, else -> 0 }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+}
+
+#[test]
+fn when_expression_branch_falls_back_without_arrow_pattern() {
+    let output = parse_source("fun f(x: int) : int = when x { x > 1 -> 1, else -> 0 }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+}
+
+#[test]
+fn quoted_label_break_with_value() {
+    let output =
+        parse_source("fun f() : int {\n    'outer: loop {\n        break 'outer 42\n    }\n}")
+            .unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+}
+
+#[test]
+fn struct_fields_allow_trailing_comma() {
+    let output = parse_source("struct P {\n    x: int,\n    y: int,\n}").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+}
+
+#[test]
+fn when_branch_bodies_accept_jump_statements() {
+    let output = parse_source(
+        "fun g(e: int) {\n    loop {\n        when e {\n            1 -> break,\n            else -> continue,\n        }\n    }\n}",
+    )
+    .unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+}
+
+#[test]
+fn null_safe_postfix_chain_parses() {
+    let output =
+        parse_source("fun f(u: User) : String {\n    return u?.profile?.name!!\n}").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+}
+
+#[test]
+fn named_arguments_parse() {
+    let output = parse_source("fun f(a: int, b: int) : int { return f(a = 1, b = 2) }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let output = parse_source("fun f(a: int, b: int) : int { return f(1, b = 2) }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+}
+
+#[test]
+fn fixed_arrays_parse() {
+    let output = parse_source(
+        "fun depth(z: [f64; 4096]) : f64 {\n    val buf = [0.0; 4096]\n    z[1] = buf[0]\n    return z[0]\n}",
+    )
+    .unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+}
+
+#[test]
+fn operator_fun_parses_with_slot_words_as_identifiers() {
+    let output = parse_source("operator fun plus(by: f64, to: f64) : f64 = by + to").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
 }
 
 #[test]
@@ -380,4 +484,78 @@ fn repeated_parse_is_structurally_deterministic() {
 #[test]
 fn parser_snapshot_is_stable() {
     check_snapshot("pipeline", "val x = 1");
+}
+
+#[test]
+fn unsafe_proceed_concurrent_parse() {
+    assert!(matches!(
+        binding_init("val a = unsafe { 1 }"),
+        ExprKind::Unsafe { .. }
+    ));
+    assert!(matches!(binding_init("val p = proceed"), ExprKind::Proceed));
+    assert!(matches!(
+        binding_init("val c = concurrent { 1 }"),
+        ExprKind::Concurrent { .. }
+    ));
+}
+
+#[test]
+fn spawn_actor_construction_parses() {
+    let output = parse_source("fun f() { spawn actor Worker(2) { work() } }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Fun(fun) = &output.ast.items[0].kind else {
+        panic!("expected fun, got {:?}", output.ast.items[0].kind);
+    };
+    let Some(ast::syntax::decl::FunctionBody::Block(block)) = &fun.body else {
+        panic!("expected block body");
+    };
+    let Some(tail) = &block.tail else {
+        panic!("expected spawn tail expression");
+    };
+    let ExprKind::Spawn(spawn) = &tail.kind else {
+        panic!("expected spawn, got {:?}", tail.kind);
+    };
+    let actor = spawn.actor.as_ref().expect("actor construction");
+    assert_eq!(
+        output.interner.resolve(actor.name.segments[0].name),
+        "Worker"
+    );
+    assert_eq!(actor.args.len(), 1);
+}
+
+#[test]
+fn plain_and_escaped_strings_stay_literal() {
+    assert!(matches!(
+        binding_init("val s = \"plain\""),
+        ExprKind::Literal(_)
+    ));
+    assert!(matches!(
+        binding_init("val s = \"cost \\$5\""),
+        ExprKind::Literal(_)
+    ));
+}
+
+#[test]
+fn string_interpolation_splits_parts() {
+    let interp = binding_init("val s = \"x ${a + b} y $name!\"");
+    let ExprKind::StringInterp { parts } = interp else {
+        panic!("expected interpolation, got {interp:?}");
+    };
+    assert_eq!(parts.len(), 5);
+    assert!(matches!(parts[0].kind, ExprKind::Literal(_)));
+    assert!(matches!(parts[1].kind, ExprKind::Binary { .. }));
+    assert!(matches!(parts[2].kind, ExprKind::Literal(_)));
+    assert!(matches!(parts[3].kind, ExprKind::Ident(_)));
+    assert!(matches!(parts[4].kind, ExprKind::Literal(_)));
+}
+
+#[test]
+fn unclosed_interpolation_emits_diagnostic() {
+    let output = parse_source("val s = \"${x\"").unwrap();
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == ast::syntax::node::DiagCode::UnclosedInterpolation)
+    );
 }

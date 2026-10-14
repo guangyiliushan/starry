@@ -124,6 +124,8 @@ impl Lexer {
                 "'(\\\\u\\{[0-9a-fA-F]{1,6}\\}|\\\\[^\\r\\n]|[^'\\\\\\r\\n])'",
                 TokenKind::Literal(LiteralKind::Char),
             ),
+            // 标签（Rust 式 'ident；'a' 仍为字符字面量，最长匹配自动择优）
+            ("'[a-zA-Z_][a-zA-Z0-9_]*", TokenKind::Label),
             // 复合赋值（必须在单字符 = 之前）
             ("\\+=", TokenKind::Operator(OperatorKind::PlusEq)),
             ("-=", TokenKind::Operator(OperatorKind::MinusEq)),
@@ -186,7 +188,6 @@ impl Lexer {
             (",", TokenKind::Punctuation(PunctuationKind::Comma)),
             ("\\.", TokenKind::Punctuation(PunctuationKind::Dot)),
             (":", TokenKind::Punctuation(PunctuationKind::Colon)),
-            ("::", TokenKind::Punctuation(PunctuationKind::ColonColon)),
             (";", TokenKind::Punctuation(PunctuationKind::Semicolon)),
             ("#", TokenKind::Punctuation(PunctuationKind::Hash)),
             ("@", TokenKind::Punctuation(PunctuationKind::At)),
@@ -264,7 +265,7 @@ impl Lexer {
 
             // 括号深度追踪
             match first {
-                '(' | '[' | '{' => paren_depth += 1,
+                '(' | '[' => paren_depth += 1,
                 ')' | ']' | '}' if paren_depth > 0 => paren_depth = paren_depth.saturating_sub(1),
                 _ => {}
             }

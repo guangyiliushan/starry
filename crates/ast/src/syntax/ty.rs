@@ -42,6 +42,10 @@ pub enum TypeKind {
         params: Vec<TypeWrap>,
         ret: Box<TypeWrap>,
     },
+    Array {
+        element: Box<TypeWrap>,
+        len: u32,
+    },
     Tuple(Vec<TypeWrap>),
     Unit,
     Error(ErrorNode),

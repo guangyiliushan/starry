@@ -25,8 +25,6 @@ pub enum PunctuationKind {
     Dot,
     /// :
     Colon,
-    /// ::
-    ColonColon,
     /// ;
     Semicolon,
     /// #
@@ -56,7 +54,6 @@ impl PunctuationKind {
             PunctuationKind::Comma => ",",
             PunctuationKind::Dot => ".",
             PunctuationKind::Colon => ":",
-            PunctuationKind::ColonColon => "::",
             PunctuationKind::Semicolon => ";",
             PunctuationKind::Hash => "#",
             PunctuationKind::At => "@",
@@ -74,6 +71,8 @@ pub enum TokenKind {
 
     // ==================== 标识符 ====================
     /// 标识符
+    /// 标签（'ident）
+    Label,
     Identifier,
 
     // ==================== 关键字 ====================
@@ -102,6 +101,7 @@ impl fmt::Display for TokenKind {
         match self {
             TokenKind::Literal(kind) => write!(f, "{} literal", kind),
             TokenKind::Identifier => write!(f, "identifier"),
+            TokenKind::Label => write!(f, "label"),
             TokenKind::Keyword(kind) => write!(f, "keyword '{}'", kind),
             TokenKind::Operator(kind) => write!(f, "operator '{}'", kind),
             TokenKind::Punctuation(kind) => write!(f, "punctuation '{}'", kind),

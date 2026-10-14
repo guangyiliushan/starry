@@ -2,7 +2,7 @@
 
 use ast::syntax::node::{DiagCode, Span};
 use ast::syntax::ty::{TypeArg, TypeKind, TypeWrap};
-use ast::token::{OperatorKind, PunctuationKind, TokenKind};
+use ast::token::{LiteralKind, OperatorKind, PunctuationKind, TokenKind};
 
 use crate::expr::parse_path;
 use crate::{ParseSession, ParserError};
@@ -155,6 +155,7 @@ fn parse_atomic_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserE
     }
     match token.kind {
         TokenKind::Punctuation(PunctuationKind::LParen) => parse_paren_or_fn_type(session),
+        TokenKind::Punctuation(PunctuationKind::LBracket) => parse_array_type(session),
         TokenKind::Identifier => parse_named_type(session),
         TokenKind::Keyword(ast::token::HardKeyword::Self_) => {
             let token = session.cursor.advance();
@@ -269,6 +270,47 @@ pub(crate) fn parse_type_args(session: &mut ParseSession<'_>) -> Result<Vec<Type
     }
     consume_type_args_close(session);
     Ok(args)
+}
+
+fn parse_array_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserError> {
+    let open = session.cursor.advance();
+    let element = parse_type(session)?;
+    let semi = session.cursor.peek().span;
+    if !session
+        .cursor
+        .bump_if(&TokenKind::Punctuation(PunctuationKind::Semicolon))
+    {
+        session.emit_unique(DiagCode::ExpectedToken, semi, || "expected ';'".to_string());
+    }
+    let count_token = session.cursor.advance();
+    let count = match count_token.kind {
+        TokenKind::Literal(LiteralKind::Integer) => session
+            .token_text(&count_token)
+            .replace('_', "")
+            .parse::<u32>()
+            .unwrap_or(u32::MAX),
+        _ => {
+            session.emit_unique(DiagCode::UnexpectedToken, count_token.span, || {
+                "expected array length".to_string()
+            });
+            0
+        }
+    };
+    if !session
+        .cursor
+        .bump_if(&TokenKind::Punctuation(PunctuationKind::RBracket))
+    {
+        missing_close(session);
+    }
+    let id = session.next_node()?;
+    Ok(TypeWrap {
+        id,
+        span: join_span(open.span, count_token.span),
+        kind: TypeKind::Array {
+            element: Box::new(element),
+            len: count,
+        },
+    })
 }
 
 fn parse_paren_or_fn_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserError> {

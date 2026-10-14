@@ -5,7 +5,6 @@ lexer grammar StarryLexer;
 
 Package : 'package';
 Import : 'import';
-Module : 'module';
 Extern : 'extern';
 Val : 'val';
 Var : 'var';
@@ -39,7 +38,6 @@ Dyn : 'dyn';
 As : 'as';
 Is : 'is';
 In : 'in';
-By : 'by';
 Where : 'where';
 Mut : 'mut';
 
@@ -90,3 +88,4 @@ IDENTIFIER : [A-Za-z_][A-Za-z0-9_]*;
 // slot: Get = 'get' in accessor
 // slot: Set = 'set' in accessor
 // slot: Out = 'out' in type_variance
+// slot: By = 'by' in by_slot

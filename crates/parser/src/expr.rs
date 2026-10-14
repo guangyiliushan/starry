@@ -1,11 +1,13 @@
 //! Pratt expression parser。
 
+use crate::cursor::TokenCursor;
+use ast::interner::Interner;
 use ast::syntax::expr::{
-    Block, CastKind, ExprKind, ExprWrap, LambdaParams, SpawnExpr, SpawnKind, SpawnScheduler,
-    SuperSuffix, TokenTree, WhenBody, WhenBranch, WhenPattern,
+    ActorConstruction, Block, CallArg, CastKind, ExprKind, ExprWrap, LambdaParams, SpawnExpr,
+    SpawnKind, SpawnScheduler, SuperSuffix, TokenTree, WhenBody, WhenBranch, WhenPattern,
 };
-use ast::syntax::node::{DiagCode, ErrorNode, Span};
-use ast::token::{HardKeyword, OperatorKind, PunctuationKind, TokenKind};
+use ast::syntax::node::{DiagCode, DiagCollector, ErrorNode, NodeIdGen, Span};
+use ast::token::{HardKeyword, LiteralKind, OperatorKind, PunctuationKind, Token, TokenKind};
 
 use crate::pat::parse_pattern;
 use crate::ty::join_span;
@@ -25,6 +27,9 @@ fn parse_bp(session: &mut ParseSession<'_>, min_bp: u8) -> Result<ExprWrap, Pars
 fn parse_bp_inner(session: &mut ParseSession<'_>, min_bp: u8) -> Result<ExprWrap, ParserError> {
     let mut lhs = parse_unary(session)?;
     loop {
+        if session.cursor.check(&TokenKind::Nl) && newline_continues_expr(session) {
+            session.cursor.skip_nl();
+        }
         if session.cursor.check(&TokenKind::Keyword(HardKeyword::Is)) {
             session.cursor.advance();
             let pattern = parse_pattern(session)?;
@@ -76,6 +81,7 @@ fn parse_bp_inner(session: &mut ParseSession<'_>, min_bp: u8) -> Result<ExprWrap
             break;
         }
         session.cursor.advance();
+        session.cursor.skip_nl();
         let rhs = parse_bp(session, right_bp)?;
         let span = join_span(lhs.span, rhs.span);
         let id = session.next_node()?;
@@ -116,6 +122,34 @@ fn binding_power(op: &OperatorKind) -> Option<(u8, u8)> {
         OperatorKind::Plus | OperatorKind::Minus => Some((21, 22)),
         OperatorKind::Star | OperatorKind::Slash | OperatorKind::Percent => Some((23, 24)),
         _ => None,
+    }
+}
+
+/// 换行续行判定：下一有效 token 是二元专属运算符或 `.` 时，换行不终止表达式。
+fn newline_continues_expr(session: &ParseSession<'_>) -> bool {
+    let mut offset = 0usize;
+    loop {
+        match session.cursor.peek_ahead(offset) {
+            Some(token) if token.kind == TokenKind::Nl => offset += 1,
+            Some(token) => {
+                return match &token.kind {
+                    TokenKind::Operator(op) => {
+                        binding_power(op).is_some()
+                            && !matches!(
+                                op,
+                                OperatorKind::Bang
+                                    | OperatorKind::Minus
+                                    | OperatorKind::Star
+                                    | OperatorKind::BitAnd
+                                    | OperatorKind::BitNot
+                            )
+                    }
+                    TokenKind::Punctuation(PunctuationKind::Dot) => true,
+                    _ => false,
+                };
+            }
+            None => return false,
+        }
     }
 }
 
@@ -178,9 +212,18 @@ fn finish_postfix(
     mut expr: ExprWrap,
 ) -> Result<ExprWrap, ParserError> {
     loop {
+        if session.cursor.check(&TokenKind::Nl) && newline_continues_expr(session) {
+            session.cursor.skip_nl();
+        }
         if session.cursor.check(&TokenKind::Operator(OperatorKind::Lt)) {
             let checkpoint = session.checkpoint();
-            let type_args = crate::ty::parse_type_args(session)?;
+            let type_args = match crate::ty::parse_type_args(session) {
+                Ok(type_args) => type_args,
+                Err(error) => {
+                    session.rollback(&checkpoint);
+                    return Err(error);
+                }
+            };
             if session
                 .cursor
                 .check(&TokenKind::Punctuation(PunctuationKind::LParen))
@@ -212,6 +255,34 @@ fn finish_postfix(
                     kind: ExprKind::Member {
                         base: Box::new(expr),
                         name: name.0,
+                        safe: false,
+                    },
+                };
+            }
+            TokenKind::Operator(OperatorKind::QuestionDot) => {
+                session.cursor.advance();
+                let name = parse_identifier(session);
+                let span = join_span(expr.span, name.1);
+                let id = session.next_node()?;
+                expr = ExprWrap {
+                    id,
+                    span,
+                    kind: ExprKind::Member {
+                        base: Box::new(expr),
+                        name: name.0,
+                        safe: true,
+                    },
+                };
+            }
+            TokenKind::Operator(OperatorKind::BangBang) => {
+                session.cursor.advance();
+                let span = expr.span;
+                let id = session.next_node()?;
+                expr = ExprWrap {
+                    id,
+                    span,
+                    kind: ExprKind::ForceUnwrap {
+                        expr: Box::new(expr),
                     },
                 };
             }
@@ -282,6 +353,10 @@ fn parse_primary(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError
     let span = token.span;
     let id = session.next_node()?;
     match token.kind {
+        TokenKind::Literal(LiteralKind::String) => {
+            session.cursor.advance();
+            parse_string_literal(session, token, id, span)
+        }
         TokenKind::Literal(kind) => {
             session.cursor.advance();
             Ok(ExprWrap::new(id, span, ExprKind::Literal(kind)))
@@ -309,6 +384,26 @@ fn parse_primary(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError
             {
                 session.cursor.advance();
                 return parse_lambda(session, span);
+            }
+            if session.token_text(&token) == "proceed" {
+                session.cursor.advance();
+                return Ok(ExprWrap::new(id, span, ExprKind::Proceed));
+            }
+            if session.token_text(&token) == "concurrent"
+                && session.cursor.peek_ahead(1).is_some_and(|next| {
+                    next.kind == TokenKind::Punctuation(PunctuationKind::LBrace)
+                })
+            {
+                session.cursor.advance();
+                let block = parse_block(session)?;
+                let end = block_tail_span(&block);
+                return Ok(ExprWrap::new(
+                    id,
+                    join_span(span, end),
+                    ExprKind::Concurrent {
+                        block: Box::new(block),
+                    },
+                ));
             }
             let symbol = session.interner.intern(session.token_text(&token));
             session.cursor.advance();
@@ -367,6 +462,18 @@ fn parse_primary(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError
         TokenKind::Punctuation(PunctuationKind::LParen) => parse_paren_expr(session),
         TokenKind::Punctuation(PunctuationKind::LBracket) => parse_array(session),
         TokenKind::Punctuation(PunctuationKind::LBrace) => parse_lambda(session, span),
+        TokenKind::Keyword(HardKeyword::Unsafe) => {
+            session.cursor.advance();
+            let block = parse_block(session)?;
+            let end = block_tail_span(&block);
+            Ok(ExprWrap::new(
+                id,
+                join_span(span, end),
+                ExprKind::Unsafe {
+                    block: Box::new(block),
+                },
+            ))
+        }
         _ => {
             session.cursor.advance();
             let diag = session.emit_unique(DiagCode::UnexpectedToken, span, || {
@@ -437,10 +544,60 @@ fn parse_paren_expr(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserEr
 
 fn parse_array(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError> {
     let open = session.cursor.advance();
-    let mut items = Vec::new();
-    while !session
+    if session
         .cursor
         .check(&TokenKind::Punctuation(PunctuationKind::RBracket))
+    {
+        let close = session.cursor.advance();
+        let id = session.next_node()?;
+        return Ok(ExprWrap::new(
+            id,
+            join_span(open.span, close.span),
+            ExprKind::Array(Vec::new()),
+        ));
+    }
+    let first = parse_expr(session)?;
+    if session
+        .cursor
+        .bump_if(&TokenKind::Punctuation(PunctuationKind::Semicolon))
+    {
+        let count_token = session.cursor.advance();
+        let count = match count_token.kind {
+            TokenKind::Literal(LiteralKind::Integer) => session
+                .token_text(&count_token)
+                .replace('_', "")
+                .parse::<u32>()
+                .unwrap_or(u32::MAX),
+            _ => {
+                expected(session, "array length", count_token.span);
+                0
+            }
+        };
+        let close = session.cursor.peek().span;
+        if !session
+            .cursor
+            .bump_if(&TokenKind::Punctuation(PunctuationKind::RBracket))
+        {
+            expected(session, "']'", close);
+        }
+        let id = session.next_node()?;
+        return Ok(ExprWrap::new(
+            id,
+            join_span(open.span, close),
+            ExprKind::ArrayRepeat {
+                value: Box::new(first),
+                count,
+            },
+        ));
+    }
+    let mut items = vec![first];
+    let comma_separated = session
+        .cursor
+        .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma));
+    while comma_separated
+        && !session
+            .cursor
+            .check(&TokenKind::Punctuation(PunctuationKind::RBracket))
     {
         items.push(parse_expr(session)?);
         if !session
@@ -642,30 +799,75 @@ fn parse_when(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError> {
         if session.cursor.is_eof() {
             break;
         }
-        let pattern = if session.cursor.check(&TokenKind::Keyword(HardKeyword::Else)) {
-            session.cursor.advance();
-            WhenPattern::Else
-        } else {
-            WhenPattern::Expression(parse_expr(session)?)
-        };
-        session
+        session.cursor.skip_nl();
+        if session
             .cursor
-            .bump_if(&TokenKind::Operator(OperatorKind::Arrow));
+            .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+            || session.cursor.is_eof()
+        {
+            break;
+        }
+        let (pattern, guard) = if session.cursor.check(&TokenKind::Keyword(HardKeyword::Else)) {
+            session.cursor.advance();
+            session.cursor.advance();
+            session
+                .cursor
+                .bump_if(&TokenKind::Operator(OperatorKind::Arrow));
+            (WhenPattern::Else, None)
+        } else {
+            let checkpoint = session.checkpoint();
+            let pattern = parse_pattern(session)?;
+            let guard = if session.cursor.check(&TokenKind::Keyword(HardKeyword::If)) {
+                session.cursor.advance();
+                Some(Box::new(parse_expr(session)?))
+            } else {
+                None
+            };
+            if session
+                .cursor
+                .bump_if(&TokenKind::Operator(OperatorKind::Arrow))
+            {
+                (WhenPattern::Pattern(pattern), guard)
+            } else {
+                // 不是「模式 [if 守卫] ->」：回滚后按表达式分支解析
+                session.rollback(&checkpoint);
+                let expr = parse_expr(session)?;
+                session
+                    .cursor
+                    .bump_if(&TokenKind::Operator(OperatorKind::Arrow));
+                (WhenPattern::Expression(expr), None)
+            }
+        };
         let body = if session
             .cursor
             .check(&TokenKind::Punctuation(PunctuationKind::LBrace))
         {
             WhenBody::Block(parse_block(session)?)
+        } else if matches!(
+            session.cursor.peek().kind,
+            TokenKind::Keyword(HardKeyword::Break)
+                | TokenKind::Keyword(HardKeyword::Continue)
+                | TokenKind::Keyword(HardKeyword::Return)
+        ) {
+            match crate::stmt::parse_statement(session)? {
+                crate::stmt::ParsedStatement::Statement(stmt) => WhenBody::Block(Block {
+                    stmts: vec![stmt],
+                    tail: None,
+                }),
+                crate::stmt::ParsedStatement::Tail(expr) => WhenBody::Expr(expr),
+            }
         } else {
             WhenBody::Expr(parse_expr(session)?)
         };
-        branches.push(WhenBranch { pattern, body });
-        if !session
+        branches.push(WhenBranch {
+            pattern,
+            guard,
+            body,
+        });
+        session
             .cursor
-            .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma))
-        {
-            break;
-        }
+            .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma));
+        session.cursor.skip_nl();
     }
     let close = session.cursor.advance();
     let id = session.next_node()?;
@@ -710,6 +912,26 @@ fn parse_spawn(session: &mut ParseSession<'_>, start: Span) -> Result<ExprWrap, 
             _ => None,
         };
     }
+    let mut actor = None;
+    if let TokenKind::Identifier = session.cursor.peek().kind
+        && session.token_text(session.cursor.peek()) == "actor"
+    {
+        session.cursor.advance();
+        let name = parse_path(session)?;
+        let args = if session
+            .cursor
+            .check(&TokenKind::Punctuation(PunctuationKind::LParen))
+        {
+            parse_call_args(session)?
+                .0
+                .into_iter()
+                .map(|arg| arg.value)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        actor = Some(ActorConstruction { name, args });
+    }
     let body = parse_block(session)?;
     let end = block_tail_span(&body);
     let id = session.next_node()?;
@@ -719,6 +941,7 @@ fn parse_spawn(session: &mut ParseSession<'_>, start: Span) -> Result<ExprWrap, 
         ExprKind::Spawn(SpawnExpr {
             scheduler,
             kind,
+            actor,
             body: Box::new(body),
         }),
     ))
@@ -733,7 +956,13 @@ fn parse_super(
         .cursor
         .check(&TokenKind::Punctuation(PunctuationKind::LParen))
     {
-        SuperSuffix::Call(parse_call_args(session)?.0)
+        SuperSuffix::Call(
+            parse_call_args(session)?
+                .0
+                .into_iter()
+                .map(|arg| arg.value)
+                .collect(),
+        )
     } else if session
         .cursor
         .bump_if(&TokenKind::Punctuation(PunctuationKind::Dot))
@@ -756,14 +985,29 @@ fn parse_super(
 
 pub(crate) fn parse_call_args(
     session: &mut ParseSession<'_>,
-) -> Result<(Vec<ExprWrap>, Span), ParserError> {
+) -> Result<(Vec<CallArg>, Span), ParserError> {
     session.cursor.advance();
     let mut args = Vec::new();
     while !session
         .cursor
         .check(&TokenKind::Punctuation(PunctuationKind::RParen))
     {
-        args.push(parse_expr(session)?);
+        if session.cursor.is_eof() {
+            break;
+        }
+        let mut name = None;
+        if session.cursor.check(&TokenKind::Identifier)
+            && session
+                .cursor
+                .peek_ahead(1)
+                .is_some_and(|token| token.kind == TokenKind::Operator(OperatorKind::Eq))
+        {
+            let name_token = session.cursor.advance();
+            session.cursor.advance();
+            name = Some(session.interner.intern(session.token_text(&name_token)));
+        }
+        let value = parse_expr(session)?;
+        args.push(CallArg { name, value });
         if !session
             .cursor
             .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma))
@@ -807,7 +1051,6 @@ pub(crate) fn parse_path(
     while matches!(
         session.cursor.peek().kind,
         TokenKind::Punctuation(PunctuationKind::Dot)
-            | TokenKind::Punctuation(PunctuationKind::ColonColon)
     ) {
         session.cursor.advance();
         let next = parse_identifier(session);
@@ -862,4 +1105,162 @@ fn block_tail_span(block: &Block) -> Span {
         .as_ref()
         .map(|expr| expr.span)
         .unwrap_or_else(|| block.stmts.last().map(|stmt| stmt.span).unwrap_or_default())
+}
+
+/// 字符串插值子扫描：`$IDENT` 与 `${Expr}` 解析为表达式部件，`\$` 保持字面。
+/// 纯字面串走零开销快路径，仍是 `Literal(String)`。
+fn parse_string_literal(
+    session: &mut ParseSession<'_>,
+    token: Token,
+    id: ast::syntax::node::NodeId,
+    span: Span,
+) -> Result<ExprWrap, ParserError> {
+    let text = session.token_text(&token);
+    if !has_interpolation(text) {
+        return Ok(ExprWrap::new(
+            id,
+            span,
+            ExprKind::Literal(LiteralKind::String),
+        ));
+    }
+    // ponytail: `${...}` 用括号深度扫描定位收尾，`${ "}" }` 会误判；
+    // 若需要支持嵌套串，改为子词法 token 走查。
+    let open = span.start as usize + 1;
+    let close = span.end as usize - 1;
+    let source = session.source;
+    let bytes = source.as_bytes();
+    let mut parts = Vec::new();
+    let mut chunk_start = open;
+    let mut index = open;
+    while index < close {
+        match bytes[index] {
+            b'\\' => {
+                index = (index + 2).min(close);
+            }
+            b'$' if index + 1 < close && bytes[index + 1] == b'{' => {
+                if chunk_start < index {
+                    parts.push(string_chunk(session, chunk_start, index)?);
+                }
+                let expr_start = index + 2;
+                let mut depth = 1usize;
+                let mut scan = expr_start;
+                while scan < close && depth > 0 {
+                    match bytes[scan] {
+                        b'{' => depth += 1,
+                        b'}' => depth -= 1,
+                        _ => {}
+                    }
+                    scan += 1;
+                }
+                if depth != 0 {
+                    session.emit_unique(
+                        DiagCode::UnclosedInterpolation,
+                        Span::new(index as u32, span.end),
+                        || "unclosed ${ interpolation".to_string(),
+                    );
+                    break;
+                }
+                let tokens = session.tokenize_range(expr_start, scan - 1);
+                parts.push(parse_interpolation_expr(session, tokens)?);
+                index = scan;
+                chunk_start = index;
+            }
+            b'$' if index + 1 < close && is_ident_start(bytes[index + 1]) => {
+                if chunk_start < index {
+                    parts.push(string_chunk(session, chunk_start, index)?);
+                }
+                let name_start = index + 1;
+                let mut name_end = name_start;
+                while name_end < close && is_ident_continue(bytes[name_end]) {
+                    name_end += 1;
+                }
+                let symbol = session.interner.intern(&source[name_start..name_end]);
+                let part_id = session.next_node()?;
+                parts.push(ExprWrap::new(
+                    part_id,
+                    Span::new(index as u32, name_end as u32),
+                    ExprKind::Ident(symbol),
+                ));
+                index = name_end;
+                chunk_start = index;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+    if chunk_start < close {
+        parts.push(string_chunk(session, chunk_start, close)?);
+    }
+    Ok(ExprWrap::new(id, span, ExprKind::StringInterp { parts }))
+}
+
+/// 快路径判定：是否存在未转义的 `$` 插值标记。
+fn has_interpolation(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'$' => return true,
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+fn string_chunk(
+    session: &mut ParseSession<'_>,
+    start: usize,
+    end: usize,
+) -> Result<ExprWrap, ParserError> {
+    let span = Span::new(start as u32, end as u32);
+    let id = session.next_node()?;
+    Ok(ExprWrap::new(
+        id,
+        span,
+        ExprKind::Literal(LiteralKind::String),
+    ))
+}
+
+/// 在共享 Interner/NodeIdGen/诊断收集器的子会话中解析插值表达式，
+/// 保证符号、Node ID 和诊断落回主会话。
+fn parse_interpolation_expr(
+    session: &mut ParseSession<'_>,
+    tokens: Vec<Token>,
+) -> Result<ExprWrap, ParserError> {
+    let source = session.source;
+    let source_len = session.source_len;
+    let interner = std::mem::replace(&mut session.interner, Interner::new());
+    let id_gen = std::mem::replace(&mut session.id_gen, NodeIdGen::new());
+    let diags = std::mem::replace(&mut session.diags, DiagCollector::new());
+    let mut child = ParseSession {
+        source,
+        source_len,
+        cursor: TokenCursor::new(tokens, source_len),
+        interner,
+        id_gen,
+        diags,
+        depth: session.depth + 1,
+        lexer: session.lexer,
+    };
+    let result = parse_expr(&mut child);
+    if !child.cursor.is_eof() {
+        let span = child.cursor.peek().span;
+        child.emit_unique(DiagCode::UnexpectedToken, span, || {
+            "unexpected token in interpolation".to_string()
+        });
+    }
+    session.interner = child.interner;
+    session.id_gen = child.id_gen;
+    session.diags = child.diags;
+    result
+}
+
+fn is_ident_start(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphabetic()
+}
+
+fn is_ident_continue(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphabetic() || byte.is_ascii_digit()
 }

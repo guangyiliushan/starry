@@ -3,10 +3,9 @@
 # Only HARD keywords are lexer-reserved. MODIFIER and SLOT words remain
 # identifiers lexically and are classified by the parser in grammar slots.
 
-# 39 globally reserved keywords.
+# 38 globally reserved keywords.
 hard package Package global
 hard import Import global
-hard module Module global
 hard extern Extern global
 hard val Val global
 hard var Var global
@@ -40,7 +39,7 @@ hard dyn Dyn global
 hard as As global
 hard is Is global
 hard in In global
-hard by By global
+
 hard where Where global
 hard mut Mut global
 
@@ -91,3 +90,4 @@ slot init Init class_initializer
 slot get Get accessor
 slot set Set accessor
 slot out Out type_variance
+slot by By by_slot
