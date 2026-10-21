@@ -130,6 +130,45 @@ pub enum DiagCode {
     LetKeyword,
     /// `..` appeared more than once in a tuple/array pattern.
     DuplicateRestPattern,
+    // ---- semantic analysis（crates/sem 命名空间）----
+    /// 未定义的名字
+    SemUndefinedName,
+    /// 未定义的类型
+    SemUndefinedType,
+    /// 重复定义
+    SemDuplicateDef,
+    /// 类型别名循环
+    SemTypeCycle,
+    /// 类型不匹配
+    SemTypeMismatch,
+    /// 调用目标不是函数
+    SemNotCallable,
+    /// 实参个数或命名错误
+    SemArityMismatch,
+    /// 向不可变绑定赋值
+    SemAssignToVal,
+    /// 标签没有匹配的循环
+    SemUnknownLabel,
+    /// 循环外 break/continue
+    SemBreakOutsideLoop,
+    /// 函数外 return
+    SemReturnOutsideFun,
+    /// when 缺少 else（v1 保守穷尽早返回）
+    SemMissingElse,
+    /// when 未穷尽枚举变体
+    SemNonExhaustiveWhen,
+    /// Own 值移动后再次使用
+    SemUseAfterMove,
+    /// v1 暂不支持的构造
+    SemUnsupportedConstruct,
+    /// 宏展开是独立前置 pass，v1 未实现
+    SemMacroExpansion,
+    /// 参数缺少类型标注
+    SemParamTypeRequired,
+    /// 条件不是 Boolean
+    SemConditionNotBool,
+    /// 未知成员（字段/构造器）
+    SemUnknownMember,
 }
 
 /// 最小诊断

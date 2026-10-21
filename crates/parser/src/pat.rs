@@ -74,6 +74,76 @@ fn parse_pattern_with(
     ))
 }
 
+fn parse_ctor_pattern_tail(
+    session: &mut ParseSession<'_>,
+    path: ast::syntax::node::Path,
+) -> Result<(PatKind, Span), ParserError> {
+    session.cursor.advance(); // (
+    let mut args = Vec::new();
+    while !session
+        .cursor
+        .check(&TokenKind::Punctuation(PunctuationKind::RParen))
+    {
+        args.push(parse_pattern_with(session, true)?);
+        if !session
+            .cursor
+            .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma))
+        {
+            break;
+        }
+    }
+    let close = session.cursor.peek().span;
+    session
+        .cursor
+        .bump_if(&TokenKind::Punctuation(PunctuationKind::RParen));
+    Ok((PatKind::Constructor { path, args }, close))
+}
+
+fn parse_struct_pattern_tail(
+    session: &mut ParseSession<'_>,
+    path: ast::syntax::node::Path,
+) -> Result<(PatKind, Span), ParserError> {
+    session.cursor.advance(); // {
+    let mut fields = Vec::new();
+    while !session
+        .cursor
+        .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+    {
+        let field_name_token = session.cursor.advance();
+        let field_name = session
+            .interner
+            .intern(session.token_text(&field_name_token));
+        let field = if session
+            .cursor
+            .bump_if(&TokenKind::Punctuation(PunctuationKind::Colon))
+        {
+            parse_pattern_with(session, true)?
+        } else {
+            PatWrap::new(
+                session.next_node()?,
+                field_name_token.span,
+                PatKind::Binding {
+                    mutable: false,
+                    name: field_name,
+                    ty: None,
+                },
+            )
+        };
+        fields.push((field_name, field));
+        if !session
+            .cursor
+            .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma))
+        {
+            break;
+        }
+    }
+    let close = session.cursor.peek().span;
+    session
+        .cursor
+        .bump_if(&TokenKind::Punctuation(PunctuationKind::RBrace));
+    Ok((PatKind::Struct { path, fields }, close))
+}
+
 /// `Type` when `arrow_types`, otherwise a no-arrow type.
 fn parse_pattern_annotation(
     session: &mut ParseSession<'_>,
@@ -191,7 +261,7 @@ fn parse_primary_pattern(
             TokenKind::Punctuation(PunctuationKind::LParen) => {
                 let open = session.cursor.advance();
                 let (elements, rest, close) =
-                    parse_pattern_elements(session, arrow_types, PunctuationKind::RParen)?;
+                    parse_pattern_elements(session, true, PunctuationKind::RParen)?;
                 session
                     .cursor
                     .bump_if(&TokenKind::Punctuation(PunctuationKind::RParen));
@@ -204,7 +274,7 @@ fn parse_primary_pattern(
             TokenKind::Punctuation(PunctuationKind::LBracket) => {
                 session.cursor.advance();
                 let (elements, rest, close) =
-                    parse_pattern_elements(session, arrow_types, PunctuationKind::RBracket)?;
+                    parse_pattern_elements(session, true, PunctuationKind::RBracket)?;
                 session
                     .cursor
                     .bump_if(&TokenKind::Punctuation(PunctuationKind::RBracket));
@@ -225,7 +295,7 @@ fn parse_primary_pattern(
                 }
                 if token.kind == TokenKind::Identifier {
                     let name = session.interner.intern(session.token_text(&token));
-                    let kind = match session.cursor.peek().kind {
+                    let (kind, end) = match session.cursor.peek().kind {
                         TokenKind::Punctuation(PunctuationKind::Colon) => {
                             session.cursor.advance();
                             let ty = parse_pattern_annotation(session, arrow_types)?;
@@ -240,79 +310,76 @@ fn parse_primary_pattern(
                             )
                         }
                         TokenKind::Punctuation(PunctuationKind::LBrace) => {
-                            session.cursor.advance();
-                            let mut fields = Vec::new();
-                            while !session
-                                .cursor
-                                .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
-                            {
-                                let field_name_token = session.cursor.advance();
-                                let field_name = session
-                                    .interner
-                                    .intern(session.token_text(&field_name_token));
-                                let field = if session
-                                    .cursor
-                                    .bump_if(&TokenKind::Punctuation(PunctuationKind::Colon))
-                                {
-                                    parse_pattern_with(session, true)?
-                                } else {
-                                    PatWrap::new(
-                                        session.next_node()?,
-                                        field_name_token.span,
-                                        PatKind::Binding {
-                                            mutable: false,
-                                            name: field_name,
-                                            ty: None,
-                                        },
-                                    )
-                                };
-                                fields.push((field_name, field));
-                                if !session
-                                    .cursor
-                                    .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma))
-                                {
-                                    break;
-                                }
-                            }
-                            let close = session.cursor.peek().span;
-                            session
-                                .cursor
-                                .bump_if(&TokenKind::Punctuation(PunctuationKind::RBrace));
-                            (
-                                PatKind::Struct {
-                                    path: ast::syntax::node::Path::single(name, token.span),
-                                    fields,
-                                },
-                                close,
-                            )
+                            parse_struct_pattern_tail(
+                                session,
+                                ast::syntax::node::Path::single(name, token.span),
+                            )?
                         }
-                        TokenKind::Punctuation(PunctuationKind::LParen) => {
-                            session.cursor.advance();
-                            let mut args = Vec::new();
-                            while !session
+                        TokenKind::Punctuation(PunctuationKind::LParen) => parse_ctor_pattern_tail(
+                            session,
+                            ast::syntax::node::Path::single(name, token.span),
+                        )?,
+                        TokenKind::Punctuation(PunctuationKind::Dot) => {
+                            // QualifiedName 构造器/结构体模式：E.A / E.A(x) / S{ f: p }
+                            let mut segments = vec![ast::syntax::node::PathSegment {
+                                name,
+                                span: token.span,
+                            }];
+                            let mut end = token.span;
+                            while session
                                 .cursor
-                                .check(&TokenKind::Punctuation(PunctuationKind::RParen))
+                                .bump_if(&TokenKind::Punctuation(PunctuationKind::Dot))
                             {
-                                args.push(parse_pattern_with(session, true)?);
-                                if !session
-                                    .cursor
-                                    .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma))
-                                {
-                                    break;
+                                let seg = session.cursor.advance();
+                                if seg.kind != TokenKind::Identifier {
+                                    let id = session.next_node()?;
+                                    let diag = session.emit_unique(
+                                        DiagCode::ExpectedToken,
+                                        seg.span,
+                                        || "expected identifier after '.'".to_string(),
+                                    );
+                                    return Ok(PatWrap::new(
+                                        id,
+                                        join_span(start, seg.span),
+                                        PatKind::Error(ErrorNode {
+                                            id,
+                                            span: seg.span,
+                                            err: diag,
+                                        }),
+                                    ));
                                 }
+                                let sname = session.interner.intern(session.token_text(&seg));
+                                segments.push(ast::syntax::node::PathSegment {
+                                    name: sname,
+                                    span: seg.span,
+                                });
+                                end = seg.span;
                             }
-                            let close = session.cursor.peek().span;
-                            session
-                                .cursor
-                                .bump_if(&TokenKind::Punctuation(PunctuationKind::RParen));
-                            (
-                                PatKind::Constructor {
-                                    path: ast::syntax::node::Path::single(name, token.span),
-                                    args,
-                                },
-                                close,
-                            )
+                            let path = ast::syntax::node::Path { segments };
+                            match session.cursor.peek().kind {
+                                TokenKind::Punctuation(PunctuationKind::LParen) => {
+                                    parse_ctor_pattern_tail(session, path)?
+                                }
+                                TokenKind::Punctuation(PunctuationKind::LBrace) => {
+                                    parse_struct_pattern_tail(session, path)?
+                                }
+                                _ => (
+                                    PatKind::Constructor {
+                                        path,
+                                        args: Vec::new(),
+                                    },
+                                    end,
+                                ),
+                            }
                         }
+                        _ if !arrow_types => (
+                            // when 分支顶层裸名：构造器候选（变体依主语类型在 sem 精化）
+                            PatKind::Constructor {
+                                path: ast::syntax::node::Path::single(name, token.span),
+                                args: Vec::new(),
+                            },
+                            token.span,
+                        ),
                         _ => (
                             PatKind::Binding {
                                 mutable: false,
@@ -322,7 +389,6 @@ fn parse_primary_pattern(
                             token.span,
                         ),
                     };
-                    let (kind, end) = kind;
                     return Ok(PatWrap::new(
                         session.next_node()?,
                         join_span(token.span, end),

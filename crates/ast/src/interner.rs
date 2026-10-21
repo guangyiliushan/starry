@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 /// interned 标识符（插入序编号）
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Symbol(pub u32);
 
 /// 标识符 interner
