@@ -110,6 +110,24 @@ statement is recovered as a single binding and the parse does not produce two
 statements. `let` remains a legal identifier everywhere else (`val let = 1`,
 `let(1)`, `let.x`, `f(let)`), so nothing is reserved.
 
+### Block tail expressions are positional, not per-statement
+
+EBNF `Block := "{" [ NL ] { Statement } [ NL ] [ Expr ] [ NL ] "}"` makes the
+trailing `Expr` a **position** fact: it is the block value only when nothing
+follows it. The statement parser classifies a bare expression statement as
+`ParsedStatement::Tail` without positional knowledge, so the block loop gates
+the classification: after the expression, skip newlines and check for `}` —
+tail only when the brace is next; otherwise the expression is demoted to
+`StmtKind::Expr` and keeps source order. Without the gate, an `if` in the
+middle of a block landed in `tail` while later statements accumulated in
+`stmts`, scrambling AST order (consumer-visible through `type_block` and any
+pass that reads statements before the tail).
+
+Two span corollaries ship with the same change: `parse_block_after_open`
+returns the close-brace span (`Block` stores neither brace), and `parse_if`
+ends at that close brace for a then/else block instead of
+`block_tail_span` — an empty block used to collapse the if-expression span to
+`0..0` via `Span::default`.
 ### Deferred
 
 | Gap | Why it is still open |

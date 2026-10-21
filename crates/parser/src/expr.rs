@@ -3,10 +3,12 @@
 use crate::cursor::TokenCursor;
 use ast::interner::Interner;
 use ast::syntax::expr::{
-    ActorConstruction, Block, CallArg, CastKind, ExprKind, ExprWrap, LambdaParams, SpawnExpr,
-    SpawnKind, SpawnScheduler, SuperSuffix, TokenTree, WhenBody, WhenBranch, WhenPattern,
+    ActorConstruction, Block, CallArg, CastKind, ExprKind, ExprStmt, ExprWrap, LambdaParams,
+    SpawnExpr, SpawnKind, SpawnScheduler, SuperSuffix, TokenTree, WhenBody, WhenBranch,
+    WhenPattern,
 };
 use ast::syntax::node::{DiagCode, DiagCollector, ErrorNode, NodeIdGen, Span};
+use ast::syntax::stmt::{StmtKind, StmtWrap};
 use ast::token::{HardKeyword, LiteralKind, OperatorKind, PunctuationKind, Token, TokenKind};
 
 use crate::pat::parse_pattern;
@@ -697,10 +699,10 @@ fn parse_lambda(session: &mut ParseSession<'_>, open: Span) -> Result<ExprWrap, 
         {
             parse_block(session)?
         } else {
-            parse_block_after_open(session)?
+            parse_block_after_open(session)?.0
         }
     } else {
-        parse_block_after_open(session)?
+        parse_block_after_open(session)?.0
     };
     let end = block_tail_span(&block);
     let id = session.next_node()?;
@@ -722,10 +724,12 @@ pub(crate) fn parse_block(session: &mut ParseSession<'_>) -> Result<Block, Parse
         let span = session.cursor.peek().span;
         expected(session, "'{'", span);
     }
-    parse_block_after_open(session)
+    Ok(parse_block_after_open(session)?.0)
 }
 
-fn parse_block_after_open(session: &mut ParseSession<'_>) -> Result<Block, ParserError> {
+/// 解析 `{` 之后的块体；同时返回右花括号 span（parse_if 等需要精确的
+/// 块结束位置——空块的 tail/语句 span 推导不出 `}` 位置）。
+fn parse_block_after_open(session: &mut ParseSession<'_>) -> Result<(Block, Span), ParserError> {
     let mut stmts = Vec::new();
     let mut tail = None;
     session.cursor.skip_nl();
@@ -743,7 +747,23 @@ fn parse_block_after_open(session: &mut ParseSession<'_>) -> Result<Block, Parse
         }
         match crate::stmt::parse_statement(session)? {
             crate::stmt::ParsedStatement::Statement(statement) => stmts.push(statement),
-            crate::stmt::ParsedStatement::Tail(expr) => tail = Some(Box::new(expr)),
+            crate::stmt::ParsedStatement::Tail(expr) => {
+                // EBNF Block := "{" { Statement } [Expr] "}"：裸表达式仅当
+                // 其后直达块尾才是尾表达式，否则降级为表达式语句保持源序。
+                session.cursor.skip_nl();
+                if session
+                    .cursor
+                    .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+                {
+                    tail = Some(Box::new(expr));
+                } else {
+                    stmts.push(StmtWrap::new(
+                        session.next_node()?,
+                        expr.span,
+                        StmtKind::Expr(ExprStmt { expr }),
+                    ));
+                }
+            }
         }
         session.cursor.skip_nl();
     }
@@ -751,30 +771,37 @@ fn parse_block_after_open(session: &mut ParseSession<'_>) -> Result<Block, Parse
     if close.kind != TokenKind::Punctuation(PunctuationKind::RBrace) {
         expected(session, "'}'", close.span);
     }
-    Ok(Block { stmts, tail })
+    Ok((Block { stmts, tail }, close.span))
 }
 
 fn parse_if(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError> {
     let start = session.cursor.advance().span;
     let cond = parse_refutable_condition(session)?;
     let then_block = parse_block(session)?;
+    let then_close = session.cursor.previous_span();
     let mut else_block = None;
+    let mut end = then_close;
     if session.cursor.check(&TokenKind::Keyword(HardKeyword::Else)) {
         session.cursor.advance();
         if session.cursor.check(&TokenKind::Keyword(HardKeyword::If)) {
             let nested = parse_if(session)?;
+            end = nested.span;
             else_block = Some(Box::new(Block {
                 stmts: Vec::new(),
                 tail: Some(Box::new(nested)),
             }));
         } else {
-            else_block = Some(Box::new(parse_block(session)?));
+            let block = parse_block(session)?;
+            let tail_span = block_tail_span(&block);
+            // 空 else 块：block_tail_span 退化为默认 span，回退右花括号位置
+            end = if tail_span.end == 0 {
+                session.cursor.previous_span()
+            } else {
+                tail_span
+            };
+            else_block = Some(Box::new(block));
         }
     }
-    let end = else_block
-        .as_ref()
-        .map(|block| block_tail_span(block))
-        .unwrap_or_else(|| block_tail_span(&then_block));
     let id = session.next_node()?;
     Ok(ExprWrap::new(
         id,
