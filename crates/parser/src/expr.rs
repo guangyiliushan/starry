@@ -11,7 +11,7 @@ use ast::token::{HardKeyword, LiteralKind, OperatorKind, PunctuationKind, Token,
 
 use crate::pat::parse_pattern;
 use crate::ty::join_span;
-use crate::{ParseSession, ParserError};
+use crate::{MAX_PARSE_DEPTH, ParseSession, ParserError};
 
 pub(crate) fn parse_expr(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError> {
     parse_bp(session, 0)
@@ -30,7 +30,19 @@ fn parse_bp_inner(session: &mut ParseSession<'_>, min_bp: u8) -> Result<ExprWrap
         if session.cursor.check(&TokenKind::Nl) && newline_continues_expr(session) {
             session.cursor.skip_nl();
         }
-        if session.cursor.check(&TokenKind::Keyword(HardKeyword::Is)) {
+        // `is` / `!is` and `in` / `!in` are symmetric operator pairs (Kotlin:
+        // `isOperator : 'is' | NOT_IS`, `inOperator : 'in' | NOT_IN`).
+        let negated_is = session
+            .cursor
+            .check(&TokenKind::Operator(OperatorKind::Bang))
+            && session
+                .cursor
+                .peek_ahead(1)
+                .is_some_and(|token| token.kind == TokenKind::Keyword(HardKeyword::Is));
+        if session.cursor.check(&TokenKind::Keyword(HardKeyword::Is)) || negated_is {
+            if negated_is {
+                session.cursor.advance();
+            }
             session.cursor.advance();
             let pattern = parse_pattern(session)?;
             let span = join_span(lhs.span, pattern.span);
@@ -41,6 +53,7 @@ fn parse_bp_inner(session: &mut ParseSession<'_>, min_bp: u8) -> Result<ExprWrap
                 ExprKind::Is {
                     lhs: Box::new(lhs),
                     pattern: Box::new(pattern),
+                    negated: negated_is,
                 },
             );
             continue;
@@ -441,6 +454,13 @@ fn parse_primary(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError
             let symbol = session.interner.intern("self");
             Ok(ExprWrap::new(id, span, ExprKind::Ident(symbol)))
         }
+        // EBNF Primary := … | "Self" [ CallSuffix ] — the optional call suffix is
+        // picked up by the postfix loop, so `Self` is just a primary here.
+        TokenKind::Keyword(HardKeyword::SelfType) => {
+            session.cursor.advance();
+            let symbol = session.interner.intern("Self");
+            Ok(ExprWrap::new(id, span, ExprKind::Ident(symbol)))
+        }
         TokenKind::Keyword(HardKeyword::Super) => {
             session.cursor.advance();
             parse_super(session, id, span)
@@ -567,7 +587,12 @@ fn parse_array(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError> 
                 .token_text(&count_token)
                 .replace('_', "")
                 .parse::<u32>()
-                .unwrap_or(u32::MAX),
+                .unwrap_or_else(|_| {
+                    session.emit_unique(DiagCode::IntegerOutOfRange, count_token.span, || {
+                        "array length exceeds u32".to_string()
+                    });
+                    0
+                }),
             _ => {
                 expected(session, "array length", count_token.span);
                 0
@@ -690,7 +715,13 @@ fn parse_lambda(session: &mut ParseSession<'_>, open: Span) -> Result<ExprWrap, 
 }
 
 pub(crate) fn parse_block(session: &mut ParseSession<'_>) -> Result<Block, ParserError> {
-    let _open = session.cursor.advance();
+    if !session
+        .cursor
+        .bump_if(&TokenKind::Punctuation(PunctuationKind::LBrace))
+    {
+        let span = session.cursor.peek().span;
+        expected(session, "'{'", span);
+    }
     parse_block_after_open(session)
 }
 
@@ -809,14 +840,17 @@ fn parse_when(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError> {
         }
         let (pattern, guard) = if session.cursor.check(&TokenKind::Keyword(HardKeyword::Else)) {
             session.cursor.advance();
-            session.cursor.advance();
-            session
+            if !session
                 .cursor
-                .bump_if(&TokenKind::Operator(OperatorKind::Arrow));
+                .bump_if(&TokenKind::Operator(OperatorKind::Arrow))
+            {
+                let span = session.cursor.peek().span;
+                expected(session, "'->'", span);
+            }
             (WhenPattern::Else, None)
         } else {
             let checkpoint = session.checkpoint();
-            let pattern = parse_pattern(session)?;
+            let pattern = crate::pat::parse_when_branch_pattern(session)?;
             let guard = if session.cursor.check(&TokenKind::Keyword(HardKeyword::If)) {
                 session.cursor.advance();
                 Some(Box::new(parse_expr(session)?))
@@ -827,14 +861,20 @@ fn parse_when(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError> {
                 .cursor
                 .bump_if(&TokenKind::Operator(OperatorKind::Arrow))
             {
+                session.cursor.skip_nl();
                 (WhenPattern::Pattern(pattern), guard)
             } else {
                 // 不是「模式 [if 守卫] ->」：回滚后按表达式分支解析
                 session.rollback(&checkpoint);
                 let expr = parse_expr(session)?;
-                session
+                if !session
                     .cursor
-                    .bump_if(&TokenKind::Operator(OperatorKind::Arrow));
+                    .bump_if(&TokenKind::Operator(OperatorKind::Arrow))
+                {
+                    let span = session.cursor.peek().span;
+                    expected(session, "'->'", span);
+                }
+                session.cursor.skip_nl();
                 (WhenPattern::Expression(expr), None)
             }
         };
@@ -842,6 +882,7 @@ fn parse_when(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError> {
             .cursor
             .check(&TokenKind::Punctuation(PunctuationKind::LBrace))
         {
+            session.cursor.skip_nl();
             WhenBody::Block(parse_block(session)?)
         } else if matches!(
             session.cursor.peek().kind,
@@ -870,6 +911,9 @@ fn parse_when(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError> {
         session.cursor.skip_nl();
     }
     let close = session.cursor.advance();
+    if close.kind != TokenKind::Punctuation(PunctuationKind::RBrace) {
+        expected(session, "'}'", close.span);
+    }
     let id = session.next_node()?;
     Ok(ExprWrap::new(
         id,
@@ -922,11 +966,7 @@ fn parse_spawn(session: &mut ParseSession<'_>, start: Span) -> Result<ExprWrap, 
             .cursor
             .check(&TokenKind::Punctuation(PunctuationKind::LParen))
         {
-            parse_call_args(session)?
-                .0
-                .into_iter()
-                .map(|arg| arg.value)
-                .collect()
+            parse_call_args(session)?.0
         } else {
             Vec::new()
         };
@@ -956,26 +996,20 @@ fn parse_super(
         .cursor
         .check(&TokenKind::Punctuation(PunctuationKind::LParen))
     {
-        SuperSuffix::Call(
-            parse_call_args(session)?
-                .0
-                .into_iter()
-                .map(|arg| arg.value)
-                .collect(),
-        )
+        SuperSuffix::Call(parse_call_args(session)?.0)
     } else if session
         .cursor
         .bump_if(&TokenKind::Punctuation(PunctuationKind::Dot))
     {
         SuperSuffix::Member(parse_identifier(session).0)
     } else {
+        let span = session.cursor.peek().span;
+        session.emit_unique(DiagCode::ExpectedToken, span, || {
+            "expected '.' or '(' after 'super'".to_string()
+        });
         SuperSuffix::Call(Vec::new())
     };
-    let end = session
-        .cursor
-        .peek_ahead(0)
-        .map(|token| token.span)
-        .unwrap_or_default();
+    let end = session.cursor.previous_span();
     Ok(ExprWrap::new(
         id,
         join_span(start, end),
@@ -1024,20 +1058,65 @@ pub(crate) fn parse_call_args(
 
 fn parse_macro_tokens(session: &mut ParseSession<'_>) -> Result<Vec<TokenTree>, ParserError> {
     session.cursor.advance(); // (
-    let mut tokens = Vec::new();
-    while !session
-        .cursor
-        .check(&TokenKind::Punctuation(PunctuationKind::RParen))
-    {
-        if session.cursor.is_eof() {
-            break;
-        }
-        tokens.push(TokenTree::Token(session.cursor.advance()));
+    match session.try_with_depth(|session| parse_macro_group(session, PunctuationKind::RParen))? {
+        Some((tokens, _close)) => Ok(tokens),
+        None => macro_depth_error(session).map(|(tokens, _close)| tokens),
     }
-    session
-        .cursor
-        .bump_if(&TokenKind::Punctuation(PunctuationKind::RParen));
-    Ok(tokens)
+}
+
+fn macro_depth_error(
+    session: &mut ParseSession<'_>,
+) -> Result<(Vec<TokenTree>, Option<Token>), ParserError> {
+    let span = session.cursor.peek().span;
+    session.emit_unique(DiagCode::DepthLimitExceeded, span, || {
+        format!("macro token nesting exceeds {MAX_PARSE_DEPTH}")
+    });
+    Ok((Vec::new(), None))
+}
+
+fn parse_macro_group(
+    session: &mut ParseSession<'_>,
+    close_kind: PunctuationKind,
+) -> Result<(Vec<TokenTree>, Option<Token>), ParserError> {
+    let mut tokens = Vec::new();
+    while !session.cursor.is_eof() {
+        let kind = session.cursor.peek().kind;
+        if kind == TokenKind::Punctuation(close_kind) {
+            return Ok((tokens, Some(session.cursor.advance())));
+        }
+
+        let close = match kind {
+            TokenKind::Punctuation(PunctuationKind::LParen) => PunctuationKind::RParen,
+            TokenKind::Punctuation(PunctuationKind::LBracket) => PunctuationKind::RBracket,
+            TokenKind::Punctuation(PunctuationKind::LBrace) => PunctuationKind::RBrace,
+            _ => {
+                tokens.push(TokenTree::Token(session.cursor.advance()));
+                continue;
+            }
+        };
+
+        let open = session.cursor.advance();
+        match session.try_with_depth(|session| parse_macro_group(session, close))? {
+            Some((group_tokens, group_close)) => tokens.push(TokenTree::Group {
+                open,
+                tokens: group_tokens,
+                close: group_close,
+            }),
+            None => {
+                let span = session.cursor.peek().span;
+                session.emit_unique(DiagCode::DepthLimitExceeded, span, || {
+                    format!("macro token nesting exceeds {MAX_PARSE_DEPTH}")
+                });
+                return Ok((tokens, None));
+            }
+        }
+    }
+
+    let span = session.cursor.peek().span;
+    session.emit_unique(DiagCode::ExpectedToken, span, || {
+        "unclosed macro token group".to_string()
+    });
+    Ok((tokens, None))
 }
 
 pub(crate) fn parse_path(
@@ -1048,10 +1127,16 @@ pub(crate) fn parse_path(
         name: first.0,
         span: first.1,
     }];
-    while matches!(
-        session.cursor.peek().kind,
-        TokenKind::Punctuation(PunctuationKind::Dot)
-    ) {
+    // Only continue on `.` when an identifier actually follows; otherwise stop
+    // and leave `.` for the caller (`Type.*` pointcuts, `a.` postfix, …).
+    while session
+        .cursor
+        .check(&TokenKind::Punctuation(PunctuationKind::Dot))
+        && session
+            .cursor
+            .peek_ahead(1)
+            .is_some_and(|token| token.kind == TokenKind::Identifier)
+    {
         session.cursor.advance();
         let next = parse_identifier(session);
         segments.push(ast::syntax::node::PathSegment {
@@ -1076,6 +1161,75 @@ pub(crate) fn parse_identifier(
     (symbol, token.span)
 }
 
+/// Decode a lexer's raw `String` token for named slots (native paths, FFI
+/// languages). General expression strings keep raw spans for interpolation.
+pub(crate) fn decode_string_token(session: &mut ParseSession<'_>, token: &Token) -> String {
+    let raw = session.token_text(token);
+    debug_assert!(raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"'));
+    let mut decoded = String::with_capacity(raw.len().saturating_sub(2));
+    let mut chars = raw[1..raw.len() - 1].chars();
+    let invalid_escape = |session: &mut ParseSession<'_>, span: Span| {
+        session.emit_unique(DiagCode::InvalidEscape, span, || {
+            "invalid string escape".to_string()
+        });
+    };
+    while let Some(char) = chars.next() {
+        if char != '\\' {
+            decoded.push(char);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => decoded.push('\n'),
+            Some('r') => decoded.push('\r'),
+            Some('t') => decoded.push('\t'),
+            Some('0') => decoded.push('\0'),
+            Some('u') => {
+                if chars.next() != Some('{') {
+                    invalid_escape(session, token.span);
+                    decoded.push('u');
+                    continue;
+                }
+                let mut hex = String::new();
+                let mut terminated = false;
+                for hex_char in chars.by_ref() {
+                    if hex_char == '}' {
+                        terminated = true;
+                        break;
+                    }
+                    if hex.len() == 6 || !hex_char.is_ascii_hexdigit() {
+                        invalid_escape(session, token.span);
+                        hex.clear();
+                        break;
+                    }
+                    hex.push(hex_char);
+                }
+                let value = if terminated && !hex.is_empty() {
+                    u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+                } else {
+                    None
+                };
+                match value {
+                    Some(value) => decoded.push(value),
+                    None => {
+                        invalid_escape(session, token.span);
+                        decoded.push(char::REPLACEMENT_CHARACTER);
+                    }
+                }
+            }
+            Some(escaped @ ('\\' | '"' | '\'' | '$' | '/')) => decoded.push(escaped),
+            Some(escaped) => {
+                invalid_escape(session, token.span);
+                decoded.push(escaped);
+            }
+            None => {
+                invalid_escape(session, token.span);
+                decoded.push('\\');
+            }
+        }
+    }
+    decoded
+}
+
 fn expected(session: &mut ParseSession<'_>, expected: &str, span: Span) {
     session.emit_unique(DiagCode::ExpectedToken, span, || {
         format!("expected {expected}")
@@ -1086,7 +1240,7 @@ fn depth_error(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError> 
     let span = session.cursor.peek().span;
     let id = session.next_node()?;
     let diag = session.emit_unique(DiagCode::DepthLimitExceeded, span, || {
-        "expression nesting exceeds 100".to_string()
+        format!("expression nesting exceeds {MAX_PARSE_DEPTH}")
     });
     Ok(ExprWrap::new(
         id,
@@ -1123,8 +1277,6 @@ fn parse_string_literal(
             ExprKind::Literal(LiteralKind::String),
         ));
     }
-    // ponytail: `${...}` 用括号深度扫描定位收尾，`${ "}" }` 会误判；
-    // 若需要支持嵌套串，改为子词法 token 走查。
     let open = span.start as usize + 1;
     let close = span.end as usize - 1;
     let source = session.source;
@@ -1142,27 +1294,17 @@ fn parse_string_literal(
                     parts.push(string_chunk(session, chunk_start, index)?);
                 }
                 let expr_start = index + 2;
-                let mut depth = 1usize;
-                let mut scan = expr_start;
-                while scan < close && depth > 0 {
-                    match bytes[scan] {
-                        b'{' => depth += 1,
-                        b'}' => depth -= 1,
-                        _ => {}
-                    }
-                    scan += 1;
-                }
-                if depth != 0 {
+                let Some(scan) = interpolation_close(session, expr_start, close) else {
                     session.emit_unique(
                         DiagCode::UnclosedInterpolation,
                         Span::new(index as u32, span.end),
                         || "unclosed ${ interpolation".to_string(),
                     );
                     break;
-                }
-                let tokens = session.tokenize_range(expr_start, scan - 1);
+                };
+                let tokens = session.tokenize_range(expr_start, scan);
                 parts.push(parse_interpolation_expr(session, tokens)?);
-                index = scan;
+                index = scan + 1;
                 chunk_start = index;
             }
             b'$' if index + 1 < close && is_ident_start(bytes[index + 1]) => {
@@ -1193,6 +1335,24 @@ fn parse_string_literal(
         parts.push(string_chunk(session, chunk_start, close)?);
     }
     Ok(ExprWrap::new(id, span, ExprKind::StringInterp { parts }))
+}
+
+/// Find the matching `}` with the real lexer so braces in nested char/string
+/// tokens and comments cannot terminate an interpolation early.
+fn interpolation_close(session: &ParseSession<'_>, start: usize, end: usize) -> Option<usize> {
+    let fragment = &session.source[start..end];
+    let mut depth = 1usize;
+    for token in session.lexer.tokenize(fragment) {
+        match token.kind {
+            TokenKind::Punctuation(PunctuationKind::LBrace) => depth += 1,
+            TokenKind::Punctuation(PunctuationKind::RBrace) if depth == 1 => {
+                return Some(start + token.span.start as usize);
+            }
+            TokenKind::Punctuation(PunctuationKind::RBrace) => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// 快路径判定：是否存在未转义的 `$` 插值标记。

@@ -1,6 +1,6 @@
 //! 声明空间：Decl → Expr / Type / Pattern 的语法边。
 
-use super::expr::{Block, ExprWrap};
+use super::expr::{Block, CallArg, ExprWrap};
 use super::modifier::ModifierList;
 use super::node::{ErrorNode, MissingNode, NodeId, Path, Span, Symbol};
 use super::ty::{TypeParam, TypeWrap};
@@ -78,6 +78,9 @@ pub struct FunSignature {
 #[derive(Debug, Clone)]
 pub enum ExternBody {
     Fun(FunSignature),
+    Block {
+        members: Vec<FunSignature>,
+    },
     Namespace {
         name: Symbol,
         members: Vec<FunSignature>,
@@ -124,10 +127,19 @@ pub struct BindingDecl {
 
 #[derive(Debug, Clone)]
 pub struct Param {
-    pub mutable: bool,
+    pub modifier: ParamModifier,
     pub name: Symbol,
     pub ty: Option<TypeWrap>,
     pub default: Option<Box<ExprWrap>>,
+}
+
+/// Grammar-visible parameter modifier; variants map 1:1 to EBNF choices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamModifier {
+    None,
+    Mutable,
+    Val,
+    Var,
 }
 
 #[derive(Debug, Clone)]
@@ -148,7 +160,7 @@ pub struct PrimaryConstructor {
 #[derive(Debug, Clone)]
 pub struct SuperItem {
     pub ty: TypeWrap,
-    pub args: Option<Vec<ExprWrap>>,
+    pub args: Option<Vec<CallArg>>,
     pub by: Option<Box<ExprWrap>>,
 }
 
@@ -342,6 +354,7 @@ pub struct MacroDecl {
 
 #[derive(Debug, Clone)]
 pub struct ImplDecl {
+    pub type_params: Vec<TypeParam>,
     pub type_ref: TypeWrap,
     pub trait_ref: TypeWrap,
     pub members: Vec<ClassMember>,

@@ -130,6 +130,7 @@ impl<'src> ParseSession<'src> {
         self.cursor.skip_nl();
         let package = self.parse_named_prefix(ast::token::HardKeyword::Package)?;
         let mut items = Vec::new();
+        let mut seen_top_level = false;
         while !self.cursor.is_eof() {
             if self.cursor.check(&TokenKind::Nl) {
                 self.cursor.advance();
@@ -137,12 +138,14 @@ impl<'src> ParseSession<'src> {
             }
             let item = match self.cursor.peek().kind {
                 TokenKind::Keyword(ast::token::HardKeyword::Import) => {
+                    let import_span = self.cursor.peek().span;
+                    if seen_top_level {
+                        self.emit_unique(DiagCode::UnexpectedToken, import_span, || {
+                            "imports must precede top-level declarations".to_string()
+                        });
+                    }
                     let (import, start) = decl::parse_import(self)?;
-                    let end = self
-                        .cursor
-                        .peek_ahead(0)
-                        .map(|token| token.span)
-                        .unwrap_or_default();
+                    let end = self.cursor.previous_span();
                     Ok(ast::syntax::decl::DeclNode {
                         id: self.next_node()?,
                         span: ast::token::Span::new(start.start, end.end),
@@ -151,9 +154,13 @@ impl<'src> ParseSession<'src> {
                 }
                 TokenKind::Keyword(ast::token::HardKeyword::Val)
                 | TokenKind::Keyword(ast::token::HardKeyword::Var) => {
+                    seen_top_level = true;
                     decl::parse_binding_decl(self)
                 }
-                _ => decl::parse_top_level(self),
+                _ => {
+                    seen_top_level = true;
+                    decl::parse_top_level(self)
+                }
             }?;
             items.push(item);
             self.finish_top_level();
@@ -195,14 +202,8 @@ impl<'src> ParseSession<'src> {
         span: Span,
         message: impl FnOnce() -> String,
     ) -> DiagId {
-        if let Some((position, _)) = self
-            .diags
-            .all()
-            .iter()
-            .enumerate()
-            .find(|(_, diag)| diag.code == code && diag.span == span)
-        {
-            return ast::syntax::node::DiagId(position as u32);
+        if let Some(id) = self.diags.find_unique(span, code) {
+            return id;
         }
         let message = message();
         self.diags
@@ -238,4 +239,4 @@ impl<'src> ParseSession<'src> {
     }
 }
 
-pub(crate) const MAX_PARSE_DEPTH: usize = 100;
+pub(crate) const MAX_PARSE_DEPTH: usize = 50;

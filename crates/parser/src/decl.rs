@@ -1,4 +1,4 @@
-//! Declaration parser for the frozen v0.3 grammar.
+//! Declaration parser for the frozen v0.4 grammar.
 
 use ast::syntax::decl::*;
 use ast::syntax::expr::ExprWrap;
@@ -11,16 +11,12 @@ use ast::token::{HardKeyword, LiteralKind, OperatorKind, PunctuationKind, TokenK
 use crate::expr::{parse_block, parse_expr, parse_identifier, parse_path};
 use crate::pat::parse_pattern;
 use crate::ty::{join_span, parse_type, parse_type_params};
-use crate::{ParseSession, ParserError};
+use crate::{MAX_PARSE_DEPTH, ParseSession, ParserError};
 
 macro_rules! complete_decl {
     ($session:expr, $start:expr, $kind:expr) => {{
         let kind = $kind;
-        let end = $session
-            .cursor
-            .peek_ahead(0)
-            .map(|token| token.span)
-            .unwrap_or_default();
+        let end = $session.cursor.previous_span();
         Ok(DeclNode {
             id: $session.next_node()?,
             span: join_span($start, end),
@@ -48,7 +44,7 @@ pub(crate) fn parse_modifier_list(
 pub(crate) fn parse_parameter_list(
     session: &mut ParseSession<'_>,
 ) -> Result<Vec<Param>, ParserError> {
-    let open = session.cursor.advance();
+    session.cursor.advance();
     let mut params = Vec::new();
     while !session
         .cursor
@@ -71,15 +67,26 @@ pub(crate) fn parse_parameter_list(
             "expected ')'".to_string()
         });
     }
-    let _ = open;
     Ok(params)
 }
 
 fn parse_parameter(session: &mut ParseSession<'_>) -> Result<Param, ParserError> {
     let start = session.cursor.peek().span;
-    let mutable = session
-        .cursor
-        .bump_if(&TokenKind::Keyword(HardKeyword::Mut));
+    let modifier = match session.cursor.peek().kind {
+        TokenKind::Keyword(HardKeyword::Mut) => {
+            session.cursor.advance();
+            ParamModifier::Mutable
+        }
+        TokenKind::Keyword(HardKeyword::Val) => {
+            session.cursor.advance();
+            ParamModifier::Val
+        }
+        TokenKind::Keyword(HardKeyword::Var) => {
+            session.cursor.advance();
+            ParamModifier::Var
+        }
+        _ => ParamModifier::None,
+    };
     let name = parse_identifier(session).0;
     let ty = if session
         .cursor
@@ -103,7 +110,7 @@ fn parse_parameter(session: &mut ParseSession<'_>) -> Result<Param, ParserError>
         .or_else(|| ty.as_ref().map(|ty| ty.span))
         .unwrap_or(start);
     Ok(Param {
-        mutable,
+        modifier,
         name,
         ty,
         default,
@@ -150,6 +157,10 @@ pub(crate) fn parse_fun_decl(session: &mut ParseSession<'_>) -> Result<FunDecl, 
         session.cursor.skip_nl();
         Some(FunctionBody::Expr(parse_expr(session)?))
     } else {
+        let span = session.cursor.peek().span;
+        session.emit_unique(DiagCode::ExpectedToken, span, || {
+            "expected function body".to_string()
+        });
         None
     };
     Ok(FunDecl {
@@ -183,13 +194,7 @@ fn parse_where_clause(session: &mut ParseSession<'_>) -> Result<Vec<WhereConstra
 fn parse_where_constraint(session: &mut ParseSession<'_>) -> Result<WhereConstraint, ParserError> {
     let ty = parse_type(session)?;
     expect_punctuation(session, PunctuationKind::Colon, ':');
-    let mut bounds = vec![parse_type(session)?];
-    while session
-        .cursor
-        .bump_if(&TokenKind::Operator(OperatorKind::BitAnd))
-    {
-        bounds.push(parse_type(session)?);
-    }
+    let bounds = crate::ty::parse_bounds(session)?;
     Ok(WhereConstraint { ty, bounds })
 }
 
@@ -198,6 +203,18 @@ pub(crate) fn parse_binding_decl(session: &mut ParseSession<'_>) -> Result<DeclN
     let modifiers = parse_modifier_list(session)?;
     let keyword = session.cursor.advance();
     let immutable = keyword.kind == TokenKind::Keyword(HardKeyword::Val);
+    parse_binding_body(session, start, modifiers, immutable)
+}
+
+/// Binding body after the `val` / `var` keyword has been consumed (or, for `let`
+/// recovery, replaced by a diagnostic). Shared so `let x = 1` recovers into one
+/// binding statement instead of silently splitting into two statements.
+pub(crate) fn parse_binding_body(
+    session: &mut ParseSession<'_>,
+    start: Span,
+    modifiers: ModifierList,
+    immutable: bool,
+) -> Result<DeclNode, ParserError> {
     let id = session.next_node()?;
     let pattern = parse_pattern(session)?;
     let pattern_ty = match &pattern.kind {
@@ -255,16 +272,25 @@ pub(crate) fn parse_import(
             .is_some_and(|next| next.kind == TokenKind::Literal(LiteralKind::String))
     {
         let language = match token.kind {
-            TokenKind::Literal(LiteralKind::String) => match session.token_text(&token) {
-                "\"cpp\"" => NativeLanguage::Cpp,
-                _ => NativeLanguage::C,
-            },
+            TokenKind::Literal(LiteralKind::String) => {
+                let decoded = crate::expr::decode_string_token(session, &token);
+                match decoded.as_str() {
+                    "cpp" => NativeLanguage::Cpp,
+                    "c" => NativeLanguage::C,
+                    _ => {
+                        session.emit_unique(DiagCode::ExpectedToken, token.span, || {
+                            "expected native language \"c\" or \"cpp\"".to_string()
+                        });
+                        NativeLanguage::C
+                    }
+                }
+            }
             _ => NativeLanguage::C,
         };
         session.cursor.advance();
-        let path = session
-            .interner
-            .intern(session.token_text(session.cursor.peek()));
+        let path_token = *session.cursor.peek();
+        let decoded_path = crate::expr::decode_string_token(session, &path_token);
+        let path = session.interner.intern(&decoded_path);
         session.cursor.advance();
         let alias = parse_alias(session)?;
         let mut members = Vec::new();
@@ -275,33 +301,28 @@ pub(crate) fn parse_import(
             while !session
                 .cursor
                 .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+                && !session.cursor.is_eof()
             {
                 session.cursor.skip_nl();
                 if session
                     .cursor
                     .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
-                {
-                    break;
-                }
-                session.cursor.skip_nl();
-                if session
-                    .cursor
-                    .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+                    || session.cursor.is_eof()
                 {
                     break;
                 }
                 members.push(parse_fun_signature(session)?);
-                expect_punctuation(session, PunctuationKind::Semicolon, ';');
-                if !session
+                // EBNF separates members with `,`; `;` and newline are accepted
+                // as redundant terminators, matching every other `FunSignature` slot.
+                session
                     .cursor
-                    .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma))
-                {
-                    break;
-                }
+                    .bump_if(&TokenKind::Punctuation(PunctuationKind::Semicolon));
+                session
+                    .cursor
+                    .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma));
+                session.cursor.skip_nl();
             }
-            session
-                .cursor
-                .bump_if(&TokenKind::Punctuation(PunctuationKind::RBrace));
+            expect_punctuation(session, PunctuationKind::RBrace, '}');
         }
         return Ok((
             ImportDecl {
@@ -385,6 +406,28 @@ fn parse_import_path(session: &mut ParseSession<'_>) -> Result<Path, ParserError
 }
 
 pub(crate) fn parse_top_level(session: &mut ParseSession<'_>) -> Result<DeclNode, ParserError> {
+    let Some(declaration) = session.try_with_depth(|session| parse_top_level_inner(session))?
+    else {
+        let token = session.cursor.advance();
+        let span = token.span;
+        let id = session.next_node()?;
+        let diag = session.emit_unique(DiagCode::DepthLimitExceeded, span, || {
+            format!("declaration nesting exceeds {MAX_PARSE_DEPTH}")
+        });
+        return Ok(DeclNode {
+            id,
+            span,
+            kind: DeclKind::Error(ErrorNode {
+                id,
+                span,
+                err: diag,
+            }),
+        });
+    };
+    Ok(declaration)
+}
+
+fn parse_top_level_inner(session: &mut ParseSession<'_>) -> Result<DeclNode, ParserError> {
     let start = session.cursor.peek().span;
     if session
         .cursor
@@ -409,7 +452,16 @@ pub(crate) fn parse_top_level(session: &mut ParseSession<'_>) -> Result<DeclNode
             let type_params = parse_type_params(session)?;
             let primary_ctor = parse_primary_constructor(session)?;
             let supertypes = parse_supertypes(session)?;
-            let body = parse_class_body(session)?;
+            let body = if session
+                .cursor
+                .check(&TokenKind::Punctuation(PunctuationKind::LBrace))
+            {
+                parse_class_body(session)?
+            } else {
+                ClassBody {
+                    members: Vec::new(),
+                }
+            };
             DeclKind::Class(ClassDecl {
                 modifiers,
                 name,
@@ -481,6 +533,16 @@ pub(crate) fn parse_top_level(session: &mut ParseSession<'_>) -> Result<DeclNode
             session.cursor.advance();
             let name = parse_identifier(session).0;
             let type_params = parse_type_params(session)?;
+            // EBNF: TypeAliasDecl := Modifiers "type" IDENT TypeParams? "=" Type
+            if !session
+                .cursor
+                .bump_if(&TokenKind::Operator(OperatorKind::Eq))
+            {
+                let span = session.cursor.peek().span;
+                session.emit_unique(DiagCode::ExpectedToken, span, || {
+                    "expected '=' in type alias".to_string()
+                });
+            }
             let ty = parse_type(session)?;
             DeclKind::TypeAlias(TypeAliasDecl {
                 modifiers,
@@ -510,11 +572,13 @@ pub(crate) fn parse_top_level(session: &mut ParseSession<'_>) -> Result<DeclNode
                 while !session
                     .cursor
                     .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+                    && !session.cursor.is_eof()
                 {
                     session.cursor.skip_nl();
                     if session
                         .cursor
                         .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+                        || session.cursor.is_eof()
                     {
                         break;
                     }
@@ -535,11 +599,13 @@ pub(crate) fn parse_top_level(session: &mut ParseSession<'_>) -> Result<DeclNode
                 while !session
                     .cursor
                     .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+                    && !session.cursor.is_eof()
                 {
                     session.cursor.skip_nl();
                     if session
                         .cursor
                         .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+                        || session.cursor.is_eof()
                     {
                         break;
                     }
@@ -550,6 +616,8 @@ pub(crate) fn parse_top_level(session: &mut ParseSession<'_>) -> Result<DeclNode
             }),
             "impl" => complete_decl!(session, start, {
                 session.cursor.advance();
+                // EBNF: ImplDecl := «impl» TypeParams? Type "for" Type "{" { ClassMember } "}"
+                let type_params = parse_type_params(session)?;
                 let type_ref = parse_type(session)?;
                 expect_keyword(session, HardKeyword::For, "for");
                 let trait_ref = parse_type(session)?;
@@ -557,6 +625,7 @@ pub(crate) fn parse_top_level(session: &mut ParseSession<'_>) -> Result<DeclNode
                 let members = parse_class_members(session)?;
                 expect_punctuation(session, PunctuationKind::RBrace, '}');
                 DeclKind::Impl(ImplDecl {
+                    type_params,
                     type_ref,
                     trait_ref,
                     members,
@@ -602,36 +671,93 @@ pub(crate) fn parse_top_level(session: &mut ParseSession<'_>) -> Result<DeclNode
     }
 }
 
+/// Non-consuming check: does this member begin a `FunSignature` (`… fun NAME`)?
+fn at_fun_signature(session: &ParseSession<'_>) -> bool {
+    let mut offset = 0;
+    while let Some(token) = session.cursor.peek_ahead(offset) {
+        if token.kind == TokenKind::Eof {
+            return false;
+        }
+        if token.kind == TokenKind::Keyword(HardKeyword::Fun) {
+            return true;
+        }
+        if token.kind != TokenKind::Identifier
+            || ast::token::lookup_modifier_word(session.token_text(token)).is_none()
+        {
+            return false;
+        }
+        offset += 1;
+    }
+    false
+}
+
+/// EBNF `FunSignature := Modifiers "fun" … [ ";" ]` — the terminator is
+/// optional (newline also ends a signature); a body or `where` clause makes the
+/// member a `FunDecl` instead.
+fn signature_has_body(session: &mut ParseSession<'_>) -> bool {
+    matches!(
+        session.cursor.peek().kind,
+        TokenKind::Operator(OperatorKind::Eq)
+            | TokenKind::Punctuation(PunctuationKind::LBrace)
+            | TokenKind::Keyword(HardKeyword::Where)
+    )
+}
+
+fn parse_fun_signatures_until_rbrace(
+    session: &mut ParseSession<'_>,
+) -> Result<Vec<FunSignature>, ParserError> {
+    let mut members = Vec::new();
+    while !session
+        .cursor
+        .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+        && !session.cursor.is_eof()
+    {
+        session.cursor.skip_nl();
+        if session
+            .cursor
+            .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+        {
+            break;
+        }
+        members.push(parse_fun_signature(session)?);
+        session
+            .cursor
+            .bump_if(&TokenKind::Punctuation(PunctuationKind::Semicolon));
+        session.cursor.skip_nl();
+    }
+    Ok(members)
+}
+
 fn parse_extern(session: &mut ParseSession<'_>, start: Span) -> Result<DeclNode, ParserError> {
     session.cursor.advance();
     let language_token = session.cursor.advance();
-    let language = session.interner.intern(session.token_text(&language_token));
-    let body = if session.cursor.check(&TokenKind::Identifier)
+    let decoded_language = crate::expr::decode_string_token(session, &language_token);
+    let language = session.interner.intern(&decoded_language);
+    let body = if session
+        .cursor
+        .check(&TokenKind::Punctuation(PunctuationKind::LBrace))
+    {
+        session.cursor.advance();
+        let members = parse_fun_signatures_until_rbrace(session)?;
+        expect_punctuation(session, PunctuationKind::RBrace, '}');
+        ExternBody::Block { members }
+    } else if session.cursor.check(&TokenKind::Identifier)
         && session.token_text(session.cursor.peek()) == "namespace"
     {
         session.cursor.advance();
         let name = parse_identifier(session).0;
         expect_punctuation(session, PunctuationKind::LBrace, '{');
-        let mut members = Vec::new();
-        while !session
-            .cursor
-            .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
-        {
-            members.push(parse_fun_signature(session)?);
-            expect_punctuation(session, PunctuationKind::Semicolon, ';');
-        }
+        let members = parse_fun_signatures_until_rbrace(session)?;
         expect_punctuation(session, PunctuationKind::RBrace, '}');
         ExternBody::Namespace { name, members }
     } else {
         let signature = parse_fun_signature(session)?;
-        expect_punctuation(session, PunctuationKind::Semicolon, ';');
+        session
+            .cursor
+            .bump_if(&TokenKind::Punctuation(PunctuationKind::Semicolon));
         ExternBody::Fun(signature)
     };
-    let end = session
-        .cursor
-        .peek_ahead(0)
-        .map(|token| token.span)
-        .unwrap_or_default();
+    let end = session.cursor.previous_span();
     Ok(DeclNode {
         id: session.next_node()?,
         span: join_span(start, end),
@@ -677,19 +803,14 @@ fn parse_super_item(session: &mut ParseSession<'_>) -> Result<SuperItem, ParserE
         .cursor
         .check(&TokenKind::Punctuation(PunctuationKind::LParen))
     {
-        Some(
-            crate::expr::parse_call_args(session)?
-                .0
-                .into_iter()
-                .map(|arg| arg.value)
-                .collect(),
-        )
+        Some(crate::expr::parse_call_args(session)?.0)
     } else {
         None
     };
     let by = if session.cursor.check(&TokenKind::Identifier)
         && session.token_text(session.cursor.peek()) == "by"
     {
+        session.cursor.advance();
         Some(Box::new(parse_expr(session)?))
     } else {
         None
@@ -715,6 +836,8 @@ fn parse_class_members(session: &mut ParseSession<'_>) -> Result<Vec<ClassMember
         {
             break;
         }
+        let constructor_checkpoint = session.checkpoint();
+        let constructor_modifiers = parse_modifier_list(session)?;
         if session.cursor.check(&TokenKind::Identifier)
             && session.token_text(session.cursor.peek()) == "init"
         {
@@ -723,11 +846,10 @@ fn parse_class_members(session: &mut ParseSession<'_>) -> Result<Vec<ClassMember
                 .cursor
                 .check(&TokenKind::Punctuation(PunctuationKind::LParen))
             {
-                let modifiers = parse_modifier_list(session)?;
                 let params = parse_parameter_list(session)?;
                 let body = parse_block(session)?;
                 members.push(ClassMember::Constructor(Box::new(ConstructorDecl {
-                    modifiers,
+                    modifiers: constructor_modifiers,
                     params,
                     body,
                 })));
@@ -736,6 +858,7 @@ fn parse_class_members(session: &mut ParseSession<'_>) -> Result<Vec<ClassMember
             }
             continue;
         }
+        session.rollback(&constructor_checkpoint);
         if matches!(session.cursor.peek().kind, TokenKind::Identifier)
             && matches!(session.token_text(session.cursor.peek()), "get" | "set")
         {
@@ -857,6 +980,10 @@ fn parse_trait_members(session: &mut ParseSession<'_>) -> Result<Vec<TraitMember
             } else {
                 None
             };
+            // Redundant `;` is accepted on bodyless trait members, same as `FunSignature`.
+            session
+                .cursor
+                .bump_if(&TokenKind::Punctuation(PunctuationKind::Semicolon));
             members.push(TraitMember::AssociatedType(AssociatedTypeDecl {
                 name,
                 bound,
@@ -865,11 +992,13 @@ fn parse_trait_members(session: &mut ParseSession<'_>) -> Result<Vec<TraitMember
             continue;
         }
         let checkpoint = session.checkpoint();
-        if let Ok(signature) = parse_fun_signature(session)
-            && session
-                .cursor
-                .bump_if(&TokenKind::Punctuation(PunctuationKind::Semicolon))
+        if at_fun_signature(session)
+            && let Ok(signature) = parse_fun_signature(session)
+            && !signature_has_body(session)
         {
+            session
+                .cursor
+                .bump_if(&TokenKind::Punctuation(PunctuationKind::Semicolon));
             members.push(TraitMember::Signature(signature));
             continue;
         }

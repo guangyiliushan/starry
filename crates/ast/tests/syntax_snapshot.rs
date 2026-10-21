@@ -39,7 +39,7 @@ fn fun_decl_snapshot() {
         },
     };
     let param = Param {
-        mutable: false,
+        modifier: ast::syntax::decl::ParamModifier::None,
         name: sym_x,
         ty: Some(param_ty),
         default: None,

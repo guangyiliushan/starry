@@ -58,6 +58,7 @@ pub enum ExprKind {
     Is {
         lhs: Box<ExprWrap>,
         pattern: Box<PatWrap>,
+        negated: bool,
     },
     In {
         lhs: Box<ExprWrap>,
@@ -105,11 +106,6 @@ pub enum ExprKind {
         cond: Box<Condition>,
         then_block: Box<Block>,
         else_block: Option<Box<Block>>,
-    },
-    Range {
-        lo: Box<ExprWrap>,
-        hi: Option<Box<ExprWrap>>,
-        inclusive: bool,
     },
     Tuple(Vec<ExprWrap>),
     Array(Vec<ExprWrap>),
@@ -180,19 +176,24 @@ pub struct SpawnExpr {
 #[derive(Debug, Clone)]
 pub struct ActorConstruction {
     pub name: Path,
-    pub args: Vec<ExprWrap>,
+    pub args: Vec<CallArg>,
 }
 
 #[derive(Debug, Clone)]
 pub enum SuperSuffix {
     Member(Symbol),
-    Call(Vec<ExprWrap>),
+    Call(Vec<CallArg>),
 }
 
 /// Raw token tree；宏展开不在 parser 内进行。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TokenTree {
     Token(Token),
+    Group {
+        open: Token,
+        tokens: Vec<TokenTree>,
+        close: Option<Token>,
+    },
 }
 
 #[derive(Debug, Clone)]

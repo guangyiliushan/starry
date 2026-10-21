@@ -29,10 +29,17 @@ pub enum PatKind {
     Bool(bool),
     Null,
     Wildcard,
-    Tuple(Vec<PatWrap>),
+    Tuple {
+        elements: Vec<PatWrap>,
+        rest: Option<usize>,
+    },
+    /// `rest` is the slot index at which `..` sits among `elements`: `[a, .., b]`
+    /// is `{ elements: [a, b], rest: Some(1) }`, `[.., b]` is `{ [b], Some(0) }`,
+    /// `[a, ..]` is `{ [a], Some(1) }`, `[..]` is `{ [], Some(0) }`. `None` means
+    /// the pattern has no rest element. The grammar allows at most one.
     Array {
         elements: Vec<PatWrap>,
-        rest: bool,
+        rest: Option<usize>,
     },
     Constructor {
         path: Path,

@@ -1,9 +1,9 @@
-# Starry v0.3 lexical source of truth.
+# Starry v0.4 lexical source of truth.
 # Format: <kind> <lexeme> <rust-variant> <grammar-slot>
 # Only HARD keywords are lexer-reserved. MODIFIER and SLOT words remain
 # identifiers lexically and are classified by the parser in grammar slots.
 
-# 38 globally reserved keywords.
+# 37 globally reserved keywords.
 hard package Package global
 hard import Import global
 hard extern Extern global
@@ -59,7 +59,7 @@ modifier operator OperatorWord modifier
 modifier infix Infix modifier
 modifier vararg Vararg modifier
 
-# 30 slot words, recognized only in their named parser slot.
+# 31 slot words, recognized only in their named parser slot.
 slot actor Actor declaration_or_spawn
 slot aspect Aspect declaration
 slot provide Provide declaration

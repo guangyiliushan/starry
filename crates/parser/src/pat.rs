@@ -4,11 +4,28 @@ use ast::syntax::node::{DiagCode, ErrorNode, Span};
 use ast::syntax::pat::{PatKind, PatWrap};
 use ast::token::{HardKeyword, OperatorKind, PunctuationKind, TokenKind};
 
-use crate::ty::{join_span, parse_type};
-use crate::{ParseSession, ParserError};
+use crate::ty::{join_span, parse_no_arrow_type, parse_type};
+use crate::{MAX_PARSE_DEPTH, ParseSession, ParserError};
 
 pub(crate) fn parse_pattern(session: &mut ParseSession<'_>) -> Result<PatWrap, ParserError> {
-    let first = parse_primary_pattern(session)?;
+    parse_pattern_with(session, true)
+}
+
+/// A `when` branch is `WhenPattern "->" body`, so a top-level binding annotation
+/// such as `a: int -> 1` is ambiguous with `FunctionType := UnionType ["->" T]`
+/// (`int -> 1` reads as a function type). In this position only, the annotation
+/// is a no-arrow type; nested annotations stay parenthesisable as usual.
+pub(crate) fn parse_when_branch_pattern(
+    session: &mut ParseSession<'_>,
+) -> Result<PatWrap, ParserError> {
+    parse_pattern_with(session, false)
+}
+
+fn parse_pattern_with(
+    session: &mut ParseSession<'_>,
+    arrow_types: bool,
+) -> Result<PatWrap, ParserError> {
+    let first = parse_primary_pattern(session, arrow_types)?;
     let inclusive = if session
         .cursor
         .check(&TokenKind::Operator(OperatorKind::DotDot))
@@ -31,7 +48,7 @@ pub(crate) fn parse_pattern(session: &mut ParseSession<'_>) -> Result<PatWrap, P
             .cursor
             .bump_if(&TokenKind::Operator(OperatorKind::BitOr))
         {
-            alternatives.push(parse_primary_pattern(session)?);
+            alternatives.push(parse_primary_pattern(session, arrow_types)?);
         }
         let span = join_span(
             alternatives.first().expect("non-empty").span,
@@ -44,7 +61,7 @@ pub(crate) fn parse_pattern(session: &mut ParseSession<'_>) -> Result<PatWrap, P
         ));
     };
     session.cursor.advance();
-    let hi = parse_primary_pattern(session)?;
+    let hi = parse_primary_pattern(session, arrow_types)?;
     let span = join_span(first.span, hi.span);
     Ok(PatWrap::new(
         session.next_node()?,
@@ -57,7 +74,59 @@ pub(crate) fn parse_pattern(session: &mut ParseSession<'_>) -> Result<PatWrap, P
     ))
 }
 
-fn parse_primary_pattern(session: &mut ParseSession<'_>) -> Result<PatWrap, ParserError> {
+/// `Type` when `arrow_types`, otherwise a no-arrow type.
+fn parse_pattern_annotation(
+    session: &mut ParseSession<'_>,
+    arrow_types: bool,
+) -> Result<ast::syntax::ty::TypeWrap, ParserError> {
+    if arrow_types {
+        parse_type(session)
+    } else {
+        parse_no_arrow_type(session)
+    }
+}
+
+/// Shared element list for tuple / array patterns: elements plus an optional
+/// `..` rest slot. The rest may appear once, in any position (Rust: "may only
+/// appear once as one of the elements").
+fn parse_pattern_elements(
+    session: &mut ParseSession<'_>,
+    arrow_types: bool,
+    close: PunctuationKind,
+) -> Result<(Vec<PatWrap>, Option<usize>, Span), ParserError> {
+    let mut elements = Vec::new();
+    let mut rest: Option<usize> = None;
+    while !session.cursor.check(&TokenKind::Punctuation(close)) {
+        if session
+            .cursor
+            .check(&TokenKind::Operator(OperatorKind::DotDot))
+        {
+            let token = session.cursor.advance();
+            if rest.is_some() {
+                session.emit_unique(DiagCode::DuplicateRestPattern, token.span, || {
+                    "rest pattern `..` may appear only once".to_string()
+                });
+            } else {
+                rest = Some(elements.len());
+            }
+        } else {
+            elements.push(parse_pattern_with(session, arrow_types)?);
+        }
+        if !session
+            .cursor
+            .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma))
+        {
+            break;
+        }
+    }
+    let end = session.cursor.peek().span;
+    Ok((elements, rest, end))
+}
+
+fn parse_primary_pattern(
+    session: &mut ParseSession<'_>,
+    arrow_types: bool,
+) -> Result<PatWrap, ParserError> {
     match session.try_with_depth(|session| {
         let start = session.cursor.peek().span;
         match session.cursor.peek().kind {
@@ -85,7 +154,7 @@ fn parse_primary_pattern(session: &mut ParseSession<'_>) -> Result<PatWrap, Pars
                     .cursor
                     .bump_if(&TokenKind::Punctuation(PunctuationKind::Colon))
                 {
-                    Some(Box::new(parse_type(session)?))
+                    Some(Box::new(parse_pattern_annotation(session, arrow_types)?))
                 } else {
                     None
                 };
@@ -121,65 +190,21 @@ fn parse_primary_pattern(session: &mut ParseSession<'_>) -> Result<PatWrap, Pars
             }
             TokenKind::Punctuation(PunctuationKind::LParen) => {
                 let open = session.cursor.advance();
-                if session
-                    .cursor
-                    .bump_if(&TokenKind::Punctuation(PunctuationKind::RParen))
-                {
-                    let id = session.next_node()?;
-                    return Ok(PatWrap::new(
-                        id,
-                        join_span(open.span, Span::new(open.span.end, open.span.end)),
-                        PatKind::Tuple(Vec::new()),
-                    ));
-                }
-                let mut patterns = vec![parse_pattern(session)?];
-                while session
-                    .cursor
-                    .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma))
-                {
-                    if session
-                        .cursor
-                        .check(&TokenKind::Punctuation(PunctuationKind::RParen))
-                    {
-                        break;
-                    }
-                    patterns.push(parse_pattern(session)?);
-                }
-                let close = session.cursor.peek().span;
+                let (elements, rest, close) =
+                    parse_pattern_elements(session, arrow_types, PunctuationKind::RParen)?;
                 session
                     .cursor
                     .bump_if(&TokenKind::Punctuation(PunctuationKind::RParen));
                 Ok(PatWrap::new(
                     session.next_node()?,
                     join_span(open.span, close),
-                    PatKind::Tuple(patterns),
+                    PatKind::Tuple { elements, rest },
                 ))
             }
             TokenKind::Punctuation(PunctuationKind::LBracket) => {
                 session.cursor.advance();
-                let mut elements = Vec::new();
-                let mut rest = false;
-                while !session
-                    .cursor
-                    .check(&TokenKind::Punctuation(PunctuationKind::RBracket))
-                {
-                    if session
-                        .cursor
-                        .check(&TokenKind::Operator(OperatorKind::DotDot))
-                    {
-                        session.cursor.advance();
-                        rest = true;
-                        break;
-                    }
-                    elements.push(parse_pattern(session)?);
-                    if !session
-                        .cursor
-                        .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma))
-                    {
-                        break;
-                    }
-                }
-                let close = session.cursor.peek().span;
+                let (elements, rest, close) =
+                    parse_pattern_elements(session, arrow_types, PunctuationKind::RBracket)?;
                 session
                     .cursor
                     .bump_if(&TokenKind::Punctuation(PunctuationKind::RBracket));
@@ -203,7 +228,7 @@ fn parse_primary_pattern(session: &mut ParseSession<'_>) -> Result<PatWrap, Pars
                     let kind = match session.cursor.peek().kind {
                         TokenKind::Punctuation(PunctuationKind::Colon) => {
                             session.cursor.advance();
-                            let ty = parse_type(session)?;
+                            let ty = parse_pattern_annotation(session, arrow_types)?;
                             let end = ty.span;
                             (
                                 PatKind::Binding {
@@ -229,7 +254,7 @@ fn parse_primary_pattern(session: &mut ParseSession<'_>) -> Result<PatWrap, Pars
                                     .cursor
                                     .bump_if(&TokenKind::Punctuation(PunctuationKind::Colon))
                                 {
-                                    parse_pattern(session)?
+                                    parse_pattern_with(session, true)?
                                 } else {
                                     PatWrap::new(
                                         session.next_node()?,
@@ -268,7 +293,7 @@ fn parse_primary_pattern(session: &mut ParseSession<'_>) -> Result<PatWrap, Pars
                                 .cursor
                                 .check(&TokenKind::Punctuation(PunctuationKind::RParen))
                             {
-                                args.push(parse_pattern(session)?);
+                                args.push(parse_pattern_with(session, true)?);
                                 if !session
                                     .cursor
                                     .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma))
@@ -325,7 +350,7 @@ fn parse_primary_pattern(session: &mut ParseSession<'_>) -> Result<PatWrap, Pars
             let token = session.cursor.advance();
             let id = session.next_node()?;
             let diag = session.emit_unique(DiagCode::DepthLimitExceeded, token.span, || {
-                "pattern nesting exceeds 100".to_string()
+                format!("pattern nesting exceeds {MAX_PARSE_DEPTH}")
             });
             Ok(PatWrap::new(
                 id,

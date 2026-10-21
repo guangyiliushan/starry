@@ -8,12 +8,14 @@ use ast::token::{OperatorKind, Span, Token, TokenKind};
 pub struct Checkpoint {
     pos: usize,
     pending_len: usize,
+    last: Option<Token>,
 }
 
 pub struct TokenCursor {
     tokens: Vec<Token>,
     pos: usize,
     pending: VecDeque<Token>,
+    last: Option<Token>,
 }
 
 impl TokenCursor {
@@ -28,6 +30,7 @@ impl TokenCursor {
             tokens,
             pos: 0,
             pending: VecDeque::new(),
+            last: None,
         }
     }
 
@@ -35,12 +38,14 @@ impl TokenCursor {
         Checkpoint {
             pos: self.pos,
             pending_len: self.pending.len(),
+            last: self.last,
         }
     }
 
     pub fn rollback(&mut self, checkpoint: &Checkpoint) {
         self.pos = checkpoint.pos;
         self.pending.truncate(checkpoint.pending_len);
+        self.last = checkpoint.last;
     }
 
     pub fn peek(&self) -> &Token {
@@ -64,6 +69,7 @@ impl TokenCursor {
             return token;
         }
         let token = self.tokens[self.pos.min(self.tokens.len() - 1)];
+        self.last = Some(token);
         if token.kind != TokenKind::Eof {
             self.pos += 1;
         }
@@ -94,14 +100,7 @@ impl TokenCursor {
     }
 
     pub fn previous_span(&self) -> Span {
-        if self.pending.is_empty() {
-            self.tokens
-                .get(self.pos.saturating_sub(1))
-                .map(|token| token.span)
-                .unwrap_or_default()
-        } else {
-            Span::default()
-        }
+        self.last.map(|token| token.span).unwrap_or_default()
     }
 
     /// 在类型上下文把 `>>` / `>>=` / `>=` 递归拆成原子 close/equality token。

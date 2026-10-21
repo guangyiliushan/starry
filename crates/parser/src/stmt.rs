@@ -143,11 +143,29 @@ pub(crate) fn parse_statement(
                 session.cursor.advance();
             }
             let bits_token = session.cursor.advance();
-            let bits_expr = ExprWrap::new(
-                session.next_node()?,
-                bits_token.span,
-                ExprKind::Literal(ast::token::LiteralKind::Integer),
-            );
+            let bits_expr = if bits_token.kind
+                == ast::token::TokenKind::Literal(ast::token::LiteralKind::Integer)
+            {
+                ExprWrap::new(
+                    session.next_node()?,
+                    bits_token.span,
+                    ExprKind::Literal(ast::token::LiteralKind::Integer),
+                )
+            } else {
+                let id = session.next_node()?;
+                let diag = session.emit_unique(DiagCode::ExpectedToken, bits_token.span, || {
+                    "expected integer after 'to'".to_string()
+                });
+                ExprWrap::new(
+                    id,
+                    bits_token.span,
+                    ExprKind::Error(ast::syntax::node::ErrorNode {
+                        id,
+                        span: bits_token.span,
+                        err: diag,
+                    }),
+                )
+            };
             if !session.cursor.check(&TokenKind::Identifier)
                 || session.token_text(session.cursor.peek()) != "bits"
             {
@@ -178,6 +196,36 @@ pub(crate) fn parse_statement(
                 },
             )))
         }
+        // `let` is not a Starry keyword (bindings are `val` / `var`). Accepting
+        // `let x = 1` silently would split it into a throwaway `let` expression
+        // statement plus an assignment — the intent is always violated, so this
+        // is an error and the statement is recovered as a single binding.
+        TokenKind::Identifier
+            if session.token_text(session.cursor.peek()) == "let"
+                && session.cursor.peek_ahead(1).is_some_and(|next| {
+                    next.kind == TokenKind::Identifier
+                        || next.kind == TokenKind::Keyword(HardKeyword::Mut)
+                }) =>
+        {
+            let let_token = session.cursor.advance();
+            session.emit_unique(DiagCode::LetKeyword, let_token.span, || {
+                "Starry has no `let`; bind with `val` or `var`".to_string()
+            });
+            let declaration = crate::decl::parse_binding_body(
+                session,
+                join_span(start, let_token.span),
+                ast::syntax::modifier::ModifierList::new(),
+                true,
+            )?;
+            let DeclKind::Binding(binding) = declaration.kind else {
+                unreachable!("binding parser returns Binding");
+            };
+            Ok(ParsedStatement::Statement(StmtWrap::new(
+                declaration.id,
+                declaration.span,
+                StmtKind::Binding(Box::new(binding)),
+            )))
+        }
         _ => {
             if label.is_some() {
                 let span = session.cursor.peek().span;
@@ -191,6 +239,11 @@ pub(crate) fn parse_statement(
                 _ => None,
             };
             if let Some(op) = assignment {
+                if !is_place(&expr) {
+                    session.emit_unique(DiagCode::InvalidAssignmentTarget, expr.span, || {
+                        "invalid assignment target".to_string()
+                    });
+                }
                 session.cursor.advance();
                 let value = parse_expr(session)?;
                 let span = join_span(expr.span, value.span);
@@ -264,6 +317,28 @@ fn is_assignment(op: ast::token::OperatorKind) -> bool {
             | BitXorEq
             | ShlEq
             | ShrEq
+    )
+}
+
+/// `Place := PostfixExpr`: a primary followed only by postfix suffixes.
+fn is_place(expr: &ExprWrap) -> bool {
+    matches!(
+        expr.kind,
+        ExprKind::Literal(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Null
+            | ExprKind::Ident(_)
+            | ExprKind::Path(_)
+            | ExprKind::Call { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Member { .. }
+            | ExprKind::ForceUnwrap { .. }
+            | ExprKind::Tuple(_)
+            | ExprKind::Array(_)
+            | ExprKind::ArrayRepeat { .. }
+            | ExprKind::Super { .. }
+            | ExprKind::Lambda { .. }
+            | ExprKind::StringInterp { .. }
     )
 }
 

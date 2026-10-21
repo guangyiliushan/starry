@@ -200,9 +200,9 @@ impl Lexer {
     /// tokenize：NL 合成 + 注释跳过 + 括号深度抑制 + 最长匹配
     /// + 关键字后分类 + 未知字符恢复
     ///
-    /// - NL（\n 或 \r\n）在括号深度 0 时产出 [`TokenKind::Nl`] token
-    ///   （语句分隔），括号内吞掉（深度抑制）；
-    /// - 空白集 {' ', '\t', '\r'} 先于匹配跳过（\n 归 NL 处理器）；
+    /// - 连续行结束符（\n / \r\n）合并为括号深度 0 时的一个
+    ///   [`TokenKind::Nl`] token（语句分隔），括号内吞掉（深度抑制）；
+    /// - 空白集 {' ', '\t', '\r'} 先于匹配跳过（NL 归 NL 处理器）；
     /// - 行注释 // 跳到行尾（不吃 NL）；块注释 /* */ 嵌套计数；
     /// - 未命中字符按**字符**推进（`len_utf8`，多字节安全）；
     /// - 未知产出 [`TokenKind::Unknown`] 单字符 token（错误恢复）。
@@ -218,18 +218,29 @@ impl Lexer {
                 None => break,
             };
 
-            // 空白（不含 \n——\n 归 NL 处理器）
-            if matches!(first, ' ' | '\t' | '\r') {
-                i += first.len_utf8();
+            // 连续 NL 合成一个 token；CRLF 是一个 terminator。
+            if first == '\n' || rest.starts_with("\r\n") {
+                let start = i;
+                let bytes = source.as_bytes();
+                while i < bytes.len() {
+                    if bytes[i] == b'\n' {
+                        i += 1;
+                    } else if bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+                        i += 2;
+                    } else {
+                        break;
+                    }
+                }
+                debug_assert!(i <= u32::MAX as usize);
+                if paren_depth == 0 {
+                    tokens.push(Token::new(TokenKind::Nl, Span::new(start as u32, i as u32)));
+                }
                 continue;
             }
 
-            // NL：括号深度 0 → 发 Nl token；括号内吞掉
-            if first == '\n' {
-                i += 1;
-                if paren_depth == 0 {
-                    tokens.push(Token::new(TokenKind::Nl, Span::new(i as u32 - 1, i as u32)));
-                }
+            // 空白（不含 NL——上方归 NL 处理器）
+            if matches!(first, ' ' | '\t' | '\r') {
+                i += first.len_utf8();
                 continue;
             }
 
@@ -263,10 +274,10 @@ impl Lexer {
                 continue;
             }
 
-            // 括号深度追踪
+            // 只有 `(`/`[` 打开 suppress 上下文；`}` 始终是语句边界。
             match first {
                 '(' | '[' => paren_depth += 1,
-                ')' | ']' | '}' if paren_depth > 0 => paren_depth = paren_depth.saturating_sub(1),
+                ')' | ']' if paren_depth > 0 => paren_depth = paren_depth.saturating_sub(1),
                 _ => {}
             }
 
@@ -382,5 +393,26 @@ mod tests {
         assert_eq!(tokens[0].text("0o777 0b1010"), "0o777");
         assert_eq!(tokens[1].kind, TokenKind::Literal(LiteralKind::Integer));
         assert_eq!(tokens[1].text("0o777 0b1010"), "0b1010");
+    }
+
+    #[test]
+    fn consecutive_terminators_merge_into_one_nl() {
+        let lexer = Lexer::starry().unwrap();
+        for (source, end) in [("a\n\nb", 3), ("a\r\n\r\nb", 5), ("a\n\r\nb", 4)] {
+            let tokens = lexer.tokenize(source);
+            assert_eq!(tokens.len(), 3, "{source}: {tokens:?}");
+            assert_eq!(tokens[1].kind, TokenKind::Nl, "{source}");
+            assert_eq!(tokens[1].span, ast::token::Span::new(1, end), "{source}");
+        }
+    }
+
+    #[test]
+    fn lambda_braces_do_not_close_parenthesis_newline_suppression() {
+        let lexer = Lexer::starry().unwrap();
+        let tokens = lexer.tokenize("({\n1\n})");
+        assert!(
+            !tokens.iter().any(|token| token.kind == TokenKind::Nl),
+            "{tokens:?}"
+        );
     }
 }

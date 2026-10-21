@@ -23,9 +23,17 @@ pub struct TypeParam {
     pub id: NodeId,
     pub span: Span,
     pub variance: Option<Variance>,
-    pub name: Symbol,
-    pub bound: Option<Box<TypeWrap>>,
+    pub name: TypeParamName,
+    /// `T : A & B` — intersection bounds, same shape as `WhereConstraint::bounds`.
+    pub bounds: Vec<TypeWrap>,
     pub default: Option<Box<TypeWrap>>,
+}
+
+/// Type parameter names carry recovery without inventing a semantic symbol.
+#[derive(Debug, Clone)]
+pub enum TypeParamName {
+    Valid(Symbol),
+    Error(ErrorNode),
 }
 
 #[derive(Debug, Clone)]
@@ -57,5 +65,4 @@ pub enum TypeKind {
 pub enum Variance {
     In,
     Out,
-    InOut,
 }

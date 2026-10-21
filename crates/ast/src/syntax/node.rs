@@ -4,6 +4,8 @@
 //! 语义数据零内嵌（走 `Vec<Option<T>>` 稠密侧表，容量按
 //! `NodeIdGen` 最终计数，空洞合法，索引 panic = 受控失败）。
 
+use std::collections::HashMap;
+
 pub use crate::token::Span;
 
 /// 节点唯一标识（全局计数 u32，跨 pass 稳定）
@@ -119,8 +121,15 @@ pub enum DiagSeverity {
 pub enum DiagCode {
     UnexpectedToken,
     ExpectedToken,
+    InvalidAssignmentTarget,
+    InvalidEscape,
     DepthLimitExceeded,
     UnclosedInterpolation,
+    IntegerOutOfRange,
+    /// `let` is not a Starry keyword; `let x = 1` must not silently split.
+    LetKeyword,
+    /// `..` appeared more than once in a tuple/array pattern.
+    DuplicateRestPattern,
 }
 
 /// 最小诊断
@@ -143,10 +152,15 @@ impl Diagnostic {
     }
 }
 
-/// 诊断收集器（append-only，emit → DiagId）
+/// 诊断收集器（append-only，emit → DiagId）。
+///
+/// `unique` maps each key to its first visible diagnostic. A speculative
+/// emission may leave a stale id after rollback; visibility is checked against
+/// `diags.len()`, so rollback is O(1) and never scans or rebuilds the map.
 #[derive(Debug, Default)]
 pub struct DiagCollector {
     diags: Vec<Diagnostic>,
+    unique: HashMap<(Span, DiagCode), DiagId>,
 }
 
 impl DiagCollector {
@@ -156,8 +170,24 @@ impl DiagCollector {
 
     pub fn emit(&mut self, diag: Diagnostic) -> DiagId {
         let id = DiagId(self.diags.len() as u32);
+        let key = (diag.span, diag.code);
+        if !self
+            .unique
+            .get(&key)
+            .is_some_and(|existing| existing.0 < id.0)
+        {
+            self.unique.insert(key, id);
+        }
         self.diags.push(diag);
         id
+    }
+
+    /// Map lookup for parser-side unique emission: O(1), not a diagnostic scan.
+    pub fn find_unique(&self, span: Span, code: DiagCode) -> Option<DiagId> {
+        self.unique
+            .get(&(span, code))
+            .copied()
+            .filter(|id| id.0 < self.diags.len() as u32)
     }
 
     /// 投机解析 checkpoint；失败分支整体回滚，成功分支无需动作。

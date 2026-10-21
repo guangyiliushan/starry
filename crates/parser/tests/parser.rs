@@ -1,4 +1,4 @@
-use ast::syntax::decl::DeclKind;
+use ast::syntax::decl::{DeclKind, ParamModifier};
 use ast::syntax::expr::ExprKind;
 use ast::syntax::ty::TypeKind;
 use parser::{Parser, parse_source};
@@ -558,4 +558,807 @@ fn unclosed_interpolation_emits_diagnostic() {
             .iter()
             .any(|diag| diag.code == ast::syntax::node::DiagCode::UnclosedInterpolation)
     );
+}
+
+#[test]
+fn constructor_modifiers_precede_init() {
+    let output = parse_source("class C { public init() { } }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+}
+
+#[test]
+fn parameter_modifiers_are_exclusive() {
+    for (source, expected) in [
+        ("fun f(val x: int) { }", ParamModifier::Val),
+        ("fun f(var x: int) { }", ParamModifier::Var),
+    ] {
+        let output = parse_source(source).unwrap();
+        assert!(
+            output.diagnostics.is_empty(),
+            "{source}: {:?}",
+            output.diagnostics
+        );
+        let DeclKind::Fun(fun) = &output.ast.items[0].kind else {
+            panic!("expected fun, got {source}");
+        };
+        assert_eq!(fun.params[0].modifier, expected);
+    }
+
+    let output = parse_source("fun f(val mut x: int) { }").unwrap();
+    assert!(!output.diagnostics.is_empty());
+}
+
+#[test]
+fn primary_constructor_properties_are_marked() {
+    let output = parse_source("class C(val x: int, var y: int) { }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Class(class) = &output.ast.items[0].kind else {
+        panic!("expected class");
+    };
+    let params = class.primary_ctor.as_ref().unwrap().params.as_slice();
+    assert_eq!(params[0].modifier, ParamModifier::Val);
+    assert_eq!(params[1].modifier, ParamModifier::Var);
+}
+
+#[test]
+fn extern_namespace_newlines_parse() {
+    let output =
+        parse_source("extern \"c\" namespace math {\n    fun sin(x: f64) : f64;\n}").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+}
+
+#[test]
+fn native_import_language_is_validated() {
+    let output = parse_source("import \"rust\" \"crate.rs\"").unwrap();
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == ast::syntax::node::DiagCode::ExpectedToken)
+    );
+}
+
+#[test]
+fn macro_streams_preserve_balanced_groups() {
+    let init = binding_init("val v = m!(f(1))");
+    let ExprKind::MacroCall { tokens, .. } = init else {
+        panic!("expected macro call");
+    };
+    let [
+        ast::syntax::expr::TokenTree::Token(_),
+        ast::syntax::expr::TokenTree::Group {
+            tokens,
+            close: Some(_),
+            ..
+        },
+    ] = tokens.as_slice()
+    else {
+        panic!("expected inner group: {tokens:?}");
+    };
+    assert!(matches!(tokens[0], ast::syntax::expr::TokenTree::Token(_)));
+
+    let init = binding_init("val v = m!([a, b])");
+    let ExprKind::MacroCall { tokens, .. } = init else {
+        panic!("expected macro call");
+    };
+    assert!(matches!(
+        tokens[0],
+        ast::syntax::expr::TokenTree::Group { .. }
+    ));
+}
+
+#[test]
+fn unterminated_macro_group_emits_diagnostic() {
+    let output = parse_source("val v = m!(f(1)").unwrap();
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == ast::syntax::node::DiagCode::ExpectedToken)
+    );
+}
+
+#[test]
+fn declaration_nesting_is_bounded_without_stack_overflow() {
+    let depth = 150;
+    let mut source = "class C { ".repeat(depth);
+    source.push_str(&"}".repeat(depth));
+    let output = parse_source(&source).unwrap();
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == ast::syntax::node::DiagCode::DepthLimitExceeded)
+    );
+}
+
+#[test]
+fn oversized_array_lengths_report_out_of_range() {
+    let output = parse_source("val a = [0; 999999999999999999999999]").unwrap();
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == ast::syntax::node::DiagCode::IntegerOutOfRange)
+    );
+    let output = parse_source("fun f(x: [int; 999999999999999999999999]) { }").unwrap();
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == ast::syntax::node::DiagCode::IntegerOutOfRange)
+    );
+}
+
+#[test]
+fn super_and_actor_constructions_preserve_named_args() {
+    let output = parse_source("class C : Base { fun f() { super(a = 1) } }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Class(class) = &output.ast.items[0].kind else {
+        panic!("expected class");
+    };
+    let Some(ast::syntax::decl::ClassMember::Declaration(declaration)) = class.members.first()
+    else {
+        panic!("expected declaration");
+    };
+    let ast::syntax::decl::DeclKind::Fun(fun) = &declaration.kind else {
+        panic!("expected fun");
+    };
+    let Some(ast::syntax::decl::FunctionBody::Block(block)) = &fun.body else {
+        panic!("expected block");
+    };
+    let tail = block.tail.as_ref().expect("expected tail expression");
+    let ExprKind::Super { suffix } = &tail.kind else {
+        panic!("expected super, got {:?}", tail.kind);
+    };
+    let ast::syntax::expr::SuperSuffix::Call(args) = suffix else {
+        panic!("expected super call");
+    };
+    assert_eq!(args.len(), 1);
+    assert_eq!(
+        args[0].name.map(|symbol| output.interner.resolve(symbol)),
+        Some("a")
+    );
+
+    let output = parse_source("fun f() { spawn actor Worker(a = 1) { work() } }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+}
+
+#[test]
+fn imports_after_declarations_report_grammar_violation() {
+    let output = parse_source("val x = 1\nimport std.io.*").unwrap();
+    assert!(!output.diagnostics.is_empty());
+    assert_eq!(output.ast.items.len(), 2);
+}
+
+#[test]
+fn raw_native_and_extern_strings_decode_before_interning() {
+    let output = parse_source(r#"import "c" "math.h""#).unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Import(import) = &output.ast.items[0].kind else {
+        panic!("expected import");
+    };
+    let ast::syntax::decl::ImportKind::Native { language, path, .. } = &import.kind else {
+        panic!("expected native import");
+    };
+    assert!(matches!(language, ast::syntax::decl::NativeLanguage::C));
+    assert_eq!(output.interner.resolve(*path), "math.h");
+
+    let output = parse_source(r#"extern "c" fun f();"#).unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Extern(extern_decl) = &output.ast.items[0].kind else {
+        panic!("expected extern");
+    };
+    assert_eq!(output.interner.resolve(extern_decl.language), "c");
+}
+
+#[test]
+fn superitem_by_consumes_slot_word_before_expression() {
+    let output = parse_source("class C : Base by Delegate { }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Class(class) = &output.ast.items[0].kind else {
+        panic!("expected class");
+    };
+    let supertype = class.supertypes.first().expect("supertype");
+    let Some(by) = &supertype.by else {
+        panic!("expected by expression");
+    };
+    assert!(matches!(by.kind, ExprKind::Ident(_)));
+}
+
+#[test]
+fn type_parameters_validate_names_and_keep_exact_spans() {
+    let source = "fun f<T>(x: T) = x";
+    let output = parse_source(source).unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Fun(fun) = &output.ast.items[0].kind else {
+        panic!("expected fun");
+    };
+    let param = fun.type_params.first().expect("type param");
+    assert_eq!(param.span, ast::token::Span::new(6, 7));
+
+    let output = parse_source("fun f<1>() { }").unwrap();
+    assert!(!output.diagnostics.is_empty());
+    let DeclKind::Fun(fun) = &output.ast.items[0].kind else {
+        panic!("expected fun");
+    };
+    let param = fun.type_params.first().expect("type param");
+    assert!(matches!(
+        param.name,
+        ast::syntax::ty::TypeParamName::Error(_)
+    ));
+}
+
+#[test]
+fn variance_has_no_undeclared_in_out_state() {
+    let output = parse_source("fun f<in out>(x: out) = x").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Fun(fun) = &output.ast.items[0].kind else {
+        panic!("expected fun");
+    };
+    let param = fun.type_params.first().expect("type param");
+    assert_eq!(param.variance, Some(ast::syntax::ty::Variance::In));
+    let ast::syntax::ty::TypeParamName::Valid(name) = &param.name else {
+        panic!("expected valid type parameter name");
+    };
+    assert_eq!(output.interner.resolve(*name), "out");
+}
+
+#[test]
+fn malformed_when_branches_emit_diagnostics() {
+    let output = parse_source("fun f() { when x { else x } }").unwrap();
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == ast::syntax::node::DiagCode::ExpectedToken)
+    );
+
+    let output = parse_source("fun f() { when x {").unwrap();
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == ast::syntax::node::DiagCode::ExpectedToken)
+    );
+}
+
+#[test]
+fn unterminated_provider_and_aspect_members_reach_eof() {
+    for source in ["provide P {", "aspect A {"] {
+        let output = parse_source(source).unwrap();
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .any(|diag| diag.code == ast::syntax::node::DiagCode::ExpectedToken),
+            "{source}: {:?}",
+            output.diagnostics
+        );
+    }
+}
+
+#[test]
+fn function_body_is_required_and_class_body_is_optional() {
+    let output = parse_source("fun f()").unwrap();
+    let DeclKind::Fun(fun) = &output.ast.items[0].kind else {
+        panic!("expected fun");
+    };
+    assert!(fun.body.is_none());
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == ast::syntax::node::DiagCode::ExpectedToken)
+    );
+
+    let output = parse_source("class C").unwrap();
+    let DeclKind::Class(class) = &output.ast.items[0].kind else {
+        panic!("expected class");
+    };
+    assert!(class.members.is_empty());
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+}
+
+#[test]
+fn bare_super_requires_a_suffix() {
+    let output = parse_source("val x = super").unwrap();
+    assert!(matches!(output.ast.items[0].kind, DeclKind::Binding(_)));
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == ast::syntax::node::DiagCode::ExpectedToken)
+    );
+}
+
+#[test]
+fn grow_requires_integer_bits_and_assignment_requires_place() {
+    let output = parse_source("fun f() { grow x to 64 bits }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+
+    let output = parse_source("fun f() { grow x to y bits }").unwrap();
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == ast::syntax::node::DiagCode::ExpectedToken)
+    );
+
+    let output = parse_source("fun f(a: [int; 1]) { a[0] += 1 }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+
+    let output = parse_source("fun f(a: int, b: int) { a + b = c }").unwrap();
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == ast::syntax::node::DiagCode::InvalidAssignmentTarget)
+    );
+}
+
+#[test]
+fn native_import_member_block_requires_close() {
+    let output = parse_source(r#"import "c" "math.h" { fun f();"#).unwrap();
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == ast::syntax::node::DiagCode::ExpectedToken)
+    );
+}
+
+#[test]
+fn interpolation_matching_uses_sublexical_tokens() {
+    let output = parse_source(r#"val s = "${ '}' }""#).unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Binding(binding) = &output.ast.items[0].kind else {
+        panic!("expected binding");
+    };
+    let Some(init) = &binding.init else {
+        panic!("expected initializer");
+    };
+    let ExprKind::StringInterp { parts } = &init.kind else {
+        panic!("expected interpolation, got {:?}", init.kind);
+    };
+    assert_eq!(parts.len(), 1);
+    assert!(matches!(parts[0].kind, ExprKind::Literal(_)));
+}
+
+#[test]
+fn named_string_escape_errors_are_stable() {
+    let output = parse_source(r#"import "c" "bad\q.h""#).unwrap();
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == ast::syntax::node::DiagCode::InvalidEscape)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// v0.4 gap closures: `Self`/`self`, unit type, `!is`, rest patterns, when-branch
+// annotations, impl type params, intersection bounds, extern blocks,
+// `FunSignature` terminators, and the `let` non-keyword.
+// ---------------------------------------------------------------------------
+
+use ast::syntax::decl::{ExternBody, FunctionBody, ImportKind};
+use ast::syntax::node::DiagCode;
+use ast::syntax::pat::PatKind;
+use ast::syntax::stmt::StmtKind;
+
+fn binding_ty(source: &str) -> Option<TypeKind> {
+    let output = parse_source(source).expect("machine-level parse");
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Binding(binding) = &output.ast.items[0].kind else {
+        panic!("expected binding, got {:?}", output.ast.items[0].kind);
+    };
+    binding.ty.as_ref().map(|ty| ty.kind.clone())
+}
+
+fn fun_of(source: &str) -> ast::syntax::decl::FunDecl {
+    let output = parse_source(source).expect("machine-level parse");
+    assert!(
+        output.diagnostics.is_empty(),
+        "{source}: {:?}",
+        output.diagnostics
+    );
+    let DeclKind::Fun(function) = &output.ast.items[0].kind else {
+        panic!("expected function, got {:?}", output.ast.items[0].kind);
+    };
+    function.clone()
+}
+
+/// The first branch pattern of `fun f() { when x { PATTERN -> 1 } }`.
+fn when_branch_pattern(source: &str) -> PatKind {
+    let function = fun_of(source);
+    let Some(FunctionBody::Block(block)) = &function.body else {
+        panic!("expected block body");
+    };
+    // A trailing `when` is the block's tail expression, not a statement.
+    let expression: &ast::syntax::expr::ExprWrap = match block.tail.as_deref() {
+        Some(tail) => tail,
+        None => {
+            let Some(statement) = block.stmts.first() else {
+                panic!("expected an expression");
+            };
+            let StmtKind::Expr(expression) = &statement.kind else {
+                panic!("expected expression statement, got {:?}", statement.kind);
+            };
+            &expression.expr
+        }
+    };
+    let ast::syntax::expr::ExprKind::When { branches, .. } = &expression.kind else {
+        panic!("expected when, got {:?}", expression.kind);
+    };
+    let ast::syntax::expr::WhenPattern::Pattern(pattern) = &branches[0].pattern else {
+        panic!("expected a pattern branch");
+    };
+    pattern.kind.clone()
+}
+
+#[test]
+fn self_type_is_a_type_and_self_value_is_not() {
+    // Positive: `Self` in a type slot and as a primary expression.
+    assert!(matches!(
+        binding_ty("val x: Self"),
+        Some(TypeKind::SelfType)
+    ));
+
+    let function = fun_of("fun f() : Self = Self(1)");
+    assert!(matches!(
+        function.ret.as_ref().map(|ty| &ty.kind),
+        Some(TypeKind::SelfType)
+    ));
+    let Some(FunctionBody::Expr(expression)) = &function.body else {
+        panic!("expected expression body");
+    };
+    // `Self` is a primary; the postfix loop supplies the call suffix.
+    assert!(
+        matches!(expression.kind, ast::syntax::expr::ExprKind::Call { .. }),
+        "{:?}",
+        expression.kind
+    );
+
+    // Negative: lowercase `self` is a value, never a type.
+    let output = parse_source("fun f(a: self) : int = 0").unwrap();
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == DiagCode::UnexpectedToken),
+        "{:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn self_type_takes_no_type_arguments() {
+    let output = parse_source("fun f(a: Self<T>) : int = 0").unwrap();
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.code == DiagCode::UnexpectedToken),
+        "{:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn unit_type_parses_where_ebnf_allows_it() {
+    assert!(matches!(binding_ty("val x: ()"), Some(TypeKind::Unit)));
+    for source in [
+        "fun f() : () = ()",
+        "fun f() : () { }",
+        "fun f(a: ()) : int = 0",
+    ] {
+        let output = parse_source(source).unwrap();
+        assert!(
+            output.diagnostics.is_empty(),
+            "{source}: {:?}",
+            output.diagnostics
+        );
+    }
+    // `()` still works as the empty parameter list of a function type.
+    let output = parse_source("fun f() : () -> int = 0").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+}
+
+#[test]
+fn type_alias_consumes_its_equals_sign() {
+    for source in ["type Alias = Point", "type Alias<T> = Point"] {
+        let output = parse_source(source).unwrap();
+        assert!(
+            output.diagnostics.is_empty(),
+            "{source}: {:?}",
+            output.diagnostics
+        );
+        assert!(matches!(output.ast.items[0].kind, DeclKind::TypeAlias(_)));
+    }
+}
+
+#[test]
+fn is_and_not_is_are_symmetric() {
+    for (source, negated) in [("val x = a is b", false), ("val x = a !is b", true)] {
+        match binding_init(source) {
+            ExprKind::Is { negated: found, .. } => assert_eq!(found, negated, "{source}"),
+            other => panic!("{source}: expected Is, got {other:?}"),
+        }
+    }
+    // `!in` keeps the shape it already had.
+    match binding_init("val x = a !in b") {
+        ExprKind::In { negated: true, .. } => {}
+        other => panic!("expected negated In, got {other:?}"),
+    }
+}
+
+#[test]
+fn rest_patterns_record_their_position() {
+    for (source, rest) in [
+        ("fun f() { when x { [..] -> 1 } }", Some(0usize)),
+        ("fun f() { when x { [1, ..] -> 1 } }", Some(1)),
+        ("fun f() { when x { [1, 2, ..] -> 1 } }", Some(2)),
+        ("fun f() { when x { [.., 3] -> 1 } }", Some(0)),
+        ("fun f() { when x { [1, .., 3] -> 1 } }", Some(1)),
+        ("fun f() { when x { [1, 2, .., 3, 4] -> 1 } }", Some(2)),
+        ("fun f() { when x { [1, 2] -> 1 } }", None),
+        ("fun f() { when x { (1, .., 3) -> 1 } }", Some(1)),
+        ("fun f() { when x { (.., 3) -> 1 } }", Some(0)),
+        ("fun f() { when x { (1, ..) -> 1 } }", Some(1)),
+        ("fun f() { when x { (1, 2) -> 1 } }", None),
+    ] {
+        let found = match when_branch_pattern(source) {
+            PatKind::Array { rest, .. } | PatKind::Tuple { rest, .. } => rest,
+            other => panic!("{source}: expected array/tuple pattern, got {other:?}"),
+        };
+        assert_eq!(found, rest, "{source}");
+    }
+}
+
+#[test]
+fn rest_pattern_may_appear_only_once() {
+    for source in [
+        "fun f() { when x { [.., ..] -> 1 } }",
+        "fun f() { when x { (.., ..) -> 1 } }",
+        "fun f() { when x { [1, .., 2, .., 3] -> 1 } }",
+    ] {
+        let output = parse_source(source).unwrap();
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .any(|diag| diag.code == DiagCode::DuplicateRestPattern),
+            "{source}: {:?}",
+            output.diagnostics
+        );
+    }
+}
+
+#[test]
+fn when_branch_binding_annotation_is_arrow_less() {
+    // The branch arrow must not be swallowed by `FunctionType := … ["->" T]`.
+    for source in [
+        "fun f() { when x { a: int -> 1 } }",
+        "fun f() { when x { mut a: int -> 1 } }",
+        "fun f() { when x { a: Map<K, V> -> 1 } }",
+        "fun f() { when x { Some(a: int) -> 1 } }",
+        "fun f() { when x { a: ((int) -> int) -> 1 } }",
+    ] {
+        let output = parse_source(source).unwrap();
+        assert!(
+            output.diagnostics.is_empty(),
+            "{source}: {:?}",
+            output.diagnostics
+        );
+    }
+    // Outside a `when` branch a binding annotation may still be a function type.
+    let output = parse_source("fun f() { val g: (int) -> int = h }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+}
+
+#[test]
+fn impl_declaration_binds_its_own_type_parameters() {
+    let output = parse_source("impl<T> Show for List<T> { }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Impl(implementation) = &output.ast.items[0].kind else {
+        panic!("expected impl");
+    };
+    assert_eq!(implementation.type_params.len(), 1);
+
+    // Without `<T>` an impl has no parameters of its own.
+    let output = parse_source("impl Show for List<T> { }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Impl(implementation) = &output.ast.items[0].kind else {
+        panic!("expected impl");
+    };
+    assert!(implementation.type_params.is_empty());
+}
+
+#[test]
+fn bounds_accept_an_intersection_in_both_slots() {
+    let output = parse_source("class C<T : A & B & D> { }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Class(class) = &output.ast.items[0].kind else {
+        panic!("expected class");
+    };
+    assert_eq!(class.type_params[0].bounds.len(), 3);
+
+    let output = parse_source("fun f<T>(t: T) : int where T : A & B = 0").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Fun(function) = &output.ast.items[0].kind else {
+        panic!("expected function");
+    };
+    assert_eq!(function.where_clause[0].bounds.len(), 2);
+}
+
+#[test]
+fn inline_bounds_report_a_missing_intersection_operand() {
+    for source in ["class C<T : A & > { }", "fun f<T : >() { }"] {
+        let output = parse_source(source).unwrap();
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .any(|diag| diag.code == ast::syntax::node::DiagCode::ExpectedToken),
+            "{source}: {:?}",
+            output.diagnostics
+        );
+    }
+}
+
+#[test]
+fn extern_block_lists_multiple_functions() {
+    let output = parse_source("extern \"c\" { fun a() : int fun b() : int; }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Extern(external) = &output.ast.items[0].kind else {
+        panic!("expected extern");
+    };
+    let ExternBody::Block { members } = &external.body else {
+        panic!("expected block body, got {:?}", external.body);
+    };
+    assert_eq!(members.len(), 2);
+
+    for source in [
+        "extern \"c\" fun a() : int;",
+        "extern \"c\" fun a() : int",
+        "extern \"c\" namespace std { fun malloc(n: int) : int; }",
+        "extern \"c\" { }",
+    ] {
+        let output = parse_source(source).unwrap();
+        assert!(
+            output.diagnostics.is_empty(),
+            "{source}: {:?}",
+            output.diagnostics
+        );
+    }
+}
+
+#[test]
+fn bodyless_trait_members_accept_a_redundant_semicolon() {
+    for source in [
+        "trait T { fun area() : f64 }",
+        "trait T { fun area() : f64; }",
+        "trait T { type Item }",
+        "trait T { type Item; }",
+        "trait T { type Out : Bound = int; }",
+        "trait T { fun a() : int; fun b() : int }",
+    ] {
+        let output = parse_source(source).unwrap();
+        assert!(
+            output.diagnostics.is_empty(),
+            "{source}: {:?}",
+            output.diagnostics
+        );
+    }
+    // A top-level `fun` still needs a body.
+    let output = parse_source("fun f() : int").unwrap();
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|diag| diag.message == "expected function body"),
+        "{:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn native_import_members_are_all_kept() {
+    let output = parse_source("import \"c\" \"h\" { fun a() : int; fun b() : int; }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Import(import) = &output.ast.items[0].kind else {
+        panic!("expected import");
+    };
+    let ImportKind::Native { members, .. } = &import.kind else {
+        panic!("expected native import");
+    };
+    assert_eq!(members.len(), 2, "members must not be dropped");
+
+    for source in [
+        "import \"c\" \"h\" { fun a() : int fun b() : int }",
+        "import \"c\" \"h\" { fun a() : int, fun b() : int }",
+        "import \"c\" \"h\" { }",
+    ] {
+        let output = parse_source(source).unwrap();
+        assert!(
+            output.diagnostics.is_empty(),
+            "{source}: {:?}",
+            output.diagnostics
+        );
+    }
+}
+
+#[test]
+fn let_binding_is_an_error_and_stays_one_statement() {
+    for source in [
+        "fun f() { let x = 1 }",
+        "fun f() { let x }",
+        "fun f() { let mut x = 1 }",
+    ] {
+        let output = parse_source(source).unwrap();
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .any(|diag| diag.code == DiagCode::LetKeyword),
+            "{source}: {:?}",
+            output.diagnostics
+        );
+        let DeclKind::Fun(function) = &output.ast.items[0].kind else {
+            panic!("expected function");
+        };
+        let Some(FunctionBody::Block(block)) = &function.body else {
+            panic!("expected block body");
+        };
+        assert_eq!(
+            block.stmts.len(),
+            1,
+            "{source} must recover as one binding, not split into two statements"
+        );
+        assert!(
+            matches!(block.stmts[0].kind, StmtKind::Binding(_)),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn let_stays_an_ordinary_identifier() {
+    // The guard only fires on `let <identifier>`, never on `let` used as a name.
+    for source in [
+        "val let = 1",
+        "fun f() { let }",
+        "fun f() { let = 1 }",
+        "fun f() { let(1) }",
+        "fun f() { let.x }",
+        "fun f() { val x = let }",
+    ] {
+        let output = parse_source(source).unwrap();
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .all(|diag| diag.code != DiagCode::LetKeyword),
+            "{source}: {:?}",
+            output.diagnostics
+        );
+    }
+}
+
+#[test]
+fn pointcut_accepts_the_wildcard_member() {
+    for source in [
+        "aspect A { after Type.* { } }",
+        "aspect A { around demo.P.* { } }",
+        "aspect A { before demo.P.log { } }",
+        "aspect A { before demo.Point { } }",
+    ] {
+        let output = parse_source(source).unwrap();
+        assert!(
+            output.diagnostics.is_empty(),
+            "{source}: {:?}",
+            output.diagnostics
+        );
+    }
 }

@@ -38,15 +38,28 @@ fn parse_type_param(
 ) -> Result<ast::syntax::ty::TypeParam, ParserError> {
     let start = session.cursor.peek().span;
     let variance = parse_variance(session);
-    let name_token = session.cursor.advance();
-    let name = session.interner.intern(session.token_text(&name_token));
-    let bound = if session
+    let name = if session.cursor.check(&TokenKind::Identifier) {
+        let token = session.cursor.advance();
+        ast::syntax::ty::TypeParamName::Valid(session.interner.intern(session.token_text(&token)))
+    } else {
+        let token = session.cursor.advance();
+        let id = session.next_node()?;
+        let diag = session.emit_unique(DiagCode::ExpectedToken, token.span, || {
+            format!("expected type parameter name, found {}", token.kind)
+        });
+        ast::syntax::ty::TypeParamName::Error(ast::syntax::node::ErrorNode {
+            id,
+            span: token.span,
+            err: diag,
+        })
+    };
+    let bounds = if session
         .cursor
         .bump_if(&TokenKind::Punctuation(PunctuationKind::Colon))
     {
-        Some(Box::new(parse_type(session)?))
+        parse_bounds(session)?
     } else {
-        None
+        Vec::new()
     };
     let default = if session
         .cursor
@@ -56,19 +69,28 @@ fn parse_type_param(
     } else {
         None
     };
-    let end = session
-        .cursor
-        .peek_ahead(0)
-        .map(|token| token.span)
-        .unwrap_or_default();
+    let end = session.cursor.previous_span();
     Ok(ast::syntax::ty::TypeParam {
         id: session.next_node()?,
         span: join_span(start, end),
         variance,
         name,
-        bound,
+        bounds,
         default,
     })
+}
+
+/// `Bound := Type { "&" Type }` — an intersection bound list, shared by
+/// `TypeParameter` inline bounds and `WhereConstraint`.
+pub(crate) fn parse_bounds(session: &mut ParseSession<'_>) -> Result<Vec<TypeWrap>, ParserError> {
+    let mut bounds = vec![parse_type(session)?];
+    while session
+        .cursor
+        .bump_if(&TokenKind::Operator(OperatorKind::BitAnd))
+    {
+        bounds.push(parse_type(session)?);
+    }
+    Ok(bounds)
 }
 
 fn parse_variance(session: &mut ParseSession<'_>) -> Option<ast::syntax::ty::Variance> {
@@ -77,12 +99,6 @@ fn parse_variance(session: &mut ParseSession<'_>) -> Option<ast::syntax::ty::Var
         .check(&TokenKind::Keyword(ast::token::HardKeyword::In))
     {
         session.cursor.advance();
-        if let TokenKind::Identifier = session.cursor.peek().kind
-            && session.token_text(session.cursor.peek()) == "out"
-        {
-            session.cursor.advance();
-            return Some(ast::syntax::ty::Variance::InOut);
-        }
         return Some(ast::syntax::ty::Variance::In);
     }
     if let TokenKind::Identifier = session.cursor.peek().kind
@@ -95,17 +111,36 @@ fn parse_variance(session: &mut ParseSession<'_>) -> Option<ast::syntax::ty::Var
 }
 
 pub(crate) fn parse_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserError> {
-    match session.try_with_depth(parse_type_inner)? {
+    parse_type_with(session, true)
+}
+
+/// A type with no `->` at its own top level: `FunctionType := UnionType ["->" T]`
+/// and the `( … ) -> …` form are both disallowed there. Used for a `when` branch's
+/// top-level binding annotation, where `a: int -> 1` would otherwise read the
+/// branch arrow as a function-type arrow. Nested types still accept `->`.
+pub(crate) fn parse_no_arrow_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserError> {
+    parse_type_with(session, false)
+}
+
+fn parse_type_with(
+    session: &mut ParseSession<'_>,
+    arrow_types: bool,
+) -> Result<TypeWrap, ParserError> {
+    match session.try_with_depth(|session| parse_type_inner(session, arrow_types))? {
         Some(ty) => Ok(ty),
         None => missing_type(session, session.cursor.peek().span),
     }
 }
 
-fn parse_type_inner(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserError> {
-    let mut function = parse_union_type(session)?;
-    while session
-        .cursor
-        .bump_if(&TokenKind::Operator(OperatorKind::Arrow))
+fn parse_type_inner(
+    session: &mut ParseSession<'_>,
+    arrow_types: bool,
+) -> Result<TypeWrap, ParserError> {
+    let mut function = parse_union_type_with(session, arrow_types)?;
+    while arrow_types
+        && session
+            .cursor
+            .bump_if(&TokenKind::Operator(OperatorKind::Arrow))
     {
         let ret = parse_type(session)?;
         let span = join_span(function.span, ret.span);
@@ -123,7 +158,14 @@ fn parse_type_inner(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserEr
 }
 
 pub(crate) fn parse_union_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserError> {
-    let first = parse_atomic_type(session)?;
+    parse_union_type_with(session, true)
+}
+
+fn parse_union_type_with(
+    session: &mut ParseSession<'_>,
+    arrow_types: bool,
+) -> Result<TypeWrap, ParserError> {
+    let first = parse_atomic_type(session, arrow_types)?;
     if !session
         .cursor
         .check(&TokenKind::Operator(OperatorKind::BitOr))
@@ -137,7 +179,7 @@ pub(crate) fn parse_union_type(session: &mut ParseSession<'_>) -> Result<TypeWra
         .cursor
         .bump_if(&TokenKind::Operator(OperatorKind::BitOr))
     {
-        types.push(parse_atomic_type(session)?);
+        types.push(parse_atomic_type(session, arrow_types)?);
     }
     let end = types.last().map(|ty| ty.span).unwrap_or_default();
     let id = session.next_node()?;
@@ -148,23 +190,36 @@ pub(crate) fn parse_union_type(session: &mut ParseSession<'_>) -> Result<TypeWra
     })
 }
 
-fn parse_atomic_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserError> {
+fn parse_atomic_type(
+    session: &mut ParseSession<'_>,
+    arrow_types: bool,
+) -> Result<TypeWrap, ParserError> {
     let token = *session.cursor.peek();
     if token.kind == TokenKind::Eof {
         return missing_type(session, token.span);
     }
     match token.kind {
-        TokenKind::Punctuation(PunctuationKind::LParen) => parse_paren_or_fn_type(session),
+        TokenKind::Punctuation(PunctuationKind::LParen) => {
+            parse_paren_or_fn_type(session, arrow_types)
+        }
         TokenKind::Punctuation(PunctuationKind::LBracket) => parse_array_type(session),
         TokenKind::Identifier => parse_named_type(session),
-        TokenKind::Keyword(ast::token::HardKeyword::Self_) => {
+        TokenKind::Keyword(ast::token::HardKeyword::SelfType) => {
             let token = session.cursor.advance();
-            let name = session.interner.intern("Self");
-            parse_named_suffix(
-                session,
-                ast::syntax::node::Path::single(name, token.span),
-                token.span,
-            )
+            // EBNF: PrimaryType := … | "Self" | … — no type arguments.
+            if session.cursor.check(&TokenKind::Operator(OperatorKind::Lt)) {
+                let args_span = session.cursor.peek().span;
+                session.emit_unique(DiagCode::UnexpectedToken, args_span, || {
+                    "Self takes no type arguments".to_string()
+                });
+                let _ = parse_type_args(session)?;
+            }
+            let id = session.next_node()?;
+            Ok(TypeWrap {
+                id,
+                span: token.span,
+                kind: TypeKind::SelfType,
+            })
         }
         TokenKind::Keyword(ast::token::HardKeyword::Dyn) => {
             session.cursor.advance();
@@ -288,7 +343,12 @@ fn parse_array_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserEr
             .token_text(&count_token)
             .replace('_', "")
             .parse::<u32>()
-            .unwrap_or(u32::MAX),
+            .unwrap_or_else(|_| {
+                session.emit_unique(DiagCode::IntegerOutOfRange, count_token.span, || {
+                    "array length exceeds u32".to_string()
+                });
+                0
+            }),
         _ => {
             session.emit_unique(DiagCode::UnexpectedToken, count_token.span, || {
                 "expected array length".to_string()
@@ -313,15 +373,19 @@ fn parse_array_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserEr
     })
 }
 
-fn parse_paren_or_fn_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserError> {
+fn parse_paren_or_fn_type(
+    session: &mut ParseSession<'_>,
+    arrow_types: bool,
+) -> Result<TypeWrap, ParserError> {
     let open = session.cursor.advance();
     if session
         .cursor
         .bump_if(&TokenKind::Punctuation(PunctuationKind::RParen))
     {
-        if session
-            .cursor
-            .bump_if(&TokenKind::Operator(OperatorKind::Arrow))
+        if arrow_types
+            && session
+                .cursor
+                .bump_if(&TokenKind::Operator(OperatorKind::Arrow))
         {
             let ret = parse_type(session)?;
             let id = session.next_node()?;
@@ -334,7 +398,12 @@ fn parse_paren_or_fn_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, Pa
                 },
             });
         }
-        return missing_type(session, open.span);
+        // EBNF: UnitType := "(" ")" — a unit type, not a missing one.
+        return Ok(TypeWrap {
+            id: session.next_node()?,
+            span: join_span(open.span, Span::new(open.span.end, open.span.end)),
+            kind: TypeKind::Unit,
+        });
     }
 
     let mut params = vec![parse_type(session)?];
@@ -356,10 +425,11 @@ fn parse_paren_or_fn_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, Pa
     {
         missing_close(session);
     }
-    if !session
-        .cursor
-        .bump_if(&TokenKind::Operator(OperatorKind::Arrow))
-    {
+    let takes_arrow = arrow_types
+        && session
+            .cursor
+            .bump_if(&TokenKind::Operator(OperatorKind::Arrow));
+    if !takes_arrow {
         if params.len() == 1 {
             return Ok(params.pop().expect("checked len"));
         }

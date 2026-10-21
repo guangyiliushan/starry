@@ -1,10 +1,11 @@
 //! 标识符 interner：字符串 → Symbol(u32) 的唯一映射
 //!
 //! 每 parse session 独立实例（禁全局 static——并行测试各 session
-//! 正是快照编号确定性的漂移防线）。泄漏指针即所有权，永不回收但
-//! 单进程合法（rustc 同款，safe 代码）。
+//! 正是快照编号确定性的漂移防线）。`Rc<str>` 由 interner 持有；
+//! `Symbol` 只有在所属 `ParseOutput.interner` 存活期间可 resolve。
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// interned 标识符（插入序编号）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -12,12 +13,11 @@ pub struct Symbol(pub u32);
 
 /// 标识符 interner
 ///
-/// `Vec<&'static str>` 持有泄漏指针即所有权；查重表以 `&'static str`
-/// 为键（blanket `Borrow<str>` 免适配）。
+/// 字符串由 `Vec<Rc<str>>` 拥有；查重表共享同一 allocation。
 #[derive(Debug, Default)]
 pub struct Interner {
-    strings: Vec<&'static str>,
-    map: HashMap<&'static str, Symbol>,
+    strings: Vec<Rc<str>>,
+    map: HashMap<Rc<str>, Symbol>,
 }
 
 impl Interner {
@@ -30,16 +30,16 @@ impl Interner {
         if let Some(&sym) = self.map.get(s) {
             return sym;
         }
-        let leaked: &'static str = Box::leak(s.to_owned().into_boxed_str());
+        let owned: Rc<str> = Rc::from(s);
         let sym = Symbol(self.strings.len() as u32);
-        self.strings.push(leaked);
-        self.map.insert(leaked, sym);
+        self.strings.push(Rc::clone(&owned));
+        self.map.insert(owned, sym);
         sym
     }
 
     /// resolve 一个 Symbol 为其字符串表示
-    pub fn resolve(&self, sym: Symbol) -> &'static str {
-        self.strings[sym.0 as usize]
+    pub fn resolve(&self, sym: Symbol) -> &str {
+        &self.strings[sym.0 as usize]
     }
 
     pub fn len(&self) -> usize {

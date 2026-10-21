@@ -32,7 +32,8 @@ ImportSuffix := ".*" | "as" IDENT ;
 
 NativeImport  := "import" NativeLanguage StringLiteral
                  [ "as" IDENT ] [ "{" ImportMember { "," ImportMember } [ "," ] "}" ] ;
-NativeLanguage := "c" | "cpp" ;
+(* NativeLanguage is a StringLiteral whose value is "c" or "cpp". *)
+NativeLanguage := StringLiteral ;
 ImportMember  := FunSignature ;
 
 TopLevelDecl  := Declaration
@@ -47,7 +48,7 @@ TopLevelDecl  := Declaration
 (* ---------- Declarations ---------- *)
 
 ParameterList  := [ Parameter { "," Parameter } [ "," ] ] ;
-Parameter      := [ "mut" ] IDENT [ ":" Type ] [ "=" Expr ] ;
+Parameter      := [ "mut" | "val" | "var" ] IDENT [ ":" Type ] [ "=" Expr ] ;
 
 Declaration := FunDecl
              | BindingDecl
@@ -69,10 +70,13 @@ FunDecl      := Modifiers "fun" IDENT TypeParams?
                 WhereClause? FunctionBody ;
 FunctionBody := Block | "=" Expr ;
 WhereClause  := "where" WhereConstraint { "," WhereConstraint } ;
-WhereConstraint := Type ":" Bound { "&" Bound } ;
+WhereConstraint := Type ":" Bound ;
 
+(* A signature has no body. The `;` terminator is accepted but optional: a
+ * newline also ends it, matching AssociatedType and every other NL-terminated
+ * member. Where a FunSignature is legal, so is a redundant `;`. *)
 FunSignature := Modifiers "fun" IDENT TypeParams?
-                 "(" ParameterList ")" [ ":" Type ] ";" ;
+                 "(" ParameterList ")" [ ":" Type ] [ ";" ] ;
 
 BindingDecl := Modifiers ( "val" | "var" ) Binding ;
 Binding     := Pattern [ ":" Type ] [ "=" Expr ] ;
@@ -100,7 +104,7 @@ UnionDecl := Modifiers "union" IDENT TypeParams? "{" { StructField } "}" ;
 
 TraitDecl      := Modifiers "trait" IDENT TypeParams? Supertypes? "{" { TraitMember } "}" ;
 TraitMember    := AssociatedType | FunSignature | FunDecl | Declaration ;
-AssociatedType := "type" IDENT [ ":" Bound ] [ "=" Type ] ;
+AssociatedType := "type" IDENT [ ":" Bound ] [ "=" Type ] [ ";" ] ;
 
 TypeAliasDecl := Modifiers "type" IDENT TypeParams? "=" Type ;
 
@@ -110,7 +114,9 @@ AspectMember := Declaration | AdviceDecl ;
 AdviceDecl   := ( «before» | «after» | «around» ) Pointcut Block ;
 Pointcut     := QualifiedName | Type "." ( "*" | IDENT ) ;
 
-ImplDecl := «impl» Type "for" Type "{" { ClassMember } "}" ;
+(* The impl block is its own generic scope, so it binds its own parameters.
+ * `impl<T> Show for List<T>`; a `where` constraint is not part of this form. *)
+ImplDecl := «impl» TypeParams? Type "for" Type "{" { ClassMember } "}" ;
 
 MacroDecl      := «macro» IDENT "(" [ MacroParameter { "," MacroParameter } ] ")" Block ;
 MacroParameter := IDENT ;
@@ -130,14 +136,19 @@ ProviderBinding := «bind» Type «to» Type ;
 
 ExternDecl     := "extern" ExternLanguage ExternBody ;
 ExternLanguage := StringLiteral ;
-ExternBody     := FunSignature | "namespace" IDENT "{" { FunSignature } "}" ;
+ExternBody     := FunSignature
+                | "{" { FunSignature } "}"
+                | "namespace" IDENT "{" { FunSignature } "}" ;
 
 (* ---------- Generics ---------- *)
 
 TypeParams    := "<" TypeParameter { "," TypeParameter } ">" ;
 TypeParameter := [ Variance ] IDENT [ ":" Bound ] [ "=" Type ] ;
 Variance      := "in" | «out» ;
-Bound         := Type ;
+(* An intersection bound. Used in both the inline `T : A & B` slot and the
+ * `where` slot, so the two spell the same constraint. `+` is avoided: it is
+ * already the addition operator. *)
+Bound         := Type { "&" Type } ;
 TypeArgs      := "<" TypeArgument { "," TypeArgument } ">" ;
 TypeArgument  := Type | IDENT "=" Type ;
 
@@ -180,7 +191,9 @@ Place := PostfixExpr ;
 
 (* A refutable condition is either an expression, often using `is`, or the
  * binding form formed from the existing hard keyword `val`. Starry has no
- * `let` keyword and no `let` condition. *)
+ * `let` keyword and no `let` condition. `let` is an ordinary identifier: a
+ * statement that starts with bare `let` followed by an identifier is a
+ * diagnostic (`LetKeyword`), not two statements. *)
 RefutableCondition := Expr | RefutableBinding ;
 RefutableBinding   := "val" Pattern "=" Expr ;
 
@@ -195,7 +208,7 @@ LoopStatement  := [ Label ":" ] "loop" Block ;
 JumpStatement  := "break" [ Label ] [ Expr ] | "continue" [ Label ] | "return" [ Expr ] ;
 DeferStatement := "defer" Block ;
 GrowStatement  := «grow» Expr «to» INTEGER «bits» ;
-Label          := IDENT ;
+Label          := "'" IDENT ;
 
 (* ---------- Expressions ---------- *)
 
@@ -216,6 +229,12 @@ ParameterPattern := [ "mut" ] IDENT [ ":" Type ] | «it» ;
 WhenExpr    := "when" [ "(" Expr ")" ] "{" { WhenBranch [ "," ] } "}" ;
 WhenBranch  := WhenPattern "->" ( Expr | Block | JumpStatement ) ;
 WhenPattern := Pattern [ "if" Expr ] | Expr | "else" ;
+(* A when branch ends in "->", which is also the function-type arrow. So a
+ * top-level binding annotation here is a NoArrowType: `a: int -> 1` reads the
+ * branch arrow as part of the type otherwise. Parenthesise a function type:
+ * `a: ((int) -> int) -> 1`. Nested annotations (inside `Some(…)`, `Point { … }`)
+ * are ordinary types. *)
+NoArrowType  := ? Type with no "->" at its top level ? ;
 
 ConcurrencyExpr := SpawnExpr | AsyncExpr | ConcurrentBlock ;
 SpawnExpr       := "spawn" [ "detached" ] [ SpawnTarget ]
@@ -229,7 +248,7 @@ ProceedExpr     := «proceed» ;
 
 ComptimeExpr := «comptime» Block ;
 MacroCall    := IDENT "!" "(" MacroTokenStream ")" ;
-MacroTokenStream := ? raw tokens until the matching ")" ? ;
+MacroTokenStream := ? balanced raw token groups until the matching ")" ? ;
 
 (* Pratt precedence, high to low:
  *   postfix:  . [] () ?. !!
@@ -253,7 +272,7 @@ BitOrExpr := BitXorExpr { "|" BitXorExpr } ;
 BitXorExpr := BitAndExpr { "^" BitAndExpr } ;
 BitAndExpr := EqualityExpr { "&" EqualityExpr } ;
 EqualityExpr := RelationalExpr { ( "==" | "!=" ) RelationalExpr } ;
-RelationalExpr := RangeExpr { ( "<" | ">" | "<=" | ">=" | "is" | "in" ) RangeExpr } ;
+RelationalExpr := RangeExpr { ( "<" | ">" | "<=" | ">=" | "is" | "!is" | "in" | "!in" ) RangeExpr } ;
 RangeExpr := ShiftExpr [ ( ".." | "..=" ) ShiftExpr ] ;
 ShiftExpr := AddExpr { ( "<<" | ">>" ) AddExpr } ;
 AddExpr := MultiplicativeExpr { ( "+" | "-" ) MultiplicativeExpr } ;
@@ -302,10 +321,15 @@ PrimaryPattern := WildcardPattern
                 | StructPattern ;
 
 WildcardPattern := "_" ;
+(* The annotation is an ordinary Type here. At the top level of a WhenPattern it
+ * is a NoArrowType instead — see the note on WhenExpr. *)
 BindingPattern := [ "mut" ] IDENT [ ":" Type ] ;
 LiteralPattern := INTEGER | FLOAT | STRING | CHAR | "true" | "false" | "null" ;
 RangePattern := LiteralPattern ( ".." | "..=" ) LiteralPattern ;
-TuplePattern := "(" [ Pattern { "," Pattern } [ "," ] ] ")" ;
+(* `..` is the rest element: it may appear at most once among the elements, in
+ * any position — `[a, .., b]`, `[.., b]`, `[a, ..]`, `[..]`, `(1, .., 3)`. *)
+TuplePattern := "(" [ TuplePatternElement { "," TuplePatternElement } [ "," ] ] ")" ;
+TuplePatternElement := Pattern | ".." ;
 
 ArrayPattern := "[" [ ArrayPatternElement { "," ArrayPatternElement } [ "," ] ] "]" ;
 ArrayPatternElement := Pattern | ".." ;
