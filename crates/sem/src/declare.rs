@@ -40,6 +40,7 @@ fn register_builtins(st: &mut SemState) {
             sig: DefSig::new(st.tys.unit, st.tys.unknown),
             resolving: false,
             alias_of: None,
+            alias_resolved: None,
             member_scope: None,
         });
         st.scopes.insert(root, sym, def);
@@ -58,6 +59,7 @@ fn add_def(st: &mut SemState, scope: ScopeId, name: Symbol, span: Span, kind: De
         sig: DefSig::new(st.tys.unit, st.tys.unknown),
         resolving: false,
         alias_of: None,
+        alias_resolved: None,
         member_scope: None,
     });
     if let Some(old) = st.scopes.insert(scope, name, def) {
@@ -132,6 +134,12 @@ fn declare_decl(decl: &DeclNode, scope: ScopeId, st: &mut SemState) {
             }
         }
         DeclKind::Class(c) => {
+            // v1 不支持 class（无构造路径/方法调用）：注册保持不级联，钉一条诊断
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                decl.span,
+                "class declarations are not supported in semantic v1",
+            ));
             let def = add_def(st, scope, c.name, decl.span, DefKind::Class);
             let ms = st.scopes.new_scope(Some(scope));
             st.defs.get_mut(def).member_scope = Some(ms);
@@ -568,6 +576,10 @@ fn alias_target(st: &mut SemState, scope: ScopeId, def: DefId, span: Span) -> Ty
     let ty = lower_ty(st, scope, &alias_of);
     st.defs.get_mut(def).resolving = false;
     st.defs.get_mut(def).sig.ty = ty;
+    // 目标为命名类型时预解析（值位置的别名经此走到构造器分支）
+    if let TyKind::Named(target, _) = st.tys.kind(ty).clone() {
+        st.defs.get_mut(def).alias_resolved = Some(target);
+    }
     ty
 }
 

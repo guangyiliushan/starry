@@ -60,9 +60,10 @@ pub enum ExprKind {
         pattern: Box<PatWrap>,
         negated: bool,
     },
+    /// `值 in 集合`：右操作数是集合表达式（EBNF RelationalExpr 的 RangeExpr 侧）
     In {
         lhs: Box<ExprWrap>,
-        pattern: Box<PatWrap>,
+        rhs: Box<ExprWrap>,
         negated: bool,
     },
     Unary {

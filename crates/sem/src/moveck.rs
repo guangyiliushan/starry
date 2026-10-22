@@ -151,7 +151,11 @@ fn expr(e: &ExprWrap, st: &mut SemState, moved: &mut BTreeSet<DefId>) {
             expr(lhs, st, moved);
             expr(rhs, st, moved);
         }
-        ExprKind::Is { lhs, .. } | ExprKind::In { lhs, .. } => expr(lhs, st, moved),
+        ExprKind::Is { lhs, .. } => expr(lhs, st, moved),
+        ExprKind::In { lhs, rhs, .. } => {
+            expr(lhs, st, moved);
+            expr(rhs, st, moved);
+        }
         ExprKind::Unary { operand, .. }
         | ExprKind::ForceUnwrap { expr: operand }
         | ExprKind::Await { expr: operand }

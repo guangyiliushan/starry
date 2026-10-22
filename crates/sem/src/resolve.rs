@@ -55,6 +55,7 @@ fn resolve_fun(decl_id: NodeId, f: &FunDecl, st: &mut SemState) {
             },
             resolving: false,
             alias_of: None,
+            alias_resolved: None,
             member_scope: None,
         });
         if let Some(old) = st.scopes.insert(pscope, name, def) {
@@ -277,10 +278,15 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
             resolve_expr(lhs, st, scope);
             resolve_expr(rhs, st, scope);
         }
-        ExprKind::Is { lhs, pattern, .. } | ExprKind::In { lhs, pattern, .. } => {
+        ExprKind::Is { lhs, pattern, .. } => {
             resolve_expr(lhs, st, scope);
             declare_local_binding(pattern, true, scope, st);
             resolve_pattern(pattern, st, scope);
+        }
+        // in 右操作数是集合表达式（EBNF RangeExpr 侧）：不产生模式绑定
+        ExprKind::In { lhs, rhs, .. } => {
+            resolve_expr(lhs, st, scope);
+            resolve_expr(rhs, st, scope);
         }
         ExprKind::Unary { operand, .. } => resolve_expr(operand, st, scope),
         ExprKind::ForceUnwrap { expr: operand } => resolve_expr(operand, st, scope),
@@ -406,6 +412,7 @@ pub(crate) fn declare_local_binding(
                     sig: DefSig::new(st.tys.unit, st.tys.unknown),
                     resolving: false,
                     alias_of: None,
+                    alias_resolved: None,
                     member_scope: None,
                 });
                 if st.scopes.insert(scope, *name, def).is_some() {

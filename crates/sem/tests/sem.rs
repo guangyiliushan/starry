@@ -538,3 +538,56 @@ fn bare_top_level_binding_reports() {
     assert_has("val x", DiagCode::SemUnsupportedConstruct);
     assert_clean("val x: int");
 }
+
+// ---- 第四轮审查回归：in/is、别名、class ----
+
+#[test]
+fn in_membership_element_in_collection() {
+    assert_clean("fun f(a: [int; 3]) : bool {\n    return 1 in a\n}");
+    // 字面量区间默认 i32：元素按同宽型参数验证（int=i64 对 i32 区间
+    // 按固定型格合法拒绝，见语义笔记的提升格）
+    assert_clean("fun f(x: i32) : bool {\n    return x in 1..5\n}");
+    assert_clean("fun f(x: i32) : bool {\n    return x in 1..=5\n}");
+    // 元素与集合类型不匹配
+    assert_has(
+        "fun f(a: [int; 3]) : bool {\n    return \"s\" in a\n}",
+        DiagCode::SemTypeMismatch,
+    );
+    // 反方向（集合 in 元素）拒绝
+    assert_has(
+        "fun f(a: [int; 3]) : bool {\n    return a in 1\n}",
+        DiagCode::SemTypeMismatch,
+    );
+}
+
+#[test]
+fn if_is_pattern_keeps_then_block() {
+    // `if e is A { }`：{ 归 then 块，不被结构体模式吞吃
+    let src = "enum E {\n    A,\n    B\n}\nfun f(e: E) : int {\n    if e is A {\n        return 1\n    }\n    return 0\n}";
+    assert_clean(src);
+}
+
+#[test]
+fn alias_name_is_not_a_value() {
+    let src = "type M = int\nfun f() : M {\n    return M\n}";
+    assert_has(src, DiagCode::SemTypeMismatch);
+}
+
+#[test]
+fn alias_constructor_reaches_target() {
+    let src = "struct P {\n    x: int\n}\ntype Q = P\nfun f() : Q {\n    return Q(1)\n}";
+    assert_clean(src);
+}
+
+#[test]
+fn class_declaration_reports_unsupported() {
+    let src = "class C {\n    fun m() : int {\n        return 1\n    }\n}";
+    assert_eq!(codes(src), vec![DiagCode::SemUnsupportedConstruct]);
+}
+
+#[test]
+fn type_object_rejected_in_aggregates() {
+    let src =
+        "struct P {\n    x: int\n}\nstruct Q {\n    y: int\n}\nfun f() {\n    val a = [P, Q]\n}";
+    assert_has(src, DiagCode::SemTypeMismatch);
+}

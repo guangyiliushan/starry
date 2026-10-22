@@ -543,18 +543,23 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             refine_pattern_types(pattern, lty, st);
             st.tys.bool_
         }
-        ExprKind::In { lhs, pattern, .. } => {
-            let lty = type_expr(lhs, st, true);
-            let subject = match st.tys.kind(lty).clone() {
+        // 值 in 集合/区间：左操作数是元素，右操作数（EBNF RangeExpr 侧）是集合
+        ExprKind::In { lhs, rhs, .. } => {
+            let elem_ty = type_expr(lhs, st, true);
+            let coll_ty = type_expr(rhs, st, true);
+            let elem = match st.tys.kind(coll_ty).clone() {
                 TyKind::Array(t, _) | TyKind::Range(t) => Some(t),
                 TyKind::Error => None,
                 _ => {
-                    mismatch(st, lhs.span);
+                    mismatch(st, rhs.span);
                     None
                 }
             };
-            if let Some(s) = subject {
-                refine_pattern_types(pattern, s, st);
+            if let (Some(e), false) = (elem, st.tys.is_error(elem_ty))
+                && !st.tys.is_error(e)
+                && !st.tys.assignable(elem_ty, e)
+            {
+                mismatch(st, lhs.span);
             }
             st.tys.bool_
         }
@@ -844,6 +849,24 @@ fn type_call(
                     DiagCode::SemNotCallable,
                     callee.span,
                     "enum type name is not callable; use a variant constructor",
+                ));
+                type_all_args(args, st);
+                return st.tys.error;
+            }
+            // 别名：经预解析目标走到目标的构造器（type Q = P; Q(1)）
+            DefKind::TypeAlias => {
+                let target = st.defs.get(named).alias_resolved;
+                if let Some(t) = target
+                    && matches!(st.defs.get(t).kind, DefKind::Struct)
+                {
+                    let fields = st.defs.get(t).sig.fields.clone();
+                    check_call_args(args, &fields, &[], span, st);
+                    return st.tys.builtin_named(t);
+                }
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemNotCallable,
+                    callee.span,
+                    "aliased type is not callable in semantic v1",
                 ));
                 type_all_args(args, st);
                 return st.tys.error;
@@ -1263,7 +1286,8 @@ fn def_value_ty(def: DefId, st: &mut SemState) -> TyId {
             st.tys.intern(TyKind::TypeObject(def))
         }
         DefKind::EnumVariant { parent, .. } => st.tys.builtin_named(parent),
-        DefKind::TypeAlias => st.defs.get(def).sig.ty,
+        // 别名在值位置同样是类型对象（annotations 走 lower_ty 不受影响）
+        DefKind::TypeAlias => st.tys.intern(TyKind::TypeObject(def)),
         DefKind::StructField { .. } | DefKind::ImportNs { .. } => st.tys.error,
     }
 }
@@ -1372,7 +1396,11 @@ mod verify {
                 expr(lhs, st);
                 expr(rhs, st);
             }
-            ExprKind::Is { lhs, .. } | ExprKind::In { lhs, .. } => expr(lhs, st),
+            ExprKind::Is { lhs, .. } => expr(lhs, st),
+            ExprKind::In { lhs, rhs, .. } => {
+                expr(lhs, st);
+                expr(rhs, st);
+            }
             ExprKind::Unary { operand, .. }
             | ExprKind::ForceUnwrap { expr: operand }
             | ExprKind::Await { expr: operand }

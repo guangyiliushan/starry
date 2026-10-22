@@ -46,7 +46,9 @@ fn parse_bp_inner(session: &mut ParseSession<'_>, min_bp: u8) -> Result<ExprWrap
                 session.cursor.advance();
             }
             session.cursor.advance();
-            let pattern = parse_pattern(session)?;
+            // is 操作数后必有语句块（if/while 的 then-body 强制）：
+            // `{` 归块不归结构体模式，禁止结构体尾（parser-notes 有记录）
+            let pattern = crate::pat::parse_is_operand_pattern(session)?;
             let span = join_span(lhs.span, pattern.span);
             let id = session.next_node()?;
             lhs = ExprWrap::new(
@@ -72,15 +74,17 @@ fn parse_bp_inner(session: &mut ParseSession<'_>, min_bp: u8) -> Result<ExprWrap
                 session.cursor.advance();
             }
             session.cursor.advance();
-            let pattern = parse_pattern(session)?;
-            let span = join_span(lhs.span, pattern.span);
+            // EBNF：右操作数是 RangeExpr——以 range 绑定幂（17）为下限解析，
+            // 保持左结合链不被右操作数吞吃
+            let rhs = parse_bp(session, 17)?;
+            let span = join_span(lhs.span, rhs.span);
             let id = session.next_node()?;
             lhs = ExprWrap::new(
                 id,
                 span,
                 ExprKind::In {
                     lhs: Box::new(lhs),
-                    pattern: Box::new(pattern),
+                    rhs: Box::new(rhs),
                     negated: negated_in,
                 },
             );

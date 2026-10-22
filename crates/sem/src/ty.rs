@@ -241,6 +241,8 @@ impl TyArena {
             (TyKind::Float(f), TyKind::Int(_)) => Some(self.intern(TyKind::Float(*f))),
             (TyKind::Named(fd, fa), TyKind::Named(td, ta)) if fd == td && fa == ta => Some(a),
             (TyKind::Range(f), TyKind::Range(t)) if f == t => Some(a),
+            // 类型对象不与任何类型汇合（数组字面量等聚合处拒绝）
+            (TyKind::TypeObject(_), _) | (_, TyKind::TypeObject(_)) => None,
             (TyKind::Tuple(fs), TyKind::Tuple(ts)) if fs.len() == ts.len() => {
                 let mut out = Vec::with_capacity(fs.len());
                 for (f, t) in fs.iter().zip(ts) {

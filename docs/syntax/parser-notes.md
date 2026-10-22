@@ -128,6 +128,21 @@ returns the close-brace span (`Block` stores neither brace), and `parse_if`
 ends at that close brace for a then/else block instead of
 `block_tail_span` — an empty block used to collapse the if-expression span to
 `0..0` via `Span::default`.
+### `is` operands never take a struct tail
+
+An `is` operand is always followed by a mandatory statement block (`if e is
+A { ... }`), so a trailing `{` belongs to the block, never to a struct
+pattern. `parse_is_operand_pattern` parses the operand with struct tails
+suppressed; this resolves the ambiguity that previously swallowed the
+then-block (`if e is A { }` failed to parse). Nested patterns inside the
+operand keep full pattern syntax; `in` is unaffected — its right operand
+is a collection expression parsed at range binding power (17), matching
+EBNF `RelationalExpr := RangeExpr { ( ... | "in" | "!in" ) RangeExpr }`.
+
+Known EBNF gap: the grammar gives `is`/`in` operands as `RangeExpr` only,
+with no is-pattern production; the AST carries `ExprKind::Is { pattern }`
+for pattern matching. The grammar needs an explicit is-pattern production
+(tracked here until the EBNF is amended).
 ### Deferred
 
 | Gap | Why it is still open |

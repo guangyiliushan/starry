@@ -70,6 +70,9 @@ pub struct Def {
     pub resolving: bool,
     /// 类型别名目标（lower 用）
     pub alias_of: Option<TypeWrap>,
+    /// 别名目标解析出的命名定义（alias_target 成功且结果为 Named 时写入；
+    /// 值位置的别名经此走到目标的构造器分支）
+    pub alias_resolved: Option<DefId>,
     /// 成员作用域（struct/enum/class）
     pub member_scope: Option<ScopeId>,
 }

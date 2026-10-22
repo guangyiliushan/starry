@@ -63,6 +63,15 @@ Error 恒真，出错子树不再级联诊断。parser 诊断原样保留在前�
 （`if a {}` 报 `SemConditionNotBool`），check 收尾再钉一条「无法推定」。
 绑定注解槽默认值为 Unknown（`DefSig` 默认），`needs_infer` = Error∨Unknown。
 
+## 成员与关系运算
+
+- `is`：`值 is 模式`，模式绑定进当前作用域（if/while 的 val 条件同纪律）。
+- `in`/`!in`：`值 in 集合`，右操作数是集合表达式（EBNF RangeExpr 侧，
+  parser 以 range 绑定幂解析），左操作数是元素，按元素类型核查可指派；
+  数组/区间以外的一侧报 `SemTypeMismatch`。
+- 类型别名：值位置同样是 `TypeObject`（与类型名同纪律）；`type Q = P` 的
+  构造调用经 `Def.alias_resolved` 预解析目标走到 P 的字段构造器。
+
 ## 值构造与调用
 
 - 枚举变体值：`E.A` / `Opt.Some`（成员访问）的类型即所属枚举
@@ -117,7 +126,7 @@ LocalBinding/Param）；`=` 赋值重置；分支/循环取两态**并集**
 泛型（fun 类型形参/调用实例化；签名不 lower，单一
 `SemUnsupportedConstruct` 不级联）、方法调用（成员 callee）、impl、
 actor、provide、union/dyn/Self 类型、lambda 定型、spawn 内部、
-宏展开（独立前置 pass，规格待定；调用点报 `SemMacroExpansion`）。
+宏展开（独立前置 pass，规格待定；调用点报 `SemMacroExpansion`）。`nclass 声明（无构造路径/方法调用；声明点报一条即注册，避免级联）。
 lambda/spawn 内部整体不解析不定型。
 
 以下「声称支持但 v1 不核查」的松弛项也已记录在案：
