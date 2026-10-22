@@ -37,13 +37,19 @@ SemanticOutput ─→ [irc crate] 三地址码生成（中间代码生成阶段�
   外部 `opt -mem2reg`）。
 - **RPN/后缀式**：排除出主路径（栈式 IR 与基本块控制流互斥），
   仅未来栈机后端的 roadmap 一笔。
+- **`UnOp::Conv(TyId)`：确认**（2026-10-22 优化会话裁决）。龙书 6.5
+  将类型转换视为一元算子（inttofloat/floattoint），教科书一致；
+  备选 `Instr::Conv { dst, a, from, to }` 的字段与 `Un` 完全重复，被否。
+  opt 侧影响：CSE/LICM/DCE 走既有 `Un` 臂零新增 match；常量折叠识别
+  Conv 随"Conv 常量折叠"扩展位落地（v1 折叠的双常数前置条件对单
+  操作数 Conv 本就不成立）；DCE 视 Conv 为纯计算，未使用即删。
 
 ## TAC 形状（irc crate 的产出契约）
 
 ```rust
 pub enum Operand { Temp(TempId), Const(Const) }
 pub enum Const { Int(i128), Float(f64), Bool(bool), Null, Str(Symbol) }
-// UnOp 带载荷是本契约相对初版的唯一指令集改动，待优化会话确认（见文末）
+// UnOp 带载荷：Conv = 一元算子（龙书 6.5），2026-10-22 优化会话已确认
 pub enum UnOp { Neg, Not, BitNot, Conv(TyId /*from*/) }
 pub enum Instr {
     Bin { dst: TempId, op: BinOp, l: Operand, r: Operand, ty: TyId },
@@ -106,8 +112,11 @@ pub struct TacOutput { pub funs: Vec<FunBody>, pub diags: Vec<Diagnostic> } // �
   逆序发射。
 - 枚举构造 `Opt.Some(x)`：Store tag + Store payload 槽；`E.A` 无参
   变体只写 tag；`!!` → Br flag，失败走 `unreachable`。
-- `StringInterp`：extern call `starry_str_concat`（.ll 里 declare；
-  runtime 到位即通；或 sem 将其挪入跳过清单，二选一待定）。
+- `StringInterp`：sem 已完整定型（结果 `string`，parts 逐一定型，
+  内部错误在 sem 报——不进跳过清单，见 semantic-notes）。irc
+  lowering = 逐 part stringify + concat 的运行时操作序列；是否落成
+  extern call、运行时入口命名，是 IR 开工时的运行时契约设计。
+  part 的可字符串化规则（如 `int?`）依赖 trait 体系，解冻后再回访。
 - comptime/unsafe 块按普通块 lowering（与 sem 现有行为一致）。
 - 生成期不消重（无 DAG/值编号）：表达式重复原样发射，交给 opt 的
   局部 CSE——单一事实来源。
@@ -154,9 +163,3 @@ pub fn emit(tac: &TacOutput, tys: &TyArena, defs: &DefArena, interner: &Interner
 - 与全仓一致：`cargo fmt --check`、全 workspace 测试、
   `clippy -D warnings`、`syntaxgen --check`、`git diff --check`。
   每个 pass 配最小钉板测试（fold/copy/DCE/CSE 各一正一负）。
-
-## 待确认
-
-- `UnOp::Conv(TyId)` 给 UnOp 增加载荷（本契约相对初版的唯一指令集
-  改动）需优化会话点头；备选为新增 `Instr::Conv { dst, a, from, to }`
-  变体——成本转移到 opt 五个 pass 的 match 臂，裁决逻辑不变。

@@ -129,6 +129,12 @@ actor、provide、union/dyn/Self 类型、lambda 定型、spawn 内部、
 宏展开（独立前置 pass，规格待定；调用点报 `SemMacroExpansion`）。`nclass 声明（无构造路径/方法调用；声明点报一条即注册，避免级联）。
 lambda/spawn 内部整体不解析不定型。
 
+`StringInterp` 不在跳过清单：sem 已完整定型（结果 `string`，parts
+逐一定型，`"a${nosuch}b"` 的 `SemUndefinedName` 在 part 定型时暴露）——
+进跳过清单等于丢掉唯一的实用价值（内部诊断）。lowering（stringify +
+concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 契约
+（见 opt-notes）。
+
 以下「声称支持但 v1 不核查」的松弛项也已记录在案：
 
 - 明确赋值分析（`val x: int; return x` 不报未初始化）
