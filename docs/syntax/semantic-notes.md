@@ -43,7 +43,9 @@ Error 恒真，出错子树不再级联诊断。parser 诊断原样保留在前�
   `char`、`unit` lower 为原子 `TyKind`；`Own`/`Shared` lower 为
   `Named(builtin_def, args)`。
 - 提升格（`assignable`/`join`）：整型按位宽 `i4→…→i128` 加宽；
-  `int → float`；`float` 按 f32/f64；`Null → Nullable(_)`；
+  `int → float`；`float` 按 f32/f64；`T → Nullable(T)`（Null 与任意
+  具体类型均可提升入可空，可空间按内层递归、变度不变）；
+  汇合侧 `null ∨ T = T?`、`Nullable(S) ∨ T = Nullable(S ∨ T)`；
   命名类型/数组/元组/区间按结构相等。Kotlin 风格整型加宽的教学化简。
 - `when` 结果型 = 分支体 join；`if` 双分支 join。
 - 比较运算（`<` 族）限定可序类型（数值/字符）；等值按可汇合判定。
@@ -71,6 +73,12 @@ Error 恒真，出错子树不再级联诊断。parser 诊断原样保留在前�
   `SemUnsupportedConstruct`。
 - 函数值调用：callee 定型为 `TyKind::Fn`（形参/绑定持有的函数值），
   仅位置实参、无默认值补位；命名实参与默认值是具名函数的专有路径。
+- **类型对象分立**：类型名在值位置出现得到 `TyKind::TypeObject(DefId)`
+  （`def_value_ty`），与「该类型的值」不是同一类型——除 type_call 的
+  构造器分支外不可指派/不可调用（`val p = P`、`E(1)` 均诊断）。
+  枚举类型对象的成员访问是命名空间访问（`E.A`），在 member_field_ty
+  解包为枚举值型；结构体静态访问（`P.x`）仍不支持。
+- 未知命名实参报 `SemUnknownParam` 且不级联「missing argument」。
 
 ## when 穷尽性（v1 保守规则）
 
@@ -116,6 +124,8 @@ lambda/spawn 内部整体不解析不定型。
 
 - 明确赋值分析（`val x: int; return x` 不报未初始化）
 - 结构体字段可变性（`p.x = 1` 不核查 mutable；class 字段规则待定）
+- `Own<T>` 的构造入口（moveck 测试以标注绑定近似，自带一条
+  `SemTypeMismatch`，断言完整诊断序列钉住这一点）
 - `loop` 的 break 值定型（break_values 收集后未汇入循环型；
   For/While 的 break 值同样不接）
 - import 存在性核查（`import a.b.*` 空转不查目标）

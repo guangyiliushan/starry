@@ -197,20 +197,29 @@ fn unknown_struct_member_reports() {
 
 #[test]
 fn own_second_use_reports() {
+    // 注：Own<T> 在 v1 无构造入口，标注初始化自带一条 mismatch；
+    // 强断言钉住完整诊断序列（check 在前、moveck 在后）
     let src = "fun main() {\n    val x: Own<int> = 1\n    val y = x\n    val z = x\n}";
-    assert_has(src, DiagCode::SemUseAfterMove);
+    assert_eq!(
+        codes(src),
+        vec![DiagCode::SemTypeMismatch, DiagCode::SemUseAfterMove]
+    );
 }
 
 #[test]
 fn own_single_use_is_not_a_move_error() {
     let src = "fun main() {\n    val x: Own<int> = 1\n    val y = x\n}";
-    assert!(!codes(src).contains(&DiagCode::SemUseAfterMove));
+    assert_eq!(codes(src), vec![DiagCode::SemTypeMismatch]);
 }
 
 #[test]
 fn own_reassign_resets_moved_state() {
+    // 初始化 + 赋值的 Own 标注均自带 mismatch；重置后不再报移动
     let src = "fun main() {\n    var x: Own<int> = 1\n    val y = x\n    x = 2\n    val z = x\n}";
-    assert!(!codes(src).contains(&DiagCode::SemUseAfterMove));
+    assert_eq!(
+        codes(src),
+        vec![DiagCode::SemTypeMismatch, DiagCode::SemTypeMismatch]
+    );
 }
 
 // ---- 宏 / 健壮性 ----
@@ -287,8 +296,10 @@ fn struct_constructor_call_is_clean() {
 
 #[test]
 fn constructor_unknown_field_reports() {
+    // 未知命名实参：SemUnknownParam 单条，不级联 missing argument
     let src = "struct P {\n    x: int\n}\nfun f() : P {\n    return P(z = 1)\n}";
-    assert_has(src, DiagCode::SemArityMismatch);
+    assert_has(src, DiagCode::SemUnknownParam);
+    assert_eq!(codes(src).len(), 1);
 }
 
 #[test]
@@ -337,7 +348,7 @@ fn implicit_unit_fun_tail_is_not_compared() {
 #[test]
 fn own_param_second_use_reports() {
     let src = "fun f(x: Own<int>) : int {\n    val a = x\n    val b = x\n    return 0\n}";
-    assert_has(src, DiagCode::SemUseAfterMove);
+    assert_eq!(codes(src), vec![DiagCode::SemUseAfterMove]);
 }
 
 // ---- 推断序与 Unknown 哨兵 ----
@@ -448,4 +459,82 @@ fn malformed_sources_do_not_panic() {
             let _ = out.diagnostics.len();
         }
     }
+}
+
+// ---- 第三轮审查回归：可空提升格、while val 作用域、类型对象 ----
+
+#[test]
+fn nullable_lattice_accepts_value_into_nullable() {
+    assert_clean("fun f() : int? {\n    return 1\n}");
+    assert_clean("fun g(v: int?) {\n}\nfun main() {\n    g(1)\n}");
+    assert_clean("fun f() {\n    val x: int? = 1\n}");
+}
+
+#[test]
+fn nullable_join_produces_nullable() {
+    // null ∨ int = int?：x 可接 ?? / !!，且定型确为可空
+    let src = "fun f(c: bool) {\n    val x = if c { null } else { 1 }\n    val y = x ?? 0\n}";
+    let parsed = parser::parse_source(src).unwrap();
+    let out = analyze(parsed);
+    assert_eq!(out.diagnostics.len(), 0, "{:?}", out.diagnostics);
+    let mut interner = out.interner;
+    let sym = interner.intern("x");
+    let mut found = false;
+    for i in 0..out.defs.len() as u32 {
+        let def = out.defs.get(sem::DefId(i));
+        if def.name == sym {
+            assert!(matches!(out.tys.kind(def.sig.ty), sem::TyKind::Nullable(_)));
+            found = true;
+        }
+    }
+    assert!(found, "binding x not found");
+    // Nullable(S) ∨ T = Nullable(S ∨ T)
+    let src2 =
+        "fun f(c: bool, m: int?) {\n    val x = if c { m } else { 1 }\n    val y = x ?? 0\n}";
+    assert_clean(src2);
+}
+
+#[test]
+fn while_val_binding_visible_in_body() {
+    let src = "enum Opt {\n    Some(int),\n    None\n}\nfun f(o: Opt) {\n    while val Some(x) = o {\n        val y = x\n    }\n}";
+    assert_clean(src);
+}
+
+#[test]
+fn type_name_is_not_a_value() {
+    let src = "struct P {\n    x: int\n}\nfun f() : P {\n    val p = P\n    return p\n}";
+    assert_has(src, DiagCode::SemTypeMismatch);
+    let src2 = "enum E {\n    A\n}\nfun f() : E {\n    val x = E\n    return x\n}";
+    assert_has(src2, DiagCode::SemTypeMismatch);
+}
+
+#[test]
+fn enum_type_name_call_reports() {
+    let src = "enum E {\n    A(int)\n}\nfun main() {\n    E(1)\n}";
+    assert_has(src, DiagCode::SemNotCallable);
+}
+
+#[test]
+fn undefined_callee_reports_single_diagnostic() {
+    let src = "fun main() {\n    nosuch()\n}";
+    assert_eq!(codes(src), vec![DiagCode::SemUndefinedName]);
+}
+
+#[test]
+fn variant_named_argument_constructs() {
+    let src =
+        "enum S {\n    Circle(radius: f64)\n}\nfun f() : S {\n    return S.Circle(radius = 2.0)\n}";
+    assert_clean(src);
+}
+
+#[test]
+fn top_level_destructuring_types_elements() {
+    let src = "val (a, b) = (1, 2)\nfun f() : int {\n    return a\n}";
+    assert_clean(src);
+}
+
+#[test]
+fn bare_top_level_binding_reports() {
+    assert_has("val x", DiagCode::SemUnsupportedConstruct);
+    assert_clean("val x: int");
 }

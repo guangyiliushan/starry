@@ -124,8 +124,9 @@ fn resolve_stmt(s: &StmtWrap, st: &mut SemState, scope: ScopeId) {
             st.labels.pop();
         }
         StmtKind::While { label, cond, body } => {
-            resolve_condition(cond, st, scope);
-            let lscope = st.scopes.new_scope(Some(scope));
+            // 条件绑定作用域必须是循环体的祖先（`while val x = ... { x }`）
+            let cscope = resolve_condition(cond, st, scope);
+            let lscope = st.scopes.new_scope(Some(cscope));
             st.labels.push(LabelFrame {
                 label: *label,
                 node: s.id,
@@ -223,13 +224,19 @@ fn resolve_jump_target(
     }
 }
 
-fn resolve_condition(cond: &Condition, st: &mut SemState, scope: ScopeId) {
+/// 条件解析；返回绑定生效的作用域（Expr 条件返回原作用域，
+/// Val 条件返回新开的模式绑定作用域——调用方须以它为体块父作用域）
+fn resolve_condition(cond: &Condition, st: &mut SemState, scope: ScopeId) -> ScopeId {
     match cond {
-        Condition::Expr(e) => resolve_expr(e, st, scope),
+        Condition::Expr(e) => {
+            resolve_expr(e, st, scope);
+            scope
+        }
         Condition::Val { pattern, expr } => {
             resolve_expr(expr, st, scope);
             let pscope = st.scopes.new_scope(Some(scope));
             declare_local_binding(pattern, true, pscope, st);
+            pscope
         }
     }
 }

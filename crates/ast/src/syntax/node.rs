@@ -143,8 +143,10 @@ pub enum DiagCode {
     SemTypeMismatch,
     /// 调用目标不是函数
     SemNotCallable,
-    /// 实参个数或命名错误
+    /// 实参个数错误
     SemArityMismatch,
+    /// 命名实参没有对应的参数名
+    SemUnknownParam,
     /// 向不可变绑定赋值
     SemAssignToVal,
     /// 标签没有匹配的循环

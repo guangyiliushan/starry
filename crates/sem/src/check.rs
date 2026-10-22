@@ -22,7 +22,7 @@ pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
     for item in &ast.items {
         match &item.kind {
             DeclKind::Fun(f) => check_fun(item.id, f, st),
-            DeclKind::Binding(b) => check_top_binding(b, st, root),
+            DeclKind::Binding(b) => check_top_binding(b, st),
             _ => {}
         }
     }
@@ -90,23 +90,84 @@ fn check_fun(decl_id: NodeId, f: &ast::syntax::decl::FunDecl, st: &mut SemState)
     st.funs.pop();
 }
 
-fn check_top_binding(b: &BindingDecl, st: &mut SemState, root: crate::def::ScopeId) {
+fn check_top_binding(b: &BindingDecl, st: &mut SemState) {
     let Some(init) = &b.init else {
+        // 与局部同纪律：裸绑定至少须有标注（明确赋值分析 v1 不做，见 notes）
+        if b.ty.is_none() {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                b.pattern.span,
+                "binding requires an initializer or a type annotation",
+            ));
+        }
         return;
     };
     let init_ty = type_expr(init, st, true);
-    if let PatKind::Binding { name, .. } = &b.pattern.kind
-        && let Some(def) = st.scopes.lookup_local(root, *name)
-    {
-        let ann = st.defs.get(def).sig.ty;
-        if st.tys.needs_infer(ann) {
-            st.defs.get_mut(def).sig.ty = init_ty;
-        } else if !st.tys.assignable(init_ty, ann) {
-            mismatch(st, init.span);
+    check_binding_pattern(&b.pattern, init_ty, init.span, st);
+}
+
+fn check_local_binding(b: &BindingDecl, st: &mut SemState) {
+    let Some(init) = &b.init else {
+        if b.ty.is_none() {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                b.pattern.span,
+                "binding requires an initializer",
+            ));
+        }
+        return;
+    };
+    let init_ty = type_expr(init, st, true);
+    check_binding_pattern(&b.pattern, init_ty, init.span, st);
+}
+
+/// 绑定模式定型核心：Binding 核对注解/写入推断，Tuple/Array 按元素递归精化；
+/// 顶层与局部共用（顶层 defs 的 pat_binding_def 由 declare 期写入）
+fn check_binding_pattern(pat: &PatWrap, init_ty: TyId, init_span: Span, st: &mut SemState) {
+    match &pat.kind {
+        PatKind::Binding { .. } => {
+            if let Some(&def) = st.pat_binding_def.get(pat.id) {
+                let ann = st.defs.get(def).sig.ty;
+                if st.tys.needs_infer(ann) {
+                    st.defs.get_mut(def).sig.ty = init_ty;
+                } else if !st.tys.assignable(init_ty, ann) {
+                    mismatch(st, init_span);
+                }
+            }
+        }
+        PatKind::Wildcard => {}
+        PatKind::Tuple { elements, .. } | PatKind::Array { elements, .. } => {
+            let elem_tys = match st.tys.kind(init_ty).clone() {
+                TyKind::Tuple(ts) => Some(ts),
+                TyKind::Array(t, _) => Some(vec![t; elements.len()]),
+                TyKind::Error | TyKind::Unknown => None,
+                _ => {
+                    mismatch(st, init_span);
+                    None
+                }
+            };
+            if let Some(ts) = elem_tys {
+                if ts.len() != elements.len() {
+                    st.diags.emit(Diagnostic::error(
+                        DiagCode::SemArityMismatch,
+                        init_span,
+                        "destructuring arity mismatch",
+                    ));
+                }
+                for (p, t) in elements.iter().zip(ts.iter()) {
+                    check_binding_pattern(p, *t, init_span, st);
+                }
+            }
+        }
+        _ => {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                pat.span,
+                "only binding/wildcard/tuple/array patterns are supported in bindings",
+            ));
         }
     }
 }
-
 fn type_block(b: &Block, st: &mut SemState, in_value: bool) -> TyId {
     for s in &b.stmts {
         type_stmt(s, st);
@@ -241,63 +302,6 @@ fn type_stmt(s: &StmtWrap, st: &mut SemState) {
     }
 }
 
-fn check_local_binding(b: &BindingDecl, st: &mut SemState) {
-    let Some(init) = &b.init else {
-        if b.ty.is_none() {
-            st.diags.emit(Diagnostic::error(
-                DiagCode::SemUnsupportedConstruct,
-                b.pattern.span,
-                "binding requires an initializer",
-            ));
-        }
-        return;
-    };
-    let init_ty = type_expr(init, st, true);
-    match &b.pattern.kind {
-        PatKind::Binding { .. } => {
-            if let Some(&def) = st.pat_binding_def.get(b.pattern.id) {
-                let ann = st.defs.get(def).sig.ty;
-                if st.tys.needs_infer(ann) {
-                    st.defs.get_mut(def).sig.ty = init_ty;
-                } else if !st.tys.assignable(init_ty, ann) {
-                    mismatch(st, init.span);
-                }
-            }
-        }
-        PatKind::Wildcard => {}
-        PatKind::Tuple { elements, .. } | PatKind::Array { elements, .. } => {
-            let elem_tys = match st.tys.kind(init_ty).clone() {
-                TyKind::Tuple(ts) => Some(ts),
-                TyKind::Array(t, _) => Some(vec![t; elements.len()]),
-                TyKind::Error => None,
-                _ => {
-                    mismatch(st, init.span);
-                    None
-                }
-            };
-            if let Some(ts) = elem_tys {
-                if ts.len() != elements.len() {
-                    st.diags.emit(Diagnostic::error(
-                        DiagCode::SemArityMismatch,
-                        init.span,
-                        "destructuring arity mismatch",
-                    ));
-                }
-                for (p, t) in elements.iter().zip(ts.iter()) {
-                    refine_bindings(p, *t, st);
-                }
-            }
-        }
-        _ => {
-            st.diags.emit(Diagnostic::error(
-                DiagCode::SemUnsupportedConstruct,
-                b.pattern.span,
-                "only binding/wildcard/tuple/array patterns are supported in bindings",
-            ));
-        }
-    }
-}
-
 fn refine_bindings(pat: &PatWrap, ty: TyId, st: &mut SemState) {
     match &pat.kind {
         PatKind::Binding { .. } => {
@@ -366,6 +370,13 @@ fn assign_target_ty(target: &ExprWrap, target_ty: TyId, st: &mut SemState) -> Ty
 }
 fn member_field_ty(base_ty: TyId, name: Symbol, safe: bool, span: Span, st: &mut SemState) -> TyId {
     let mut ty = base_ty;
+    // 枚举类型对象的成员访问 = 命名空间访问（`E.A` / `Opt.Some` / 变体构造路径）
+    // ——解包为枚举值型；结构体静态访问（`P.x`）仍不支持
+    if let TyKind::TypeObject(def) = st.tys.kind(ty).clone()
+        && matches!(st.defs.get(def).kind, DefKind::Enum)
+    {
+        ty = st.tys.builtin_named(def);
+    }
     let mut nullable_base = false;
     if let TyKind::Nullable(inner) = st.tys.kind(ty).clone()
         && safe
@@ -795,35 +806,51 @@ fn type_call(
             "generic call instantiation is not supported in semantic v1",
         );
     }
-    // 构造器调用：callee_ty 为 Named(struct)（P(...)）或 Named(enum)
-    // （Opt.Some(...) / E.A(...)——成员访问枚举在 member_field_ty 已给枚举型）
-    if let TyKind::Named(named, _) = st.tys.kind(callee_ty).clone() {
-        match st.defs.get(named).kind.clone() {
+    // callee 已出错（未定义名/错误基对象等，诊断已发）：不再级联第二条
+    if st.tys.is_error(callee_ty) {
+        type_all_args(args, st);
+        return st.tys.error;
+    }
+    // 构造器调用：
+    // - Named(enum)：变体成员访问（`Opt.Some(...)`，member_field_ty 给枚举型）
+    // - TypeObject：类型名的值位置出现（`P(...)`；`E(...)` 不是构造，报错）
+    match st.tys.kind(callee_ty).clone() {
+        TyKind::Named(named, _) => {
+            if matches!(st.defs.get(named).kind, DefKind::Enum)
+                && let ExprKind::Member { name, .. } = &callee.kind
+            {
+                let resolved =
+                    member_lookup(st, named, *name).and_then(|v| match st.defs.get(v).kind {
+                        DefKind::EnumVariant { parent, index } => Some((parent, index)),
+                        _ => None,
+                    });
+                if let Some((parent, index)) = resolved {
+                    let vparams = variant_arg_tys(parent, index, st);
+                    check_call_args(args, &vparams, &[], span, st);
+                } else {
+                    type_all_args(args, st);
+                }
+                return st.tys.builtin_named(named);
+            }
+        }
+        TyKind::TypeObject(named) => match st.defs.get(named).kind.clone() {
             DefKind::Struct => {
                 let fields = st.defs.get(named).sig.fields.clone();
                 check_call_args(args, &fields, &[], span, st);
                 return st.tys.builtin_named(named);
             }
             DefKind::Enum => {
-                if let ExprKind::Member { name, .. } = &callee.kind {
-                    let resolved =
-                        member_lookup(st, named, *name).and_then(|v| match st.defs.get(v).kind {
-                            DefKind::EnumVariant { parent, index } => Some((parent, index)),
-                            _ => None,
-                        });
-                    if let Some((parent, index)) = resolved {
-                        let tys = variant_arg_tys(parent, index, st);
-                        check_variant_args(args, &tys, span, st);
-                    } else {
-                        type_all_args(args, st);
-                    }
-                    return st.tys.builtin_named(named);
-                }
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemNotCallable,
+                    callee.span,
+                    "enum type name is not callable; use a variant constructor",
+                ));
                 type_all_args(args, st);
                 return st.tys.error;
             }
             _ => {}
-        }
+        },
+        _ => {}
     }
     // 具名函数：命名实参与默认值补位只走这条路径
     if let Some(def) = st.expr_def.get(callee.id).copied()
@@ -908,13 +935,16 @@ fn check_call_args(
 ) {
     let mut slots: Vec<Option<TyId>> = vec![None; params.len()];
     let mut positional = 0usize;
+    // 命名实参名不存在时已报错：不再级联「missing argument」（一条错误一条诊断）
+    let mut saw_unknown_named = false;
     for arg in args {
         let idx = match arg.name {
             Some(name) => match params.iter().position(|(n, _)| *n == name) {
                 Some(i) => i,
                 None => {
+                    saw_unknown_named = true;
                     st.diags.emit(Diagnostic::error(
-                        DiagCode::SemArityMismatch,
+                        DiagCode::SemUnknownParam,
                         arg.value.span,
                         format!("unknown parameter name `{}`", st.interner.resolve(name)),
                     ));
@@ -954,14 +984,16 @@ fn check_call_args(
             if i < defaults.len() && defaults[i] {
                 slots[i] = Some(params[i].1);
             } else {
-                st.diags.emit(Diagnostic::error(
-                    DiagCode::SemArityMismatch,
-                    span,
-                    format!(
-                        "missing argument for parameter `{}`",
-                        st.interner.resolve(params[i].0)
-                    ),
-                ));
+                if !saw_unknown_named {
+                    st.diags.emit(Diagnostic::error(
+                        DiagCode::SemArityMismatch,
+                        span,
+                        format!(
+                            "missing argument for parameter `{}`",
+                            st.interner.resolve(params[i].0)
+                        ),
+                    ));
+                }
                 slots[i] = Some(st.tys.error);
             }
         }
@@ -970,33 +1002,6 @@ fn check_call_args(
         if !st.tys.assignable(slot.unwrap_or(st.tys.error), params[i].1) {
             mismatch(st, span);
         }
-    }
-}
-
-/// 变体构造实参：仅位置形；逐个定型 + arity / assignable 核查
-fn check_variant_args(args: &[CallArg], tys: &[TyId], span: Span, st: &mut SemState) {
-    if args.len() != tys.len() {
-        st.diags.emit(Diagnostic::error(
-            DiagCode::SemArityMismatch,
-            span,
-            "variant argument count mismatch",
-        ));
-    }
-    if args.iter().any(|a| a.name.is_some()) {
-        unsupported(
-            st,
-            span,
-            "named arguments are not supported for enum variant constructors in semantic v1",
-        );
-    }
-    for (a, t) in args.iter().zip(tys.iter()) {
-        let at = type_expr(&a.value, st, true);
-        if !st.tys.assignable(at, *t) {
-            mismatch(st, a.value.span);
-        }
-    }
-    for a in args.iter().skip(tys.len()) {
-        type_expr(&a.value, st, true);
     }
 }
 
@@ -1181,7 +1186,10 @@ fn refine_pattern_types(pat: &PatWrap, subject_ty: TyId, st: &mut SemState) {
                         _ => None,
                     };
                     if let (Some(pdef), Some(v)) = (parent, res.variant) {
-                        let tys = variant_arg_tys(pdef, v, st);
+                        let tys: Vec<TyId> = variant_arg_tys(pdef, v, st)
+                            .iter()
+                            .map(|(_, t)| *t)
+                            .collect();
                         refine_arg_patterns(args, &tys, pat.span, st);
                     }
                 }
@@ -1214,9 +1222,10 @@ fn refine_pattern_types(pat: &PatWrap, subject_ty: TyId, st: &mut SemState) {
     }
 }
 
-fn variant_arg_tys(enum_def: DefId, variant: usize, st: &mut SemState) -> Vec<TyId> {
+/// 变体形参（名, 类型）：名保留以支持命名实参构造
+fn variant_arg_tys(enum_def: DefId, variant: usize, st: &mut SemState) -> Vec<(Symbol, TyId)> {
     match st.defs.get(enum_def).sig.variants.get(variant) {
-        Some((_, tys)) => tys.clone(),
+        Some((_, args)) => args.clone(),
         None => Vec::new(),
     }
 }
@@ -1248,8 +1257,10 @@ fn def_value_ty(def: DefId, st: &mut SemState) -> TyId {
             st.tys.intern(TyKind::Fn(params, ret))
         }
         DefKind::LocalBinding { .. } | DefKind::Param => st.defs.get(def).sig.ty,
+        // 类型名在值位置出现：类型对象（TypeObject），与「该类型的值」分立——
+        // 仅 type_call 的构造器分支消费它，其余使用点不可指派/不可调用
         DefKind::BuiltinType | DefKind::Struct | DefKind::Enum | DefKind::Class => {
-            st.tys.builtin_named(def)
+            st.tys.intern(TyKind::TypeObject(def))
         }
         DefKind::EnumVariant { parent, .. } => st.tys.builtin_named(parent),
         DefKind::TypeAlias => st.defs.get(def).sig.ty,

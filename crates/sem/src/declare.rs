@@ -221,7 +221,7 @@ fn declare_binding_name(b: &BindingDecl, scope: ScopeId, span: Span, st: &mut Se
     ) {
         match &pat.kind {
             PatKind::Binding { name, .. } => {
-                add_def(
+                let def = add_def(
                     st,
                     scope,
                     *name,
@@ -230,6 +230,8 @@ fn declare_binding_name(b: &BindingDecl, scope: ScopeId, span: Span, st: &mut Se
                         mutable: !immutable,
                     },
                 );
+                // 与局部绑定同契约：check 经 pat_binding_def 精化解构元素类型
+                st.pat_binding_def.set(pat.id, def);
             }
             PatKind::Or(ps)
             | PatKind::Tuple { elements: ps, .. }
@@ -295,16 +297,17 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                     Some(d) => d,
                     None => continue,
                 };
-                let variants: Vec<(Symbol, Vec<TyId>)> = e
+                // 形参名保留：命名实参构造（Shape.Circle(radius = 2.0)）依赖它
+                let variants: Vec<(Symbol, Vec<(Symbol, TyId)>)> = e
                     .variants
                     .iter()
                     .map(|v| {
-                        let tys = v
+                        let args = v
                             .args
                             .iter()
-                            .map(|a| lower_variant_arg(st, root, a, item.span))
+                            .map(|a| (a.name, lower_variant_arg(st, root, a, item.span)))
                             .collect();
-                        (v.name, tys)
+                        (v.name, args)
                     })
                     .collect();
                 st.defs.get_mut(def).sig.variants = variants;

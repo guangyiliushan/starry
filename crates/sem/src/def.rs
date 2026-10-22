@@ -39,7 +39,8 @@ pub struct DefSig {
     pub params: Vec<(Symbol, TyId)>,
     pub ret: TyId,
     pub ty: TyId,
-    pub variants: Vec<(Symbol, Vec<TyId>)>,
+    /// 枚举变体：名 + 形参（名, 类型）——名保留以支持命名实参构造
+    pub variants: Vec<(Symbol, Vec<(Symbol, TyId)>)>,
     pub fields: Vec<(Symbol, TyId)>,
     /// 参数默认值标记（与 params 对齐）
     pub param_defaults: Vec<bool>,

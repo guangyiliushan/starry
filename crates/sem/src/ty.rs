@@ -44,6 +44,9 @@ pub enum TyKind {
     Tuple(Vec<TyId>),
     Range(TyId),
     Fn(Vec<TyId>, TyId),
+    /// 类型对象（类型名在值位置出现）：仅允许作构造器 callee，
+    /// 其余使用点一律诊断（见 semantic-notes「类型名与值分立」）
+    TypeObject(DefId),
     /// 「类型尚不可推定」哨兵（如顶层绑定依赖顺序）：不投毒，使用点照常诊断。
     /// 与 `Error`（真错误、投毒抑制级联）区分——见 semantic-notes。
     Unknown,
@@ -177,12 +180,16 @@ impl TyArena {
         if from == to {
             return true;
         }
+        // 可空目标：Null 与任意 T 均可提升入 Nullable(T)（逐层剥离，变度不变）
+        if let TyKind::Nullable(inner) = self.kind(to) {
+            let inner = *inner;
+            return matches!(self.kind(from), TyKind::Null) || self.assignable(from, inner);
+        }
         match (self.kind(from), self.kind(to)) {
             // Unknown 不投毒：不可指派（使用点应已诊断）
             (TyKind::Unknown, TyKind::Unknown) => from == to,
             (TyKind::Unknown, _) | (_, TyKind::Unknown) => false,
             (TyKind::Error, _) | (_, TyKind::Error) => true,
-            (TyKind::Null, TyKind::Nullable(_)) => true,
             (TyKind::Int(f), TyKind::Int(t)) => int_rank(*f) <= int_rank(*t),
             (TyKind::Int(_), TyKind::Float(_)) => true,
             (TyKind::Float(f), TyKind::Float(t)) => f <= t,
@@ -208,8 +215,13 @@ impl TyArena {
             (_, TyKind::Error) => Some(b),
             (TyKind::Unknown, TyKind::Unknown) => Some(a),
             (TyKind::Unknown, _) | (_, TyKind::Unknown) => None,
-            (TyKind::Null, _) => Some(b),
-            (_, TyKind::Null) => Some(a),
+            (TyKind::Null, TyKind::Nullable(_)) => Some(b),
+            (TyKind::Nullable(_), TyKind::Null) => Some(a),
+            // null ∨ T = T?；Nullable(S) ∨ T = Nullable(S ∨ T)
+            (TyKind::Null, _) => Some(self.nullable(b)),
+            (_, TyKind::Null) => Some(self.nullable(a)),
+            (TyKind::Nullable(x), _) => self.join(*x, b).map(|j| self.nullable(j)),
+            (_, TyKind::Nullable(y)) => self.join(a, *y).map(|j| self.nullable(j)),
             (TyKind::Int(f), TyKind::Int(t)) => {
                 let rank = int_rank(*f).max(int_rank(*t));
                 let kind = match rank {
