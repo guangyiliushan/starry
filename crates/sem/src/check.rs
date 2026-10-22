@@ -26,6 +26,25 @@ pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
             _ => {}
         }
     }
+    // 依赖序单遍推断的收尾：仍为 Unknown 的顶层绑定 = 无法推定，
+    // 钉一条诊断（Unknown 不投毒，使用点也会各自诊断）
+    for item in &ast.items {
+        if let DeclKind::Binding(b) = &item.kind
+            && b.init.is_some()
+            && let PatKind::Binding { name, .. } = &b.pattern.kind
+            && let Some(def) = st.scopes.lookup_local(root, *name)
+            && st.tys.is_unknown(st.defs.get(def).sig.ty)
+        {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemTypeMismatch,
+                b.pattern.span,
+                format!(
+                    "cannot infer the type of `{}` (dependency not resolvable in source order)",
+                    st.interner.resolve(*name)
+                ),
+            ));
+        }
+    }
     #[cfg(debug_assertions)]
     verify::run(ast, st);
 }
@@ -51,8 +70,10 @@ fn check_fun(decl_id: NodeId, f: &ast::syntax::decl::FunDecl, st: &mut SemState)
         Some(FunctionBody::Expr(e)) => Some(type_expr(e, st, true)),
         None => None,
     };
-    // 返回经由 return 语句逐点核查；块体无尾表达式时不与声明返回型比较
-    // （v1 松弛语义，避免 `fun f(): int { return 1 }` 假阳性）
+    // 返回经由 return 语句逐点核查；块体无尾表达式时不比较。
+    // 仅声明了返回型才与尾表达式比较：未声明返回型按 unit 推断，
+    // 尾表达式求值但不核查——`fun main() { helper() }` 是惯用形状，
+    // 不能假阳性；`: unit` 与未声明的差异记入 semantic-notes
     if f.ret.is_some()
         && let Some(body_ty) = tail_ty
         && !st.tys.assignable(body_ty, ret)
@@ -78,7 +99,7 @@ fn check_top_binding(b: &BindingDecl, st: &mut SemState, root: crate::def::Scope
         && let Some(def) = st.scopes.lookup_local(root, *name)
     {
         let ann = st.defs.get(def).sig.ty;
-        if st.tys.is_error(ann) {
+        if st.tys.needs_infer(ann) {
             st.defs.get_mut(def).sig.ty = init_ty;
         } else if !st.tys.assignable(init_ty, ann) {
             mismatch(st, init.span);
@@ -196,6 +217,9 @@ fn type_stmt(s: &StmtWrap, st: &mut SemState) {
                 if !st.tys.assignable(vty, ret) {
                     mismatch(st, v.span);
                 }
+            } else if !st.tys.assignable(st.tys.unit, ret) {
+                // 裸 return 等价返回 unit：非 unit 返回型报错
+                mismatch(st, s.span);
             }
         }
         StmtKind::Defer { body } => {
@@ -233,7 +257,7 @@ fn check_local_binding(b: &BindingDecl, st: &mut SemState) {
         PatKind::Binding { .. } => {
             if let Some(&def) = st.pat_binding_def.get(b.pattern.id) {
                 let ann = st.defs.get(def).sig.ty;
-                if st.tys.is_error(ann) {
+                if st.tys.needs_infer(ann) {
                     st.defs.get_mut(def).sig.ty = init_ty;
                 } else if !st.tys.assignable(init_ty, ann) {
                     mismatch(st, init.span);
@@ -279,7 +303,7 @@ fn refine_bindings(pat: &PatWrap, ty: TyId, st: &mut SemState) {
         PatKind::Binding { .. } => {
             if let Some(&def) = st.pat_binding_def.get(pat.id) {
                 let cur = st.defs.get(def).sig.ty;
-                if st.tys.is_error(cur) {
+                if st.tys.needs_infer(cur) {
                     st.defs.get_mut(def).sig.ty = ty;
                 }
             }
@@ -351,6 +375,21 @@ fn member_field_ty(base_ty: TyId, name: Symbol, safe: bool, span: Span, st: &mut
     }
     let result = match st.tys.kind(ty).clone() {
         TyKind::Named(def, _) => match &st.defs.get(def).kind {
+            // 枚举成员访问 = 变体值（构造器亦可，调用点另行核查实参）：
+            // `E.A` / `Opt.Some` 的类型即所属枚举
+            DefKind::Enum => match member_lookup(st, def, name) {
+                Some(vdef) if matches!(st.defs.get(vdef).kind, DefKind::EnumVariant { .. }) => {
+                    st.tys.builtin_named(def)
+                }
+                _ => {
+                    st.diags.emit(Diagnostic::error(
+                        DiagCode::SemUnknownMember,
+                        span,
+                        format!("unknown variant `{}`", st.interner.resolve(name)),
+                    ));
+                    st.tys.error
+                }
+            },
             DefKind::Struct => {
                 let fields = st.defs.get(def).sig.fields.clone();
                 match fields.iter().find(|(n, _)| *n == name) {
@@ -581,7 +620,7 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
                     None => {
                         mismatch(st, x.span);
                         acc = st.tys.error;
-                        break;
+                        // 不 break：剩余元素仍须定型（coverage 纪律，防 verify 断言）
                     }
                 }
             }
@@ -683,8 +722,18 @@ fn type_binary(
                 st.tys.error
             }
         }
-        Op::EqEq | Op::BangEq | Op::Lt | Op::LtEq | Op::Gt | Op::GtEq => {
+        Op::EqEq | Op::BangEq => {
+            // 等值按可汇合判定（命名/数组/元组结构相等即可比）
             if st.tys.join(l, r).is_some() {
+                st.tys.bool_
+            } else {
+                mismatch(st, span);
+                st.tys.error
+            }
+        }
+        Op::Lt | Op::LtEq | Op::Gt | Op::GtEq => {
+            // 序比较限定可序类型（数值/字符）：string < string、unit < unit 拒绝
+            if st.tys.is_orderable(l) && st.tys.is_orderable(r) {
                 st.tys.bool_
             } else {
                 mismatch(st, span);
@@ -738,7 +787,7 @@ fn type_call(
     span: Span,
     st: &mut SemState,
 ) -> TyId {
-    type_expr(callee, st, true);
+    let callee_ty = type_expr(callee, st, true);
     if !type_args.is_empty() {
         unsupported(
             st,
@@ -746,33 +795,117 @@ fn type_call(
             "generic call instantiation is not supported in semantic v1",
         );
     }
+    // 构造器调用：callee_ty 为 Named(struct)（P(...)）或 Named(enum)
+    // （Opt.Some(...) / E.A(...)——成员访问枚举在 member_field_ty 已给枚举型）
+    if let TyKind::Named(named, _) = st.tys.kind(callee_ty).clone() {
+        match st.defs.get(named).kind.clone() {
+            DefKind::Struct => {
+                let fields = st.defs.get(named).sig.fields.clone();
+                check_call_args(args, &fields, &[], span, st);
+                return st.tys.builtin_named(named);
+            }
+            DefKind::Enum => {
+                if let ExprKind::Member { name, .. } = &callee.kind {
+                    let resolved =
+                        member_lookup(st, named, *name).and_then(|v| match st.defs.get(v).kind {
+                            DefKind::EnumVariant { parent, index } => Some((parent, index)),
+                            _ => None,
+                        });
+                    if let Some((parent, index)) = resolved {
+                        let tys = variant_arg_tys(parent, index, st);
+                        check_variant_args(args, &tys, span, st);
+                    } else {
+                        type_all_args(args, st);
+                    }
+                    return st.tys.builtin_named(named);
+                }
+                type_all_args(args, st);
+                return st.tys.error;
+            }
+            _ => {}
+        }
+    }
+    // 具名函数：命名实参与默认值补位只走这条路径
+    if let Some(def) = st.expr_def.get(callee.id).copied()
+        && matches!(st.defs.get(def).kind, DefKind::Fun)
+    {
+        let params = st.defs.get(def).sig.params.clone();
+        let defaults = st.defs.get(def).sig.param_defaults.clone();
+        let ret = st.defs.get(def).sig.ret;
+        check_call_args(args, &params, &defaults, span, st);
+        return ret;
+    }
+    // 函数值调用（`(int) -> int` 型的形参/绑定作 callee）
+    if let TyKind::Fn(ps, ret) = st.tys.kind(callee_ty).clone() {
+        if args.len() != ps.len() {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemArityMismatch,
+                span,
+                "function value arity mismatch",
+            ));
+        }
+        if args.iter().any(|a| a.name.is_some()) {
+            unsupported(
+                st,
+                span,
+                "named arguments are not supported for function values in semantic v1",
+            );
+        }
+        for (a, p) in args.iter().zip(ps.iter()) {
+            let at = type_expr(&a.value, st, true);
+            if !st.tys.assignable(at, *p) {
+                mismatch(st, a.value.span);
+            }
+        }
+        for a in args.iter().skip(ps.len()) {
+            type_expr(&a.value, st, true);
+        }
+        return ret;
+    }
+    // 有定义但不可调用（val/struct 名等）；函数值情形已在上方拦截
+    if st.expr_def.get(callee.id).is_some() {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemNotCallable,
+            callee.span,
+            "callee is not a function",
+        ));
+        type_all_args(args, st);
+        return st.tys.error;
+    }
+    // 成员调用 = 方法调用（v1 不支持）；构造器情形已在上方拦截
     if matches!(callee.kind, ExprKind::Member { .. }) {
         unsupported(
             st,
             callee.span,
             "method calls are not supported in semantic v1",
         );
-    }
-    let Some(def) = st.expr_def.get(callee.id).copied() else {
-        for a in args {
-            type_expr(&a.value, st, true);
-        }
-        return st.tys.error;
-    };
-    if !matches!(st.defs.get(def).kind, DefKind::Fun) {
-        st.diags.emit(Diagnostic::error(
-            DiagCode::SemNotCallable,
-            callee.span,
-            "callee is not a function",
-        ));
-        for a in args {
-            type_expr(&a.value, st, true);
-        }
+        type_all_args(args, st);
         return st.tys.error;
     }
-    let params = st.defs.get(def).sig.params.clone();
-    let defaults = st.defs.get(def).sig.param_defaults.clone();
-    let ret = st.defs.get(def).sig.ret;
+    st.diags.emit(Diagnostic::error(
+        DiagCode::SemNotCallable,
+        callee.span,
+        "callee is not a function",
+    ));
+    type_all_args(args, st);
+    st.tys.error
+}
+
+fn type_all_args(args: &[CallArg], st: &mut SemState) {
+    for a in args {
+        type_expr(&a.value, st, true);
+    }
+}
+
+/// 实参定型共用槽位机：位置实参按序入槽、命名实参按名入槽、默认值补位、
+/// 逐槽 assignable 核查；每个实参值恰好定型一次（coverage 纪律）
+fn check_call_args(
+    args: &[CallArg],
+    params: &[(Symbol, TyId)],
+    defaults: &[bool],
+    span: Span,
+    st: &mut SemState,
+) {
     let mut slots: Vec<Option<TyId>> = vec![None; params.len()];
     let mut positional = 0usize;
     for arg in args {
@@ -838,7 +971,61 @@ fn type_call(
             mismatch(st, span);
         }
     }
-    ret
+}
+
+/// 变体构造实参：仅位置形；逐个定型 + arity / assignable 核查
+fn check_variant_args(args: &[CallArg], tys: &[TyId], span: Span, st: &mut SemState) {
+    if args.len() != tys.len() {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemArityMismatch,
+            span,
+            "variant argument count mismatch",
+        ));
+    }
+    if args.iter().any(|a| a.name.is_some()) {
+        unsupported(
+            st,
+            span,
+            "named arguments are not supported for enum variant constructors in semantic v1",
+        );
+    }
+    for (a, t) in args.iter().zip(tys.iter()) {
+        let at = type_expr(&a.value, st, true);
+        if !st.tys.assignable(at, *t) {
+            mismatch(st, a.value.span);
+        }
+    }
+    for a in args.iter().skip(tys.len()) {
+        type_expr(&a.value, st, true);
+    }
+}
+
+/// when 覆盖收集：递归 Or 替代（`A | B -> ...` 的每个替代独立计数），
+/// 兼收布尔字面量；构造器/结构体子模式无覆盖贡献
+fn collect_pattern_coverage(
+    p: &PatWrap,
+    st: &SemState,
+    covered: &mut Vec<usize>,
+    covers_true: &mut bool,
+    covers_false: &mut bool,
+) {
+    if let PatKind::Bool(v) = &p.kind {
+        if *v {
+            *covers_true = true;
+        } else {
+            *covers_false = true;
+        }
+    }
+    if let Some(v) = st.pat_res.get(p.id).copied().and_then(|r| r.variant)
+        && !covered.contains(&v)
+    {
+        covered.push(v);
+    }
+    if let PatKind::Or(ps) = &p.kind {
+        for q in ps {
+            collect_pattern_coverage(q, st, covered, covers_true, covers_false);
+        }
+    }
 }
 /// when 定型：主语表达式模式按 assignable 核查；
 /// 穷尽性 v1 保守规则——else 兜底；枚举主语按变体覆盖核查，
@@ -880,18 +1067,13 @@ fn type_when(
                 {
                     refine_pattern_types(p, sty, st);
                 }
-                if let PatKind::Bool(v) = &p.kind {
-                    if *v {
-                        covers_true = true;
-                    } else {
-                        covers_false = true;
-                    }
-                }
-                if let Some(res) = st.pat_res.get(p.id).copied().and_then(|r| r.variant)
-                    && !covered_variants.contains(&res)
-                {
-                    covered_variants.push(res);
-                }
+                collect_pattern_coverage(
+                    p,
+                    st,
+                    &mut covered_variants,
+                    &mut covers_true,
+                    &mut covers_false,
+                );
             }
             WhenPattern::Else => has_else = true,
         }

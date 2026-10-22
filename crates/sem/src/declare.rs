@@ -37,7 +37,7 @@ fn register_builtins(st: &mut SemState) {
             name: sym,
             scope: root,
             span: zero,
-            sig: DefSig::new(st.tys.unit, st.tys.error),
+            sig: DefSig::new(st.tys.unit, st.tys.unknown),
             resolving: false,
             alias_of: None,
             member_scope: None,
@@ -55,7 +55,7 @@ fn add_def(st: &mut SemState, scope: ScopeId, name: Symbol, span: Span, kind: De
         name,
         scope,
         span,
-        sig: DefSig::new(st.tys.unit, st.tys.error),
+        sig: DefSig::new(st.tys.unit, st.tys.unknown),
         resolving: false,
         alias_of: None,
         member_scope: None,
@@ -256,10 +256,21 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                     Some(d) => d,
                     None => continue,
                 };
-                let params = lower_params(st, root, &f.params, item.span);
-                let ret = match &f.ret {
-                    Some(t) => lower_ty(st, root, t),
-                    None => st.tys.unit,
+                // 泛型 fun 不 lower（T 未定义会级联 SemUndefinedType）；
+                // 参数名保留维持 arity，类型走投毒 Error
+                let (params, ret) = if f.type_params.is_empty() {
+                    (
+                        lower_params(st, root, &f.params, item.span),
+                        match &f.ret {
+                            Some(t) => lower_ty(st, root, t),
+                            None => st.tys.unit,
+                        },
+                    )
+                } else {
+                    (
+                        f.params.iter().map(|p| (p.name, st.tys.error)).collect(),
+                        st.tys.error,
+                    )
                 };
                 let defaults: Vec<bool> = f.params.iter().map(|p| p.default.is_some()).collect();
                 let sig = &mut st.defs.get_mut(def).sig;

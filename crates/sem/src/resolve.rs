@@ -49,7 +49,7 @@ fn resolve_fun(decl_id: NodeId, f: &FunDecl, st: &mut SemState) {
             scope: pscope,
             span: zero_span(),
             sig: {
-                let mut s = DefSig::new(st.tys.unit, st.tys.error);
+                let mut s = DefSig::new(st.tys.unit, st.tys.unknown);
                 s.ty = ty;
                 s
             },
@@ -57,7 +57,15 @@ fn resolve_fun(decl_id: NodeId, f: &FunDecl, st: &mut SemState) {
             alias_of: None,
             member_scope: None,
         });
-        st.scopes.insert(pscope, name, def);
+        if let Some(old) = st.scopes.insert(pscope, name, def) {
+            // 保留首个参数定义，重复项报错（与 add_def 同纪律）
+            st.scopes.insert(pscope, name, old);
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemDuplicateDef,
+                zero_span(),
+                format!("duplicate parameter `{}`", st.interner.resolve(name)),
+            ));
+        }
     }
     st.funs.push(FunFrame {
         node: decl_id,
@@ -106,44 +114,33 @@ fn resolve_stmt(s: &StmtWrap, st: &mut SemState, scope: ScopeId) {
         } => {
             resolve_expr(iterable, st, scope);
             let lscope = st.scopes.new_scope(Some(scope));
-            declare_local_binding(pattern, false, lscope, st);
-            if let Some(l) = label {
-                st.labels.push(LabelFrame {
-                    label: Some(*l),
-                    node: s.id,
-                });
-                resolve_block(body, st, lscope);
-                st.labels.pop();
-            } else {
-                resolve_block(body, st, lscope);
-            }
+            declare_local_binding(pattern, true, lscope, st);
+            // 无标签帧也压栈：无标签 break/continue 取栈顶即最近循环
+            st.labels.push(LabelFrame {
+                label: *label,
+                node: s.id,
+            });
+            resolve_block(body, st, lscope);
+            st.labels.pop();
         }
         StmtKind::While { label, cond, body } => {
             resolve_condition(cond, st, scope);
             let lscope = st.scopes.new_scope(Some(scope));
-            if let Some(l) = label {
-                st.labels.push(LabelFrame {
-                    label: Some(*l),
-                    node: s.id,
-                });
-                resolve_block(body, st, lscope);
-                st.labels.pop();
-            } else {
-                resolve_block(body, st, lscope);
-            }
+            st.labels.push(LabelFrame {
+                label: *label,
+                node: s.id,
+            });
+            resolve_block(body, st, lscope);
+            st.labels.pop();
         }
         StmtKind::Loop { label, body } => {
             let lscope = st.scopes.new_scope(Some(scope));
-            if let Some(l) = label {
-                st.labels.push(LabelFrame {
-                    label: Some(*l),
-                    node: s.id,
-                });
-                resolve_block(body, st, lscope);
-                st.labels.pop();
-            } else {
-                resolve_block(body, st, lscope);
-            }
+            st.labels.push(LabelFrame {
+                label: *label,
+                node: s.id,
+            });
+            resolve_block(body, st, lscope);
+            st.labels.pop();
         }
         StmtKind::Break { label, value } => {
             if let Some(v) = value {
@@ -232,7 +229,7 @@ fn resolve_condition(cond: &Condition, st: &mut SemState, scope: ScopeId) {
         Condition::Val { pattern, expr } => {
             resolve_expr(expr, st, scope);
             let pscope = st.scopes.new_scope(Some(scope));
-            declare_local_binding(pattern, false, pscope, st);
+            declare_local_binding(pattern, true, pscope, st);
         }
     }
 }
@@ -325,7 +322,7 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
             if let Condition::Val { pattern, expr } = &**cond {
                 resolve_expr(expr, st, scope);
                 let pscope = st.scopes.new_scope(Some(scope));
-                declare_local_binding(pattern, false, pscope, st);
+                declare_local_binding(pattern, true, pscope, st);
                 resolve_block(then_block, st, pscope);
                 if let Some(eb) = else_block {
                     resolve_block(eb, st, scope);
@@ -399,7 +396,7 @@ pub(crate) fn declare_local_binding(
                     name: *name,
                     scope,
                     span: pat.span,
-                    sig: DefSig::new(st.tys.unit, st.tys.error),
+                    sig: DefSig::new(st.tys.unit, st.tys.unknown),
                     resolving: false,
                     alias_of: None,
                     member_scope: None,

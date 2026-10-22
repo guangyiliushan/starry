@@ -44,6 +44,9 @@ pub enum TyKind {
     Tuple(Vec<TyId>),
     Range(TyId),
     Fn(Vec<TyId>, TyId),
+    /// 「类型尚不可推定」哨兵（如顶层绑定依赖顺序）：不投毒，使用点照常诊断。
+    /// 与 `Error`（真错误、投毒抑制级联）区分——见 semantic-notes。
+    Unknown,
     /// 投毒类型
     Error,
 }
@@ -59,6 +62,7 @@ pub struct TyArena {
     pub string: TyId,
     pub char_: TyId,
     pub null: TyId,
+    pub unknown: TyId,
     pub error: TyId,
     pub default_int: TyId,
     pub default_float: TyId,
@@ -92,6 +96,7 @@ impl TyArena {
             string: TyId(0),
             char_: TyId(0),
             null: TyId(0),
+            unknown: TyId(0),
             error: TyId(0),
             default_int: TyId(0),
             default_float: TyId(0),
@@ -101,13 +106,15 @@ impl TyArena {
         arena.string = arena.intern(TyKind::String);
         arena.char_ = arena.intern(TyKind::Char);
         arena.null = arena.intern(TyKind::Null);
+        arena.unknown = arena.intern(TyKind::Unknown);
         arena.error = arena.intern(TyKind::Error);
         arena.default_int = arena.intern(TyKind::Int(IntKind::I32));
         arena.default_float = arena.intern(TyKind::Float(FloatKind::F64));
         arena
     }
 
-    pub(crate) fn intern(&mut self, kind: TyKind) -> TyId {
+    /// 结构去重入池；返回的 TyId 跨 pass 稳定（IR 阶段构造类型用同一入口）
+    pub fn intern(&mut self, kind: TyKind) -> TyId {
         if let Some(&id) = self.dedup.get(&kind) {
             return id;
         }
@@ -139,6 +146,24 @@ impl TyArena {
         matches!(self.kind(id), TyKind::Error)
     }
 
+    pub fn is_unknown(&self, id: TyId) -> bool {
+        matches!(self.kind(id), TyKind::Unknown)
+    }
+
+    /// 「尚未推定」哨兵判定：绑定注解槽的默认值既可能是 Unknown（未推定）
+    /// 也可能是 Error（推定失败）；两者都需要被推断值覆盖
+    pub fn needs_infer(&self, id: TyId) -> bool {
+        self.is_error(id) || self.is_unknown(id)
+    }
+
+    /// 可序比较（< 族）限定：数值与字符；等值比较仍按 join 判定
+    pub fn is_orderable(&self, id: TyId) -> bool {
+        matches!(
+            self.kind(id),
+            TyKind::Int(_) | TyKind::Float(_) | TyKind::Char
+        )
+    }
+
     fn is_integral_kind(&self, id: TyId) -> bool {
         matches!(self.kind(id), TyKind::Int(_))
     }
@@ -153,6 +178,9 @@ impl TyArena {
             return true;
         }
         match (self.kind(from), self.kind(to)) {
+            // Unknown 不投毒：不可指派（使用点应已诊断）
+            (TyKind::Unknown, TyKind::Unknown) => from == to,
+            (TyKind::Unknown, _) | (_, TyKind::Unknown) => false,
             (TyKind::Error, _) | (_, TyKind::Error) => true,
             (TyKind::Null, TyKind::Nullable(_)) => true,
             (TyKind::Int(f), TyKind::Int(t)) => int_rank(*f) <= int_rank(*t),
@@ -178,6 +206,8 @@ impl TyArena {
         match (&ka, &kb) {
             (TyKind::Error, _) => Some(a),
             (_, TyKind::Error) => Some(b),
+            (TyKind::Unknown, TyKind::Unknown) => Some(a),
+            (TyKind::Unknown, _) | (_, TyKind::Unknown) => None,
             (TyKind::Null, _) => Some(b),
             (_, TyKind::Null) => Some(a),
             (TyKind::Int(f), TyKind::Int(t)) => {

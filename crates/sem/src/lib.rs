@@ -59,6 +59,11 @@ impl<T: Clone> SideTable<T> {
     }
 
     pub fn set(&mut self, id: NodeId, value: T) {
+        // node_count 记账漂移必须是可观测的不变量，而非静默丢语义
+        debug_assert!(
+            (id.0 as usize) < self.0.len(),
+            "side-table set out of range: node id beyond node_count"
+        );
         if let Some(slot) = self.0.get_mut(id.0 as usize) {
             *slot = Some(value);
         }

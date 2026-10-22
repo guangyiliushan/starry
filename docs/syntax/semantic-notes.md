@@ -46,9 +46,31 @@ Error 恒真，出错子树不再级联诊断。parser 诊断原样保留在前�
   `int → float`；`float` 按 f32/f64；`Null → Nullable(_)`；
   命名类型/数组/元组/区间按结构相等。Kotlin 风格整型加宽的教学化简。
 - `when` 结果型 = 分支体 join；`if` 双分支 join。
-- `fun` 块体**无尾表达式时不与声明返回型比较**（返回经由 return
-  语句逐点核查）；声明返回型 + 表达式体（`=` 体）才比较。v1 松弛语义，
-  防止 `fun f(): int { return 1 }` 假阳性。
+- 比较运算（`<` 族）限定可序类型（数值/字符）；等值按可汇合判定。
+- `fun` 返回核查：**仅声明了返回型**才与块体尾表达式比较（表达式体
+  `= expr` 恒比较）。未声明返回型按 unit 推断：尾表达式求值但不核查——
+  `fun main() { helper() }` 是惯用形状，不得假阳性；裸 `return` 等价
+  返回 unit，非 unit 返回型报错。块体无尾表达式时不比较（返回经由
+  return 语句逐点核查）。
+
+## Unknown 哨兵（与 Error 投毒分立）
+
+`TyKind::Unknown` = 「类型尚不可推定」（顶层绑定依赖序单遍推断推不出，
+如 `val a = b` 先于 `val b = 1` 出现）。与 `Error`（真错误、投毒抑制
+级联）相反：`assignable(Unknown, _)` 恒 false、不投毒——使用点照常诊断
+（`if a {}` 报 `SemConditionNotBool`），check 收尾再钉一条「无法推定」。
+绑定注解槽默认值为 Unknown（`DefSig` 默认），`needs_infer` = Error∨Unknown。
+
+## 值构造与调用
+
+- 枚举变体值：`E.A` / `Opt.Some`（成员访问）的类型即所属枚举
+  （`member_field_ty` 的 Enum 臂）；未知变体报 `SemUnknownMember`。
+- 构造器调用：callee 定型为 `Named(struct)` → 按 `sig.fields` 走槽位机
+  （位置/命名实参皆可）；`Named(enum)` 的 `E.A(x)` / `Opt.Some(x)` →
+  变体实参**仅位置形**（裸名槽参数无可信名），命名实参报
+  `SemUnsupportedConstruct`。
+- 函数值调用：callee 定型为 `TyKind::Fn`（形参/绑定持有的函数值），
+  仅位置实参、无默认值补位；命名实参与默认值是具名函数的专有路径。
 
 ## when 穷尽性（v1 保守规则）
 
@@ -69,22 +91,38 @@ when 分支顶层（`arrow_types == false`）把裸名解析为单段 Constructo
 ## 可变性
 
 `DefKind::LocalBinding.mutable` = 是否可重新赋值，由 `val`/`var`
-决定（`var → mutable`）。模式里的 `mut`（`val mut x`）是值可变性标记，
-不授予重新赋值权（sem v1 不区分内部可变性）。
+决定（`var → mutable`）；for 循环变量与 `val` 条件绑定（`if/while val`）
+一律不可变。模式里的 `mut`（`val mut x`）是值可变性标记，
+不授予重新赋值权（sem v1 不区分内部可变性）。结构体字段可变性不核查
+（v1 松弛，见跳过清单）。
 
 ## moveck（M3.5 近似）
 
-逐 fun 体 / 顶层绑定初始化 walk。`Own` 绑定（类型 `Named(Own, _)`）
-的首次值使用即移动（`Ident` 且 def 为 LocalBinding）；`=` 赋值重置；
-分支/循环取两态**并集**（保守：宁过度拒绝，不漏报）。lambda/spawn/macro
-内部 resolve 期即未解析，天然跳过。
+逐 fun 体 / 顶层绑定初始化 walk。`Own` 绑定与 **Own 形参**（类型
+`Named(Own, _)`）的首次值使用即移动（`Ident` 且 def 为
+LocalBinding/Param）；`=` 赋值重置；分支/循环取两态**并集**
+（保守：宁过度拒绝，不漏报）。lambda/spawn/macro 内部 resolve 期即
+未解析，天然跳过。
 
 ## v1 跳过清单（遇即 `SemUnsupportedConstruct`）
 
-泛型（fun 类型形参/调用实例化）、方法调用（成员 callee）、impl、
+泛型（fun 类型形参/调用实例化；签名不 lower，单一
+`SemUnsupportedConstruct` 不级联）、方法调用（成员 callee）、impl、
 actor、provide、union/dyn/Self 类型、lambda 定型、spawn 内部、
 宏展开（独立前置 pass，规格待定；调用点报 `SemMacroExpansion`）。
 lambda/spawn 内部整体不解析不定型。
+
+以下「声称支持但 v1 不核查」的松弛项也已记录在案：
+
+- 明确赋值分析（`val x: int; return x` 不报未初始化）
+- 结构体字段可变性（`p.x = 1` 不核查 mutable；class 字段规则待定）
+- `loop` 的 break 值定型（break_values 收集后未汇入循环型；
+  For/While 的 break 值同样不接）
+- import 存在性核查（`import a.b.*` 空转不查目标）
+- 间接类型别名循环（`A→B→A` 惰性 lower，仅使用时报告；
+  直接循环已报 `SemTypeCycle`）
+- 直接自引用 struct（`struct N { next: N }` 接受，无限大小留给 codegen）
+- 内建类型名大小写敏感（`String` ≠ `string`，样例需随语法修订）
 
 ## 诊断码
 

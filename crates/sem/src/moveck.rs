@@ -1,7 +1,7 @@
 //! Pass 4：moveck —— Own 值的最小线性移动检查（M3.5）
 //!
 //! 近似规则（grill 已批）：逐 fun 体 / 顶层绑定初始化 walk；
-//! Own 绑定的首次值使用即移动（`ExprKind::Ident` 且 def 为 LocalBinding、
+//! Own 绑定的首次值使用即移动（`ExprKind::Ident` 且 def 为 LocalBinding/Param、
 //! 类型为 `Named(Own, _)`）；赋值重置；分支/循环取两态并集
 //! （过度拒绝可接受，漏报不可——见 semantic-notes）。
 //! lambda/spawn/macro 内部 resolve 期即未解析，此处天然跳过。
@@ -52,7 +52,10 @@ fn is_own(def: DefId, st: &SemState) -> bool {
 /// 值使用判定：Own 绑定的 Ident 出现即移动（赋值目标由 stmt 层特判，不走此处）
 fn use_ident(e: &ExprWrap, st: &mut SemState, moved: &mut BTreeSet<DefId>) {
     if let Some(def) = st.expr_def.get(e.id).copied()
-        && matches!(st.defs.get(def).kind, DefKind::LocalBinding { .. })
+        && matches!(
+            st.defs.get(def).kind,
+            DefKind::LocalBinding { .. } | DefKind::Param
+        )
         && is_own(def, st)
         && !moved.insert(def)
     {
@@ -81,7 +84,10 @@ fn stmt(s: &StmtWrap, st: &mut SemState, moved: &mut BTreeSet<DefId>) {
             if *op == ast::token::OperatorKind::Eq
                 && let ExprKind::Ident(_) = &target.kind
                 && let Some(def) = st.expr_def.get(target.id).copied()
-                && matches!(st.defs.get(def).kind, DefKind::LocalBinding { .. })
+                && matches!(
+                    st.defs.get(def).kind,
+                    DefKind::LocalBinding { .. } | DefKind::Param
+                )
             {
                 moved.remove(&def);
             }
