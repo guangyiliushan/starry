@@ -272,7 +272,14 @@ BitOrExpr := BitXorExpr { "|" BitXorExpr } ;
 BitXorExpr := BitAndExpr { "^" BitAndExpr } ;
 BitAndExpr := EqualityExpr { "&" EqualityExpr } ;
 EqualityExpr := RelationalExpr { ( "==" | "!=" ) RelationalExpr } ;
-RelationalExpr := RangeExpr { ( "<" | ">" | "<=" | ">=" | "is" | "!is" | "in" | "!in" ) RangeExpr } ;
+RelationalExpr := RangeExpr { ( "<" | ">" | "<=" | ">=" | "in" | "!in" ) RangeExpr
+                | ( "is" | "!is" ) IsOperand } ;
+(* `is` 的操作数是模式，但结构体尾被抑制：操作数后必接强制语句块，
+   `{` 归块不归 StructPattern（决议见 parser-notes）。因此 IsOperand
+   列出除 StructPattern 外的全部 PrimaryPattern 选择。 *)
+IsOperand := WildcardPattern | BindingPattern | LiteralPattern | RangePattern
+           | TuplePattern | ArrayPattern | ConstructorPattern ;
+
 RangeExpr := ShiftExpr [ ( ".." | "..=" ) ShiftExpr ] ;
 ShiftExpr := AddExpr { ( "<<" | ">>" ) AddExpr } ;
 AddExpr := MultiplicativeExpr { ( "+" | "-" ) MultiplicativeExpr } ;

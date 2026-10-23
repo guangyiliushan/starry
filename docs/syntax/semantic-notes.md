@@ -147,7 +147,7 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
 - 间接类型别名循环（`A→B→A` 惰性 lower，仅使用时报告；
   直接循环已报 `SemTypeCycle`）
 - 直接自引用 struct（`struct N { next: N }` 接受，无限大小留给 codegen）
-- 内建类型名大小写敏感（`String` ≠ `string`，样例需随语法修订）
+- `as`/`as?`/`as!` 不核查可转换性（`"s" as int` 亦 clean——显式转换的`n  合法对集合未定义，留给类型设计；v1 全部接受、照目标类型定型）。`n- 内建类型名大小写敏感（`String` ≠ `string`，样例需随语法修订）
 
 ## 诊断码
 

@@ -65,7 +65,7 @@
 | 12 | UnitType `()` | `TypeKind::Unit` | — | `(` `)` | ✓ 变体原先从未构造 |
 | 13 | `Self` 类型 | `TypeKind::SelfType` | — | `Self` ∈ hard | ✓ 变体原先从未构造 |
 | 14 | `Self` 表达式 [ CallSuffix ] | `ExprKind::Ident("Self")` + Call | args | `Self` ∈ hard | ✓ postfix 循环接住 call suffix |
-| 15 | `!is` / `!in` 对称 | `ExprKind::Is { negated }` / `In { negated }` | lhs, pattern | `is` `!is` `in` `!in` | ✓ |
+| 15 | `!is` / `!in` 对称 | `ExprKind::Is { negated, pattern }` / `In { negated, rhs }` | lhs+pattern（is，rhs=IsOperand 模式）/ lhs+rhs（in，rhs=RangeExpr 集合） | `is` `!is` `in` `!in` | ✓ IsOperand 无结构体尾 |
 | 16 | TuplePatternElement / ArrayPatternElement 含 `..` | `PatKind::Tuple { elements, rest }` / `Array { elements, rest }` | elements | `..` ≤ 1 次，任意位置 | ✓ `DuplicateRestPattern` |
 | 17 | WhenPattern 顶层标注 = NoArrowType | `PatKind::Binding.ty` | ty | `->` 分支箭头不吞 | ✓ 嵌套标注仍为 Type |
 | 18 | ImplDecl TypeParams? | `ImplDecl.type_params` | type_params, type_ref, trait_ref | `<` `>` | ✓ |
