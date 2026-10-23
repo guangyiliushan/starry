@@ -174,11 +174,12 @@ impl<'r, 'a> Ctx<'r, 'a> {
     // ---- 诊断与查询 ----
 
     pub(crate) fn diag(&mut self, span: Span, message: impl Into<String>) {
-        self.diags.push(Diagnostic::error(
-            DiagCode::IrcUnsupportedLowering,
-            span,
-            message,
-        ));
+        self.diag_code(DiagCode::IrcUnsupportedLowering, span, message);
+    }
+
+    /// 任意稳定码的诊断（如字面量值域的 IntegerOutOfRange、InvalidEscape）
+    pub(crate) fn diag_code(&mut self, code: DiagCode, span: Span, message: impl Into<String>) {
+        self.diags.push(Diagnostic::error(code, span, message));
     }
 
     pub(crate) fn expr_ty(&self, e: &ast::syntax::expr::ExprWrap) -> TyId {
@@ -359,11 +360,13 @@ impl<'r, 'a> Ctx<'r, 'a> {
             );
             return;
         };
-        let target = self
-            .sem
-            .pat_binding_def
-            .get(b.pattern.id)
-            .map(|d| self.sem.defs.get(*d).sig.ty);
+        let target = match self.sem.pat_binding_def.get(b.pattern.id) {
+            Some(d) => Some(self.sem.defs.get(*d).sig.ty),
+            None => {
+                self.diag(b.pattern.span, "pat_binding_def 缺失（sem 契约破缺）");
+                None
+            }
+        };
         let Some(init) = &b.init else {
             // 无初始化（sem v1 不做明确赋值核查）：slot，读取 = 未定义值
             let slot = self.temp();

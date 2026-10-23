@@ -3,7 +3,7 @@
 //! （操作数类型均匀不变量，opt-notes）。
 
 use ast::syntax::expr::{CastKind, ExprKind, ExprWrap};
-use ast::syntax::node::Span;
+use ast::syntax::node::{DiagCode, Span};
 use ast::token::{LiteralKind, OperatorKind};
 use sem::{DefKind, TyId, TyKind};
 
@@ -130,14 +130,7 @@ fn ident(ctx: &mut Ctx, name: ast::interner::Symbol, span: Span) -> Operand {
 fn literal(ctx: &mut Ctx, kind: LiteralKind, span: Span) -> Operand {
     let text = span.slice(ctx.source);
     match kind {
-        LiteralKind::Integer => {
-            // sem IntegerOutOfRange 门禁保证 i128 可解析；下划线分隔符剥除
-            let v: i128 = text
-                .replace('_', "")
-                .parse()
-                .expect("sem 门禁后的整数字面量必可解析");
-            Operand::Const(Const::Int(v))
-        }
+        LiteralKind::Integer => Operand::Const(int_literal(ctx, text, span)),
         LiteralKind::Float => {
             let v: f64 = text
                 .replace('_', "")
@@ -150,14 +143,15 @@ fn literal(ctx: &mut Ctx, kind: LiteralKind, span: Span) -> Operand {
                 .strip_prefix('"')
                 .and_then(|s| s.strip_suffix('"'))
                 .expect("lexer 保证引号配对");
-            Operand::Const(Const::Str(ctx.intern(&unescape(inner))))
+            let decoded = unescape(ctx, inner, span);
+            Operand::Const(Const::Str(ctx.intern(&decoded)))
         }
         LiteralKind::Char => {
             let inner = text
                 .strip_prefix('\'')
                 .and_then(|s| s.strip_suffix('\''))
                 .expect("lexer 保证引号配对");
-            let unescaped = unescape(inner);
+            let unescaped = unescape(ctx, inner, span);
             // char 在 LLVM 侧为 i32（ty_name）；取第一个标量值
             let c = unescaped.chars().next().unwrap_or('\0');
             Operand::Const(Const::Int(c as i128))
@@ -165,8 +159,38 @@ fn literal(ctx: &mut Ctx, kind: LiteralKind, span: Span) -> Operand {
     }
 }
 
-/// 常见转义序列解码；未知转义保留原样（lexer 校验层负责报错）。
-fn unescape(s: &str) -> String {
+/// 整数字面量取值：词法规则含 0x/0o/0b 前缀（`lexer.rs` 规则表），
+/// 且全仓无任何普通字面量的值域核查（IntegerOutOfRange 只覆盖数组
+/// repeat 计数）——故解析与值域诊断都在本层：越界 i128 发
+/// `IntegerOutOfRange` 并回退 0（诊断后置信下游不启动）。
+fn int_literal(ctx: &mut Ctx, text: &str, span: Span) -> Const {
+    let cleaned: String = text.replace('_', "");
+    let (digits, radix) = match cleaned.as_str() {
+        s if s.len() > 2 && s[..2].eq_ignore_ascii_case("0x") => (&s[2..], 16),
+        s if s.len() > 2 && s[..2].eq_ignore_ascii_case("0o") => (&s[2..], 8),
+        s if s.len() > 2 && s[..2].eq_ignore_ascii_case("0b") => (&s[2..], 2),
+        s => (s, 10),
+    };
+    // 词法字符类保证 digits 合法（char 规则的 hex 位/数字位），
+    // from_str_radix 只可能溢出——无 panic 路径
+    match i128::from_str_radix(digits, radix) {
+        Ok(v) => Const::Int(v),
+        Err(_) => {
+            ctx.diag_code(
+                DiagCode::IntegerOutOfRange,
+                span,
+                "integer literal out of range",
+            );
+            Const::Int(0)
+        }
+    }
+}
+
+/// 转义序列解码，与 `parser::decode_string_token` 的接受集对齐：
+/// `\n \t \r \0 \\ \" \'` 与 `\u{XXXXXX}`。未知转义保留原样——
+/// 表达式字符串的词法校验是宽容的（`\\[^\r\n]` 任意字符），错误
+/// 形态只可能来自 `\u{...}`，由本层发 `InvalidEscape`。
+fn unescape(ctx: &mut Ctx, s: &str, span: Span) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -182,6 +206,32 @@ fn unescape(s: &str) -> String {
             Some('\\') => out.push('\\'),
             Some('"') => out.push('"'),
             Some('\'') => out.push('\''),
+            Some('u') => {
+                // \u{XXXXXX}：词法对 char 字面量保证良构；字符串侧任意
+                let mut hex = String::new();
+                let mut closed = chars.next() == Some('{');
+                if closed {
+                    closed = false;
+                    for c in chars.by_ref() {
+                        if c == '}' {
+                            closed = true;
+                            break;
+                        }
+                        hex.push(c);
+                    }
+                }
+                match if closed {
+                    u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+                } else {
+                    None
+                } {
+                    Some(decoded) => out.push(decoded),
+                    None => {
+                        ctx.diag_code(DiagCode::InvalidEscape, span, "invalid unicode escape");
+                        out.push('\u{FFFD}');
+                    }
+                }
+            }
             Some(other) => {
                 out.push('\\');
                 out.push(other);

@@ -150,8 +150,12 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   直接循环已报 `SemTypeCycle`）
 - 直接自引用 struct（`struct N { next: N }` 接受，无限大小留给 codegen）
 - `as`/`as?`/`as!` 不核查可转换性（`"s" as int` 亦 clean——显式转换的`n  合法对集合未定义，留给类型设计；v1 全部接受、照目标类型定型）。`n- 内建类型名大小写敏感（`String` ≠ `string`，样例需随语法修订）
+- 整数字面量的值域与默认 `i32` 型不核查（`return 0xFFFFFFFFFF` 型标
+  i32、值超界；值解码与 i128 值域诊断在 irc 层，超大值发
+  `IntegerOutOfRange`）——字面量值的类型化核查归 sem 的未来条款
 
 ## 诊断码
 
 全部 `Sem*` 前缀，定义在 `crates/ast/src/syntax/node.rs::DiagCode`，
-19 个（SemUndefinedName … SemUnknownMember）。解析器码不受影响。
+19 个（SemUndefinedName … SemUnknownMember）；另有 `Irc*` 2 个属 irc
+阶段（码表同址，见 opt-notes）。解析器码不受影响。

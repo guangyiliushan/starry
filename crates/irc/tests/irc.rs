@@ -79,6 +79,43 @@ fn if_expression_uses_result_slot() {
 }
 
 #[test]
+fn hex_and_radix_literals() {
+    assert_tac(
+        "fun f(): int {\n    return 0x1F\n}",
+        "fun f() -> i64:\n  b0:\n    ret 31 : i64\n",
+    );
+    assert_tac(
+        "fun f(): int {\n    return 0b101\n}",
+        "fun f() -> i64:\n  b0:\n    ret 5 : i64\n",
+    );
+}
+
+#[test]
+fn overflowing_integer_literal_reports() {
+    let (_, codes) =
+        dump("fun f(): int {\n    return 999999999999999999999999999999999999999999\n}");
+    assert!(codes.contains(&DiagCode::IntegerOutOfRange), "{codes:?}");
+}
+
+#[test]
+fn unicode_escapes_decode() {
+    assert_tac(
+        "fun f(): int {\n    val c = '\u{41}'\n    return 0\n}",
+        "fun f() -> i64:\n  b0:\n    %t0 = copy 65 : i32\n    ret 0 : i64\n",
+    );
+    assert_tac(
+        "fun f(): string {\n    return \"A\u{42}C\"\n}",
+        "fun f() -> str:\n  b0:\n    ret \"ABC\" : str\n",
+    );
+}
+
+#[test]
+fn invalid_unicode_escape_reports() {
+    let (_, codes) = dump("fun f(): string {\n    return \"\\u{ZZ}\"\n}");
+    assert!(codes.contains(&DiagCode::InvalidEscape), "{codes:?}");
+}
+
+#[test]
 fn sem_error_gates_lowering() {
     let (text, codes) = dump("fun f(): int {\n    return nosuch\n}");
     assert!(codes.contains(&DiagCode::SemUndefinedName));
