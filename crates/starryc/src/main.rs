@@ -1,9 +1,12 @@
 //! starryc — Starry 编译器入口
 //!
-//! 当前提供 regex → NFA 管道的两个子命令：
+//! 当前提供四个子命令：
 //! - `starryc match <regex> <input>`：打印最长匹配长度
 //!   （exit 0 匹配 / exit 1 无匹配 / exit 2 用法错误）
 //! - `starryc dump-nfa <regex>`：打印 NFA 状态与边
+//! - `starryc tokenize <source>`：词法 token 流
+//! - `starryc check <file>`：parse → sem 全链诊断
+//!   （exit 0 干净 / exit 1 有诊断，逐条 stderr `path:start..end: code: msg`）
 
 use std::process::ExitCode;
 
@@ -31,13 +34,14 @@ fn main() -> ExitCode {
         [cmd, pattern, input] if cmd == "match" => cmd_match(pattern, input),
         [cmd, pattern] if cmd == "dump-nfa" => cmd_dump_nfa(pattern),
         [cmd, source] if cmd == "tokenize" => cmd_tokenize(source),
+        [cmd, path] if cmd == "check" => cmd_check(path),
         _ => usage(),
     }
 }
 
 fn usage() -> ExitCode {
     eprintln!(
-        "用法: starryc match <regex> <input> | starryc dump-nfa <regex> | starryc tokenize <source>"
+        "用法: starryc match <regex> <input> | starryc dump-nfa <regex> | starryc tokenize <source> | starryc check <file>"
     );
     ExitCode::from(2)
 }
@@ -120,4 +124,34 @@ fn cmd_tokenize(source: &str) -> ExitCode {
         );
     }
     ExitCode::SUCCESS
+}
+
+/// parse → sem 全链：诊断走 stderr（`path:start..end: code: message`），
+/// 有诊断 exit 1，干净 exit 0；机器层失败（读文件/资源）单列
+fn cmd_check(path: &str) -> ExitCode {
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(e) => {
+            eprintln!("starryc: 无法读取 {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let parsed = match parser::parse_source(&source) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("starryc: {path}: 解析失败（机器层）: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let output = sem::analyze(parsed);
+    if output.diagnostics.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+    for d in &output.diagnostics {
+        eprintln!(
+            "{path}:{}..{}: {:?}: {}",
+            d.span.start, d.span.end, d.code, d.message
+        );
+    }
+    ExitCode::FAILURE
 }

@@ -7,3 +7,5 @@ license = "Apache-2.0"
 [dependencies]
 ast = { path = "../ast" }
 lex = { path = "../lex" }
+parser = { path = "../parser" }
+sem = { path = "../sem" }
