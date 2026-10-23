@@ -24,7 +24,9 @@ moveck 最后跑（需要完整 expr_def）。
 语义数据零内嵌 AST。名字 → 类型/定义的全部结果走 `SideTable`：
 `NodeId` 索引的稠密 `Vec<Option<T>>`，容量 = `node_count`，O(1)，
 越界返回 `None`（受控，不 panic）。公开侧表：`expr_ty`、`expr_def`、
-`pat_res`、`flow_res`。IR 生成阶段以 `SemanticOutput` 为输入契约。
+`pat_res`、`flow_res`、`pat_binding_def`（绑定模式 → LocalBinding
+DefId，irc 按 DefId 取 sig.ty/可变性）。IR 生成阶段以
+`SemanticOutput` 为输入契约。
 
 - `TyArena`：结构去重（相等类型只存一份）；`TyId` Copy，跨 pass 稳定。
 - `DefArena` / `ScopeArena`：`DefId` / `ScopeId` 索引；作用域符号表

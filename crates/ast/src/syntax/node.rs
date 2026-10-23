@@ -171,6 +171,11 @@ pub enum DiagCode {
     SemConditionNotBool,
     /// 未知成员（字段/构造器）
     SemUnknownMember,
+    // ---- intermediate code generation（crates/irc 命名空间）----
+    /// sem 已接受但 irc 当前里程碑尚未 lower 的构造（M1 边界）
+    IrcUnsupportedLowering,
+    /// 枚举变体数超过槽位布局 tag 宽度（>255）
+    IrcTooManyVariants,
 }
 
 /// 最小诊断

@@ -48,7 +48,7 @@ SemanticOutput ─→ [irc crate] 三地址码生成（中间代码生成阶段�
 
 ```rust
 pub enum Operand { Temp(TempId), Const(Const) }
-pub enum Const { Int(i128), Float(f64), Bool(bool), Null, Str(Symbol) }
+pub enum Const { Int(i128), Float(f64), Bool(bool), Null, Str(Symbol), Unit }
 // UnOp 带载荷：Conv = 一元算子（龙书 6.5），2026-10-22 优化会话已确认
 pub enum UnOp { Neg, Not, BitNot, Conv(TyId /*from*/) }
 pub enum Instr {
@@ -61,9 +61,9 @@ pub enum Instr {
     Br  { cond: Operand, then_: BlockId, else_: BlockId },
     Param{ a: Operand, ty: TyId },
     Call { dst: Option<TempId>, callee: DefId,          ty: TyId },
-    Ret  { a: Option<Operand>,                          ty: TyId },
 }
-pub struct Block { pub id: BlockId, pub instrs: Vec<Instr>, pub term: Term } // term = Jmp/Br/Ret
+pub enum Term { Jmp(BlockId), Br { cond, then_, else_ }, Ret { value, ty }, Unreachable }
+pub struct Block { pub id: BlockId, pub instrs: Vec<Instr>, pub term: Term }
 pub struct TacOutput { pub funs: Vec<FunBody>, pub diags: Vec<Diagnostic> } // 有 Error 则 opt 不启动
 ```
 
@@ -121,6 +121,26 @@ pub struct TacOutput { pub funs: Vec<FunBody>, pub diags: Vec<Diagnostic> } // �
 - 生成期不消重（无 DAG/值编号）：表达式重复原样发射，交给 opt 的
   局部 CSE——单一事实来源。
 
+## M1 落地边界（irc crate，2026-10-23）
+
+已 lower：字面量/标识符、算术·位运算·比较（操作数公共型按提升格统一，
+`ty` 字段=操作数型，比较结果型由 llvme 按算子推 i1）、短路布尔（Br 链
+物化）、一元算子、`as` 数值转换（`UnOp::Conv`）、具名/命名实参调用 +
+默认实参调用点求值、if 语句与 if 表达式（结果槽绕 phi）、while/loop、
+break/continue（flow_res 回指）、return、val→Temp / var→slot / 无初始化
+→slot（未定义值读取）、comptime/unsafe 块按普通块。
+
+发 `IrcUnsupportedLowering`：when/for/defer/grow、模式绑定以外的
+Binding、复合赋值、非标识符赋值目标、聚合值全家（struct/enum 构造、
+数组/元组字面量、成员/索引访问、nullable、`as?`/`as!`/`!!`）、
+`in`/`is`、StringInterp、if/while val 条件、带值 break、多段路径、
+顶层非 fun 声明。
+
+实现注记：BlockId 稀疏（merge 块先 reserve 后 switch），块寻址按 id
+查表而非下标；dump 按 BlockId 排序输出；字符串字面量解码后 intern 进
+`sem.interner`（`lower` 取 `&mut SemanticOutput`，Symbol 与 arena 同生
+共死纪律不变）。
+
 ## 优化 pass（v1，按序）
 
 教科书局部/全局基础集，全部纯函数 `&mut FunBody`：
@@ -156,9 +176,12 @@ pub fn emit(tac: &TacOutput, tys: &TyArena, defs: &DefArena, interner: &Interner
 
 ## 诊断与门禁
 
-- `TacOutput.diags`：v1 恒空，预留机器级失败。
-- `Irc*` 码面 v1 唯一真实码：`IrcTooManyVariants`（>255 变体的枚举，
-  sem 已接受但 lowering 无法表示——用户可触达，诊断而非 panic）。
+- `TacOutput.diags`：M1 实际——sem 干净但 lowering 未覆盖的构造发
+  `IrcUnsupportedLowering` 后置诊断（starryc 层见诊断即不打印 TAC、exit 1；
+  降级继续产出部分 TAC 以便调试，下游 opt 契约「有 Error 不启动」不变）。
+- `Irc*` 码面：`IrcUnsupportedLowering`（M1 里程碑边界）、
+  `IrcTooManyVariants`（>255 变体的枚举，sem 已接受但槽位布局无法表示——
+  用户可触达，诊断而非 panic）。
 - 其余 post-sem 契约破缺 = 内部不变量 → panic/debug_assert（Rust 惯例）。
 - 与全仓一致：`cargo fmt --check`、全 workspace 测试、
   `clippy -D warnings`、`syntaxgen --check`、`git diff --check`。

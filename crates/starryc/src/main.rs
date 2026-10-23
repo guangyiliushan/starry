@@ -1,12 +1,14 @@
 //! starryc — Starry 编译器入口
 //!
-//! 当前提供四个子命令：
+//! 当前提供五个子命令：
 //! - `starryc match <regex> <input>`：打印最长匹配长度
 //!   （exit 0 匹配 / exit 1 无匹配 / exit 2 用法错误）
 //! - `starryc dump-nfa <regex>`：打印 NFA 状态与边
 //! - `starryc tokenize <source>`：词法 token 流
 //! - `starryc check <file>`：parse → sem 全链诊断
 //!   （exit 0 干净 / exit 1 有诊断，逐条 stderr `path:start..end: code: msg`）
+//! - `starryc irc <file>`：parse → sem → irc，TAC 文本 stdout
+//!   （exit 0 干净 / exit 1 有诊断，格式同 check）
 
 use std::process::ExitCode;
 
@@ -35,13 +37,14 @@ fn main() -> ExitCode {
         [cmd, pattern] if cmd == "dump-nfa" => cmd_dump_nfa(pattern),
         [cmd, source] if cmd == "tokenize" => cmd_tokenize(source),
         [cmd, path] if cmd == "check" => cmd_check(path),
+        [cmd, path] if cmd == "irc" => cmd_irc(path),
         _ => usage(),
     }
 }
 
 fn usage() -> ExitCode {
     eprintln!(
-        "用法: starryc match <regex> <input> | starryc dump-nfa <regex> | starryc tokenize <source> | starryc check <file>"
+        "用法: starryc match <regex> <input> | starryc dump-nfa <regex> | starryc tokenize <source> | starryc check <file> | starryc irc <file>"
     );
     ExitCode::from(2)
 }
@@ -154,4 +157,45 @@ fn cmd_check(path: &str) -> ExitCode {
         );
     }
     ExitCode::FAILURE
+}
+
+/// parse → sem → irc：TAC 文本走 stdout（starryc irc <file>）；
+/// sem/irc 诊断走 stderr（同 check 格式），exit 0 干净 / exit 1 有诊断
+fn cmd_irc(path: &str) -> ExitCode {
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(e) => {
+            eprintln!("starryc: 无法读取 {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let parsed = match parser::parse_source(&source) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("starryc: {path}: 解析失败（机器层）: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut output = sem::analyze(parsed);
+    if !output.diagnostics.is_empty() {
+        for d in &output.diagnostics {
+            eprintln!(
+                "{path}:{}..{}: {:?}: {}",
+                d.span.start, d.span.end, d.code, d.message
+            );
+        }
+        return ExitCode::FAILURE;
+    }
+    let tac = irc::lower(&mut output, &source);
+    if !tac.diags.is_empty() {
+        for d in &tac.diags {
+            eprintln!(
+                "{path}:{}..{}: {:?}: {}",
+                d.span.start, d.span.end, d.code, d.message
+            );
+        }
+        return ExitCode::FAILURE;
+    }
+    print!("{}", tac.dump(&output.tys, &output.defs, &output.interner));
+    ExitCode::SUCCESS
 }
