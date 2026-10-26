@@ -121,25 +121,38 @@ pub struct TacOutput { pub funs: Vec<FunBody>, pub diags: Vec<Diagnostic> } // �
 - 生成期不消重（无 DAG/值编号）：表达式重复原样发射，交给 opt 的
   局部 CSE——单一事实来源。
 
-## M1 落地边界（irc crate，2026-10-23）
+## 落地边界（irc crate）
 
-已 lower：字面量/标识符、算术·位运算·比较（操作数公共型按提升格统一，
-`ty` 字段=操作数型，比较结果型由 llvme 按算子推 i1）、短路布尔（Br 链
-物化）、一元算子、`as` 数值转换（`UnOp::Conv`）、具名/命名实参调用 +
-默认实参调用点求值、if 语句与 if 表达式（结果槽绕 phi）、while/loop、
-break/continue（flow_res 回指）、return、val→Temp / var→slot / 无初始化
-→slot（未定义值读取）、comptime/unsafe 块按普通块。
+**M1（2026-10-23）标量核心**：字面量（全 radix + 值域诊断 + 转义解码）、
+标识符、算术·位运算·比较（操作数公共型按提升格统一，`ty` 字段=操作数
+型，比较结果型由 llvme 按算子推 i1）、短路布尔（Br 链物化）、一元算子、
+`as` 数值转换（`UnOp::Conv`）、具名/命名实参调用 + 默认实参调用点求值、
+if 语句与 if 表达式（结果槽绕 phi）、while/loop、break/continue
+（flow_res 回指）、return、val→Temp / var→slot / 无初始化→slot
+（未定义值读取）、comptime/unsafe 块按普通块。
 
-发 `IrcUnsupportedLowering`：when/for/defer/grow、模式绑定以外的
-Binding、复合赋值、非标识符赋值目标、聚合值全家（struct/enum 构造、
-数组/元组字面量、成员/索引访问、nullable、`as?`/`as!`/`!!`）、
-`in`/`is`、StringInterp、if/while val 条件、带值 break、多段路径、
-顶层非 fun 声明。
+**M2a（2026-10-26）数据布局**：槽位布局全案（`layout.rs`：标量 1 槽、
+struct 按字段序、和类型 tag(i8)+payload、enum payload 取最大变体、
+array=len×元素槽、tuple/range 摊平）；struct 构造器调用（位置/命名实参
+槽位机）、枚举变体值 `E.A` 与变体构造 `Opt.Some(x)`、数组成员访问
+`p.x`（字段槽 Load）、数组字面量/动态索引（idx = i×元素槽数）、
+元组字面量、数组填充 `[v; n]`（值一次求值 + 下标循环，体积与 n
+无关）、nullable：`null`/`as?`/`as!`/`!!`（flag 槽 + 运行时分支 +
+unreachable 兜底）、聚合 var 赋值与读取的逐槽快照拷贝、聚合实参按
+基址传递（sem v1 形参不可变，别名安全）、dump 类型名解码（P、T?、
+[T; n]）。
 
 实现注记：BlockId 稀疏（merge 块先 reserve 后 switch），块寻址按 id
 查表而非下标；dump 按 BlockId 排序输出；字符串字面量解码后 intern 进
-`sem.interner`（`lower` 取 `&mut SemanticOutput`，Symbol 与 arena 同生
-共死纪律不变）。
+`sem.interner`（`lower` 取 `&mut SemanticOutput`）；成员解析 sem v1
+不公开字段/变体侧表——irc 经 `layout::resolve_member` 按名本地解析
+（命名类型成员名唯一，与 sem member_lookup 等价；别名走
+`Def.alias_resolved`）。
+
+**仍发 `IrcUnsupportedLowering`（M2b/M3）**：when/for/defer/grow、
+模式绑定以外的 Binding、复合赋值、非标识符赋值目标、`?.` 安全调用、
+`in`/`is`、StringInterp、if/while val 条件、带值 break、多段路径、
+元组下标、顶层非 fun 声明。
 
 ## 优化 pass（v1，按序）
 

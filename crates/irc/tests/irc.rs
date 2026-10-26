@@ -116,6 +116,62 @@ fn invalid_unicode_escape_reports() {
 }
 
 #[test]
+fn struct_ctor_and_field_read() {
+    assert_tac(
+        "struct P {\n    x: int\n    y: int\n}\nfun f(): int {\n    val p = P(1, 2)\n    return p.x\n}",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i64\n    store %t0[1] = 2 : i64\n    %t1 = load i64 %t0[0]\n    ret %t1 : i64\n",
+    );
+}
+
+#[test]
+fn enum_variant_value_and_ctor() {
+    assert_tac(
+        "enum E {\n    A\n    B\n}\nenum Opt {\n    None\n    Some(int)\n}\nfun f(): int {\n    val a = E.A\n    val o = Opt.Some(7)\n    return 0\n}",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i8\n    %t1 = copy %t0 : E\n    store %t2[0] = 1 : i8\n    store %t2[1] = 7 : i64\n    ret 0 : i64\n",
+    );
+}
+
+#[test]
+fn array_literal_and_dynamic_index() {
+    assert_tac(
+        "fun f(i: int): int {\n    val a = [1, 2, 3]\n    return a[i]\n}",
+        "fun f(%t0: i64) -> i64:\n  b0:\n    store %t1[0] = 1 : i32\n    store %t1[1] = 2 : i32\n    store %t1[2] = 3 : i32\n    %t2 = load i32 %t1[%t0]\n    %t3 = conv %t2 : i32 -> i64\n    ret %t3 : i64\n",
+    );
+}
+
+#[test]
+fn array_repeat_fill_loop() {
+    assert_tac(
+        "fun f(): int {\n    val a = [9; 3]\n    return a[0]\n}",
+        "fun f() -> i64:\n  b0:\n    store %t1[0] = 0 : i32\n    jmp b1\n  b1:\n    %t2 = load i32 %t1[0]\n    %t3 = lt i32 %t2, 3\n    br %t3 -> b2, b3\n  b2:\n    %t4 = load i32 %t1[0]\n    store %t0[%t4] = 9 : i32\n    %t5 = add i32 %t4, 1\n    store %t1[0] = %t5 : i32\n    jmp b1\n  b3:\n    %t6 = load i32 %t0[0]\n    %t7 = conv %t6 : i32 -> i64\n    ret %t7 : i64\n",
+    );
+}
+
+#[test]
+fn tuple_literal() {
+    assert_tac(
+        "fun f(): int {\n    val t = (1, true)\n    return 0\n}",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i32\n    store %t0[1] = true : i1\n    ret 0 : i64\n",
+    );
+}
+
+#[test]
+fn nullable_null_and_unwrap() {
+    assert_tac(
+        "fun f(): int {\n    val x = 1 as? int\n    return x!!\n}",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i8\n    store %t0[1] = 1 : i64\n    %t1 = load i8 %t0[0]\n    br %t1 -> b1, b2\n  b1:\n    %t2 = load i64 %t0[1]\n    ret %t2 : i64\n  b2:\n    unreachable\n",
+    );
+}
+
+#[test]
+fn aggregate_var_assignment_copies() {
+    assert_tac(
+        "struct P {\n    x: int\n    y: int\n}\nfun f(): int {\n    var p = P(1, 2)\n    p = P(3, 4)\n    return p.x\n}",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i64\n    store %t0[1] = 2 : i64\n    %t2 = load i64 %t0[0]\n    store %t1[0] = %t2 : i64\n    %t3 = load i64 %t0[1]\n    store %t1[1] = %t3 : i64\n    store %t4[0] = 3 : i64\n    store %t4[1] = 4 : i64\n    %t5 = load i64 %t4[0]\n    store %t1[0] = %t5 : i64\n    %t6 = load i64 %t4[1]\n    store %t1[1] = %t6 : i64\n    %t8 = load i64 %t1[0]\n    store %t7[0] = %t8 : i64\n    %t9 = load i64 %t1[1]\n    store %t7[1] = %t9 : i64\n    %t10 = load i64 %t7[0]\n    ret %t10 : i64\n",
+    );
+}
+
+#[test]
 fn sem_error_gates_lowering() {
     let (text, codes) = dump("fun f(): int {\n    return nosuch\n}");
     assert!(codes.contains(&DiagCode::SemUndefinedName));

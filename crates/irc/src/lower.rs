@@ -51,6 +51,8 @@ pub(crate) struct LoopCtx {
 pub(crate) struct Ctx<'r, 'a> {
     pub sem: &'r mut SemRef<'a>,
     pub source: &'a str,
+    /// tag/flag 槽的 i8 类型（lower 入口 intern，全 lowering 共享）
+    pub i8_ty: TyId,
     pub diags: Vec<Diagnostic>,
     pub fun: FunBody,
     next_temp: u32,
@@ -62,7 +64,7 @@ pub(crate) struct Ctx<'r, 'a> {
     loops: Vec<LoopCtx>,
 }
 
-pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str) -> TacOutput {
+pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> TacOutput {
     // 先收集 fun 声明的 span（Ctx 持有 sem 的 &mut，不能同时持有 items 引用）
     let mut spans: Vec<Span> = Vec::new();
     for item in &sem.source.items {
@@ -72,7 +74,7 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str) -> TacOutput {
     }
     let mut out = TacOutput::default();
     for span in spans {
-        let mut ctx = Ctx::new(sem, source);
+        let mut ctx = Ctx::new(sem, source, i8_ty);
         ctx.lower_fun(span);
         out.diags.append(&mut ctx.diags);
         out.funs.push(ctx.fun);
@@ -87,11 +89,12 @@ impl<'r, 'a> Ctx<'r, 'a> {
     pub(crate) fn intern(&mut self, s: &str) -> ast::interner::Symbol {
         self.sem.interner.intern(s)
     }
-    fn new(sem: &'r mut SemRef<'a>, source: &'a str) -> Self {
+    fn new(sem: &'r mut SemRef<'a>, source: &'a str, i8_ty: TyId) -> Self {
         let unit = sem.tys.unit;
         Self {
             sem,
             source,
+            i8_ty,
             diags: Vec::new(),
             fun: FunBody {
                 def: DefId(0),
@@ -378,22 +381,38 @@ impl<'r, 'a> Ctx<'r, 'a> {
         let from = self.expr_ty(init);
         let to = target.unwrap_or(from);
         let op = expr::coerce(self, op, from, to);
+        let slots = crate::layout::scalar_slots(self, to);
         if b.immutable {
+            if slots > 1 {
+                // 聚合：不可变 → 别名构造基址（无重赋值，零拷贝安全）
+                if let Operand::Temp(t) = op {
+                    self.env_top().insert(*name, (Place::Temp(t), to));
+                    return;
+                }
+            }
             let t = self.temp();
-            self.emit(Instr::Copy {
-                dst: t,
-                src: op,
-                ty: to,
-            });
+            if slots > 1 {
+                expr::copy_slots(self, (t, 0), (op, 0), to, to, b.pattern.span);
+            } else {
+                self.emit(Instr::Copy {
+                    dst: t,
+                    src: op,
+                    ty: to,
+                });
+            }
             self.env_top().insert(*name, (Place::Temp(t), to));
         } else {
             let slot = self.temp();
-            self.emit(Instr::Store {
-                base: slot,
-                idx: Operand::Const(crate::tac::Const::Int(0)),
-                src: op,
-                ty: to,
-            });
+            if slots > 1 {
+                expr::copy_slots(self, (slot, 0), (op, 0), to, to, b.pattern.span);
+            } else {
+                self.emit(Instr::Store {
+                    base: slot,
+                    idx: Operand::Const(crate::tac::Const::Int(0)),
+                    src: op,
+                    ty: to,
+                });
+            }
             self.env_top().insert(*name, (Place::Slot(slot), to));
         }
     }
@@ -428,12 +447,16 @@ impl<'r, 'a> Ctx<'r, 'a> {
         };
         let v = expr::lower_expr(self, value);
         let v = expr::coerce(self, v, self.expr_ty(value), ty);
-        self.emit(Instr::Store {
-            base: slot,
-            idx: Operand::Const(crate::tac::Const::Int(0)),
-            src: v,
-            ty,
-        });
+        if crate::layout::scalar_slots(self, ty) > 1 {
+            expr::copy_slots(self, (slot, 0), (v, 0), ty, ty, target.span);
+        } else {
+            self.emit(Instr::Store {
+                base: slot,
+                idx: Operand::Const(crate::tac::Const::Int(0)),
+                src: v,
+                ty,
+            });
+        }
     }
 
     fn lower_while(&mut self, node: NodeId, span: Span, cond: &Condition, body: &Block) {

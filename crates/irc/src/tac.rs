@@ -160,7 +160,7 @@ pub struct TacOutput {
 }
 
 /// LLVM 风格的类型名（dump 展示用；聚合类型 M2 前显示 `?`）
-pub(crate) fn ty_name(tys: &TyArena, ty: TyId) -> &'static str {
+fn ty_name(tys: &TyArena, ty: TyId) -> &'static str {
     match tys.kind(ty) {
         TyKind::Int(IntKind::I4) => "i4",
         TyKind::Int(IntKind::I8) => "i8",
@@ -176,6 +176,33 @@ pub(crate) fn ty_name(tys: &TyArena, ty: TyId) -> &'static str {
         TyKind::Unit => "unit",
         TyKind::Null => "null",
         _ => "?",
+    }
+}
+
+/// dump 展示的类型名：聚合类型经 defs/interner 解码（P、T?、[T; n]）
+fn ty_display(tys: &TyArena, defs: &DefArena, interner: &Interner, ty: TyId) -> String {
+    match tys.kind(ty) {
+        TyKind::Named(def, _) => interner.resolve(defs.get(*def).name).to_string(),
+        TyKind::Nullable(inner) => format!("{}?", ty_display(tys, defs, interner, *inner)),
+        TyKind::Array(el, n) => format!("[{}; {}]", ty_display(tys, defs, interner, *el), n),
+        TyKind::Tuple(es) => {
+            let parts: Vec<String> = es
+                .iter()
+                .map(|e| ty_display(tys, defs, interner, *e))
+                .collect();
+            format!("({})", parts.join(", "))
+        }
+        TyKind::Range(inner) => format!("range<{}>", ty_display(tys, defs, interner, *inner)),
+        TyKind::Fn(params, ret) => format!(
+            "fn({}) -> {}",
+            params
+                .iter()
+                .map(|p| ty_display(tys, defs, interner, *p))
+                .collect::<Vec<_>>()
+                .join(", "),
+            ty_display(tys, defs, interner, *ret)
+        ),
+        _ => ty_name(tys, ty).to_string(),
     }
 }
 
@@ -234,9 +261,9 @@ impl TacOutput {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                let _ = write!(out, "%t{}: {}", t.0, ty_name(tys, *ty));
+                let _ = write!(out, "%t{}: {}", t.0, ty_display(tys, defs, interner, *ty));
             }
-            let _ = writeln!(out, ") -> {}:", ty_name(tys, fun.ret));
+            let _ = writeln!(out, ") -> {}:", ty_display(tys, defs, interner, fun.ret));
             let mut order: Vec<usize> = (0..fun.blocks.len()).collect();
             order.sort_by_key(|&i| fun.blocks[i].id.0);
             for i in order {
@@ -248,7 +275,7 @@ impl TacOutput {
                     out.push('\n');
                 }
                 out.push_str("    ");
-                self.dump_term(&block.term, tys, interner, &mut out);
+                self.dump_term(&block.term, tys, defs, interner, &mut out);
                 out.push('\n');
             }
         }
@@ -270,7 +297,7 @@ impl TacOutput {
                     "%t{} = {} {} ",
                     dst.0,
                     binop_text(*op),
-                    ty_name(tys, *ty)
+                    ty_display(tys, defs, interner, *ty)
                 );
                 op_text(l, interner, out);
                 out.push_str(", ");
@@ -280,7 +307,12 @@ impl TacOutput {
                 UnOp::Conv(from) => {
                     let _ = write!(out, "%t{} = conv ", dst.0);
                     op_text(a, interner, out);
-                    let _ = write!(out, " : {} -> {}", ty_name(tys, *from), ty_name(tys, *ty));
+                    let _ = write!(
+                        out,
+                        " : {} -> {}",
+                        ty_display(tys, defs, interner, *from),
+                        ty_display(tys, defs, interner, *ty)
+                    );
                 }
                 UnOp::Neg | UnOp::Not | UnOp::BitNot => {
                     let name = match op {
@@ -288,21 +320,26 @@ impl TacOutput {
                         UnOp::Not => "not",
                         _ => "bitnot",
                     };
-                    let _ = write!(out, "%t{} = {name} {} ", dst.0, ty_name(tys, *ty));
+                    let _ = write!(
+                        out,
+                        "%t{} = {name} {} ",
+                        dst.0,
+                        ty_display(tys, defs, interner, *ty)
+                    );
                     op_text(a, interner, out);
                 }
             },
             Instr::Copy { dst, src, ty } => {
                 let _ = write!(out, "%t{} = copy ", dst.0);
                 op_text(src, interner, out);
-                let _ = write!(out, " : {}", ty_name(tys, *ty));
+                let _ = write!(out, " : {}", ty_display(tys, defs, interner, *ty));
             }
             Instr::Load { dst, base, idx, ty } => {
                 let _ = write!(
                     out,
                     "%t{} = load {} %t{}[",
                     dst.0,
-                    ty_name(tys, *ty),
+                    ty_display(tys, defs, interner, *ty),
                     base.0
                 );
                 op_text(idx, interner, out);
@@ -313,24 +350,35 @@ impl TacOutput {
                 op_text(idx, interner, out);
                 out.push_str("] = ");
                 op_text(src, interner, out);
-                let _ = write!(out, " : {}", ty_name(tys, *ty));
+                let _ = write!(out, " : {}", ty_display(tys, defs, interner, *ty));
             }
             Instr::Param { a, ty } => {
                 out.push_str("param ");
                 op_text(a, interner, out);
-                let _ = write!(out, " : {}", ty_name(tys, *ty));
+                let _ = write!(out, " : {}", ty_display(tys, defs, interner, *ty));
             }
             Instr::Call { dst, callee, ty } => {
                 if let Some(dst) = dst {
                     let _ = write!(out, "%t{} = ", dst.0);
                 }
                 let name = interner.resolve(defs.get(*callee).name);
-                let _ = write!(out, "call {name} : {}", ty_name(tys, *ty));
+                let _ = write!(
+                    out,
+                    "call {name} : {}",
+                    ty_display(tys, defs, interner, *ty)
+                );
             }
         }
     }
 
-    fn dump_term(&self, term: &Term, tys: &TyArena, interner: &Interner, out: &mut String) {
+    fn dump_term(
+        &self,
+        term: &Term,
+        tys: &TyArena,
+        defs: &DefArena,
+        interner: &Interner,
+        out: &mut String,
+    ) {
         match term {
             Term::Jmp(b) => {
                 let _ = write!(out, "jmp b{}", b.0);
@@ -344,10 +392,10 @@ impl TacOutput {
                 Some(v) => {
                     out.push_str("ret ");
                     op_text(v, interner, out);
-                    let _ = write!(out, " : {}", ty_name(tys, *ty));
+                    let _ = write!(out, " : {}", ty_display(tys, defs, interner, *ty));
                 }
                 None => {
-                    let _ = write!(out, "ret : {}", ty_name(tys, *ty));
+                    let _ = write!(out, "ret : {}", ty_display(tys, defs, interner, *ty));
                 }
             },
             Term::Unreachable => out.push_str("unreachable"),

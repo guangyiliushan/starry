@@ -12,11 +12,12 @@
 //! 尚未 lower 的构造（`IrcUnsupportedLowering`）。
 
 mod expr;
+mod layout;
 mod lower;
 pub mod tac;
 
 use ast::syntax::node::DiagSeverity;
-use sem::SemanticOutput;
+use sem::{IntKind, SemanticOutput, TyKind};
 use tac::TacOutput;
 
 /// lowering 入口。`source` 用于字面量取值（AST 只存 LiteralKind，
@@ -44,6 +45,7 @@ pub fn lower(sem: &mut SemanticOutput, source: &str) -> TacOutput {
         pat_binding_def,
         ..
     } = sem;
+    let i8_ty = tys.intern(TyKind::Int(IntKind::I8));
     let mut sr = lower::SemRef {
         source: ast,
         tys,
@@ -54,5 +56,5 @@ pub fn lower(sem: &mut SemanticOutput, source: &str) -> TacOutput {
         pat_binding_def,
         interner,
     };
-    lower::run(&mut sr, source)
+    lower::run(&mut sr, source, i8_ty)
 }
