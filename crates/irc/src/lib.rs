@@ -12,6 +12,11 @@
 //! 尚未 lower 的构造（`IrcUnsupportedLowering`）。
 
 mod expr;
+
+/// AST 类型的单一重出口（defer 体克隆持有用）
+pub(crate) mod syntax_reexport {
+    pub(crate) use ast::syntax::expr::Block;
+}
 mod layout;
 mod lower;
 pub mod tac;
@@ -41,8 +46,10 @@ pub fn lower(sem: &mut SemanticOutput, source: &str) -> TacOutput {
         defs,
         expr_ty,
         expr_def,
+        pat_res,
         flow_res,
         pat_binding_def,
+        ty_of_node,
         ..
     } = sem;
     let i8_ty = tys.intern(TyKind::Int(IntKind::I8));
@@ -52,8 +59,10 @@ pub fn lower(sem: &mut SemanticOutput, source: &str) -> TacOutput {
         defs,
         expr_ty,
         expr_def,
+        pat_res,
         flow_res,
         pat_binding_def,
+        ty_of_node,
         interner,
     };
     lower::run(&mut sr, source, i8_ty)

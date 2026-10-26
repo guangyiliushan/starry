@@ -149,10 +149,24 @@ unreachable 兜底）、聚合 var 赋值与读取的逐槽快照拷贝、聚合
 （命名类型成员名唯一，与 sem member_lookup 等价；别名走
 `Def.alias_resolved`）。
 
-**仍发 `IrcUnsupportedLowering`（M2b/M3）**：when/for/defer/grow、
-模式绑定以外的 Binding、复合赋值、非标识符赋值目标、`?.` 安全调用、
-`in`/`is`、StringInterp、if/while val 条件、带值 break、多段路径、
-元组下标、顶层非 fun 声明。
+**M2b（2026-10-26）控制流与模式**：模式匹配 lowering（`lower_pattern`，
+is/when/for/val 条件共用：字面量/布尔/Null/Wildcard/Binding/Constructor
+（pat_res 变体序号 + payload 槽绑定）/Struct/元组/数组（无 rest）/
+Range；Or 仅无绑定形态，含绑定 Or 与 rest 模式在循环值定型解冻后）；
+`is`（绑定限 then 分支作用域，negated 取反）；`when`（主语单求值 →
+源序 Br 链，模式/guard 内嵌，值语境结果槽，链尾 unreachable）；`in`
+（区间 → 双比较短路，`..` 不含/`..=` 含上界；数组 → 线性扫描循环）；
+`for`（数组下标循环；Range 字面量计数循环；物化 Range 值按闭区间——
+Range 类型不区分开闭，记为表示层 corner）；`defer`（块作用域栈 +
+return/break/continue 出口全量发射，出口后清空防重复；顺带修复 M1
+潜在 bug：块尾表达式现于块作用域内求值）；`??`（flag 分支 + 结果槽
+汇合）；`?.` 安全调用（标量字段：flag 检查 + nullable 结果传播）；
+and/or 操作数常量短路在发射期折叠。
+
+**仍发 `IrcUnsupportedLowering`（M3）**：StringInterp（stringify+concat
+运行时契约）、grow、复合赋值、非标识符赋值目标、带值 break（sem
+循环值定型松弛项）、多段路径、元组下标、Or/含绑定模式、rest 模式、
+聚合元素的 for/in/元组模式、顶层非 fun 声明。
 
 ## 优化 pass（v1，按序）
 

@@ -172,6 +172,86 @@ fn aggregate_var_assignment_copies() {
 }
 
 #[test]
+fn when_statement_enum_subject() {
+    assert_tac(
+        "enum E {\n    A\n    B\n}\nfun f(e: E): int {\n    when e {\n        E.A -> 1\n        E.B -> 2\n    }\n}",
+        "fun f(%t0: E) -> i64:\n  b0:\n    %t2 = load i8 %t0[0]\n    %t3 = eq i8 %t2, 0\n    br %t3 -> b2, b3\n  b1:\n    %t6 = load i32 %t1[0]\n    %t7 = conv %t6 : i32 -> i64\n    ret %t7 : i64\n  b2:\n    store %t1[0] = 1 : i32\n    jmp b1\n  b3:\n    %t4 = load i8 %t0[0]\n    %t5 = eq i8 %t4, 1\n    br %t5 -> b4, b5\n  b4:\n    store %t1[0] = 2 : i32\n    jmp b1\n  b5:\n    unreachable\n",
+    );
+}
+
+#[test]
+fn when_expression_with_else() {
+    assert_tac(
+        "fun f(x: int): int {\n    val y = when x {\n        0 -> 10\n        else -> 20\n    }\n    return y\n}",
+        "fun f(%t0: i64) -> i64:\n  b0:\n    %t2 = conv %t0 : i64 -> i32\n    %t3 = eq i32 %t2, 0\n    br %t3 -> b2, b3\n  b1:\n    %t4 = load i32 %t1[0]\n    %t5 = copy %t4 : i32\n    %t6 = conv %t5 : i32 -> i64\n    ret %t6 : i64\n  b2:\n    store %t1[0] = 10 : i32\n    jmp b1\n  b3:\n    jmp b4\n  b4:\n    store %t1[0] = 20 : i32\n    jmp b1\n  b5:\n    unreachable\n",
+    );
+}
+
+#[test]
+fn for_over_array() {
+    assert_tac(
+        "fun f(a: [int; 3]): int {\n    var s: int = 0\n    for i in a {\n        s = s + i\n    }\n    return s\n}",
+        "fun f(%t0: [i64; 3]) -> i64:\n  b0:\n    store %t1[0] = 0 : i64\n    store %t2[0] = 0 : i32\n    jmp b1\n  b1:\n    %t3 = load i32 %t2[0]\n    %t4 = lt i32 %t3, 3\n    br %t4 -> b2, b3\n  b2:\n    %t6 = load i32 %t2[0]\n    %t5 = load i64 %t0[%t6]\n    %t7 = load i64 %t1[0]\n    %t8 = add i64 %t7, %t5\n    store %t1[0] = %t8 : i64\n    %t9 = add i32 %t6, 1\n    store %t2[0] = %t9 : i32\n    jmp b1\n  b3:\n    %t10 = load i64 %t1[0]\n    ret %t10 : i64\n",
+    );
+}
+
+#[test]
+fn for_over_inclusive_range() {
+    assert_tac(
+        "fun f(): int {\n    var s: int = 0\n    for i in 1..=3 {\n        s = s + i\n    }\n    return s\n}",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i64\n    store %t1[0] = 1 : i32\n    jmp b1\n  b1:\n    %t2 = load i32 %t1[0]\n    %t3 = le i32 %t2, 3\n    br %t3 -> b2, b3\n  b2:\n    %t4 = load i32 %t1[0]\n    %t5 = load i64 %t0[0]\n    %t6 = conv %t4 : i32 -> i64\n    %t7 = add i64 %t5, %t6\n    store %t0[0] = %t7 : i64\n    %t8 = add i32 %t4, 1\n    store %t1[0] = %t8 : i32\n    jmp b1\n  b3:\n    %t9 = load i64 %t0[0]\n    ret %t9 : i64\n",
+    );
+}
+
+#[test]
+fn in_with_exclusive_range() {
+    assert_tac(
+        "fun f(x: i32): bool {\n    return x in 1..5\n}",
+        "fun f(%t0: i32) -> i1:\n  b0:\n    %t1 = ge i32 %t0, 1\n    %t2 = lt i32 %t0, 5\n    br %t1 -> b1, b3\n  b1:\n    br %t2 -> b2, b3\n  b2:\n    %t3 = copy true : i1\n    jmp b4\n  b3:\n    %t3 = copy false : i1\n    jmp b4\n  b4:\n    ret %t3 : i1\n",
+    );
+}
+
+#[test]
+fn in_with_array_linear_scan() {
+    assert_tac(
+        "fun f(a: [int; 3], x: int): bool {\n    return x in a\n}",
+        "fun f(%t0: [i64; 3], %t1: i64) -> i1:\n  b0:\n    store %t2[0] = 0 : i32\n    %t3 = copy false : i1\n    jmp b1\n  b1:\n    %t4 = load i32 %t2[0]\n    %t5 = lt i32 %t4, 3\n    br %t5 -> b2, b5\n  b2:\n    %t6 = load i64 %t0[%t4]\n    %t7 = eq i64 %t1, %t6\n    br %t7 -> b3, b4\n  b3:\n    %t3 = copy true : i1\n    jmp b5\n  b4:\n    %t8 = add i32 %t4, 1\n    store %t2[0] = %t8 : i32\n    jmp b1\n  b5:\n    ret %t3 : i1\n",
+    );
+}
+
+#[test]
+fn is_pattern_binds_in_then_branch() {
+    assert_tac(
+        "enum Opt {\n    None\n    Some(int)\n}\nfun f(o: Opt): int {\n    if o is Opt.Some(v) {\n        return v\n    }\n    return 0\n}",
+        "fun f(%t0: Opt) -> i64:\n  b0:\n    %t1 = load i8 %t0[0]\n    %t2 = eq i8 %t1, 1\n    %t3 = load i64 %t0[1]\n    br %t2 -> b1, b2\n  b1:\n    ret %t3 : i64\n  b2:\n    jmp b3\n  b3:\n    ret 0 : i64\n",
+    );
+}
+
+#[test]
+fn defer_runs_after_return_value_computed() {
+    assert_tac(
+        "fun f(): int {\n    var x = 0\n    defer {\n        x = 99\n    }\n    return x\n}",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i32\n    %t1 = load i32 %t0[0]\n    %t2 = conv %t1 : i32 -> i64\n    store %t0[0] = 99 : i32\n    ret %t2 : i64\n",
+    );
+}
+
+#[test]
+fn elvis_operator() {
+    assert_tac(
+        "fun f(o: int?): int {\n    return o ?? 7\n}",
+        "fun f(%t0: i64?) -> i64:\n  b0:\n    %t1 = load i8 %t0[0]\n    br %t1 -> b1, b2\n  b1:\n    %t2 = load i64 %t0[1]\n    jmp b3\n  b2:\n    jmp b3\n  b3:\n    store %t3[0] = %t2 : i64\n    store %t3[0] = 7 : i64\n    %t4 = load i64 %t3[0]\n    ret %t4 : i64\n",
+    );
+}
+
+#[test]
+fn safe_call_chain_with_elvis() {
+    assert_tac(
+        "struct P {\n    x: int\n}\nfun f(p: P?): int {\n    return p?.x ?? 0\n}",
+        "fun f(%t0: P?) -> i64:\n  b0:\n    %t1 = load i8 %t0[0]\n    br %t1 -> b1, b2\n  b1:\n    %t2 = load i64 %t0[1]\n    store %t3[0] = 1 : i8\n    store %t3[1] = %t2 : i64\n    jmp b3\n  b2:\n    store %t3[0] = 0 : i8\n    jmp b3\n  b3:\n    %t4 = load i8 %t3[0]\n    br %t4 -> b4, b5\n  b4:\n    %t5 = load i64 %t3[1]\n    jmp b6\n  b5:\n    jmp b6\n  b6:\n    store %t6[0] = %t5 : i64\n    store %t6[0] = 0 : i64\n    %t7 = load i64 %t6[0]\n    ret %t7 : i64\n",
+    );
+}
+
+#[test]
 fn sem_error_gates_lowering() {
     let (text, codes) = dump("fun f(): int {\n    return nosuch\n}");
     assert!(codes.contains(&DiagCode::SemUndefinedName));
@@ -180,8 +260,7 @@ fn sem_error_gates_lowering() {
 
 #[test]
 fn unsupported_construct_reports_and_stops() {
-    let (_, codes) = dump(
-        "enum E {\n    A\n    B\n}\nfun f(e: E): int {\n    when e {\n        E.A -> 1\n        E.B -> 2\n    }\n}",
-    );
+    // StringInterp 的 lowering 在 M3（stringify+concat 运行时契约）
+    let (_, codes) = dump("fun f(x: int): string {\n    return \"a${x}b\"\n}");
     assert!(codes.contains(&DiagCode::IrcUnsupportedLowering));
 }

@@ -51,14 +51,13 @@ pub(crate) fn lower_expr(ctx: &mut Ctx, e: &ExprWrap) -> Operand {
                 None => Operand::Const(Const::Unit),
             }
         }
-        ExprKind::Is { .. } | ExprKind::In { .. } => {
-            ctx.diag(e.span, "is/in 的 lowering 在 M2（模式/区间 desugar）");
-            Operand::Const(Const::Unit)
-        }
-        ExprKind::When { .. } => {
-            ctx.diag(e.span, "when 的 lowering 在 M2（Br 链 + pat_res）");
-            Operand::Const(Const::Unit)
-        }
+        ExprKind::Is {
+            lhs,
+            pattern,
+            negated,
+        } => lower_is(ctx, e, lhs, pattern, *negated),
+        ExprKind::In { lhs, rhs, .. } => lower_in(ctx, e, lhs, rhs),
+        ExprKind::When { subject, branches } => lower_when(ctx, e, subject.as_deref(), branches),
         ExprKind::Index { base, index } => lower_index(ctx, e, base, index),
         ExprKind::Member { base, safe, .. } => lower_member(ctx, e, base, *safe),
         ExprKind::Tuple(elems) => tuple_literal(ctx, e, elems),
@@ -351,6 +350,9 @@ fn binary(
 ) -> Operand {
     if op == OperatorKind::And || op == OperatorKind::Or {
         return materialize_logic(ctx, op, lhs, rhs);
+    }
+    if op == OperatorKind::QuestionQuestion {
+        return lower_elvis(ctx, e, lhs, rhs);
     }
     let Some(bop) = binop(op) else {
         ctx.diag(e.span, "该二元运算符无 TAC 映射（sem 契约破缺）");
@@ -655,10 +657,6 @@ fn lower_if(
     then_block: &ast::syntax::expr::Block,
     else_block: Option<&ast::syntax::expr::Block>,
 ) -> Operand {
-    let ast::syntax::expr::Condition::Expr(cond_expr) = cond else {
-        ctx.diag(e.span, "if val 条件的 lowering 在 M2（模式条件）");
-        return Operand::Const(Const::Unit);
-    };
     let value_ctx = !ctx.is_unit(ctx.expr_ty(e));
     let result_ty = ctx.expr_ty(e);
 
@@ -666,7 +664,8 @@ fn lower_if(
     let else_b = ctx.reserve_block();
     let merge_b = ctx.reserve_block();
 
-    let c = lower_expr(ctx, cond_expr);
+    // val/is 条件的模式绑定限 then 分支（scoped=true 时 lower_cond 已推作用域）
+    let (c, scoped) = lower_cond(ctx, cond);
     ctx.terminate(Term::Br {
         cond: c,
         then_: then_b,
@@ -678,6 +677,9 @@ fn lower_if(
 
     ctx.switch_to(then_b);
     let then_tail = ctx.lower_block(then_block);
+    if scoped {
+        ctx.env_pop();
+    }
     if let (Some(slot), Some((op, from))) = (result_slot, then_tail) {
         let v = coerce(ctx, op, from, result_ty);
         ctx.emit(Instr::Store {
@@ -852,8 +854,7 @@ fn def_of_parent(ctx: &mut Ctx, def: sem::DefId) -> sem::DefId {
 /// p.x（expr_def=StructField → 槽 Load）。?. 的 nullable 安全调用在 M2b
 fn lower_member(ctx: &mut Ctx, e: &ExprWrap, base: &ExprWrap, safe: bool) -> Operand {
     if safe {
-        ctx.diag(e.span, "?. 安全调用的 lowering 在 M2b（flag 传播）");
-        return Operand::Const(Const::Unit);
+        return lower_safe_member(ctx, e, base);
     }
     // 先查 expr_def（sem 写入时直接可用）；缺失则按名本地解析
     let resolved =
@@ -1211,5 +1212,839 @@ fn unwrap(ctx: &mut Ctx, e: &ExprWrap, inner: &ExprWrap, to: TyId) -> Operand {
         let base = ctx.temp();
         copy_slots(ctx, (base, 0), (Operand::Temp(sb), 1), s_inner, to, e.span);
         Operand::Temp(base)
+    }
+}
+
+// ---- 模式匹配 lowering（M2b：is / when / for / val 条件共用）----
+
+/// 判定模式是否含绑定（Or 替代含绑定时走诊断路径——共享槽绑定的 phi
+/// 问题留待循环值定型解冻，见 semantic-notes 松弛项）
+fn pat_contains_binding(pat: &ast::syntax::pat::PatWrap) -> bool {
+    match &pat.kind {
+        ast::syntax::pat::PatKind::Binding { .. } => true,
+        ast::syntax::pat::PatKind::Or(ps) => ps.iter().any(pat_contains_binding),
+        ast::syntax::pat::PatKind::Tuple { elements, .. }
+        | ast::syntax::pat::PatKind::Array { elements, .. } => {
+            elements.iter().any(pat_contains_binding)
+        }
+        ast::syntax::pat::PatKind::Constructor { args, .. } => {
+            args.iter().any(pat_contains_binding)
+        }
+        ast::syntax::pat::PatKind::Struct { fields, .. } => {
+            fields.iter().any(|(_, p)| pat_contains_binding(p))
+        }
+        _ => false,
+    }
+}
+
+/// 模式匹配 lowering：返回 bool 条件操作数；绑定写入当前 env 作用域
+/// （调用方负责作用域的推入/弹出时机）。
+/// subject：待匹配值（标量操作数或聚合基址）；subject_ty 其类型。
+pub(crate) fn lower_pattern(
+    ctx: &mut Ctx,
+    pat: &ast::syntax::pat::PatWrap,
+    subject: Operand,
+    subject_ty: TyId,
+    span: Span,
+) -> Operand {
+    use ast::syntax::pat::PatKind;
+    match &pat.kind {
+        PatKind::Binding { name, ty, .. } => {
+            let bty = ty
+                .as_ref()
+                .and_then(|t| ctx.sem.ty_of_node.get(t.id).copied())
+                .unwrap_or(subject_ty);
+            let v = coerce(ctx, subject, subject_ty, bty);
+            let t = as_base(ctx, v, pat.span);
+            ctx.env_top().insert(*name, (Place::Temp(t), bty));
+            Operand::Const(Const::Bool(true))
+        }
+        PatKind::Wildcard => Operand::Const(Const::Bool(true)),
+        PatKind::Bool(b) => {
+            let ty = ctx.sem.tys.bool_;
+            let s = coerce(ctx, subject, subject_ty, ty);
+            cmp_const(ctx, BinOp::Eq, s, Const::Bool(*b), ty)
+        }
+        PatKind::Literal(kind) => {
+            let lit = literal(ctx, *kind, pat.span);
+            let ty = match kind {
+                LiteralKind::Integer => ctx.sem.tys.default_int,
+                LiteralKind::Float => ctx.sem.tys.default_float,
+                LiteralKind::String => ctx.sem.tys.string,
+                LiteralKind::Char => ctx.sem.tys.char_,
+            };
+            let s = coerce(ctx, subject, subject_ty, ty);
+            cmp_const(ctx, BinOp::Eq, s, lit_const(lit), ty)
+        }
+        PatKind::Null => match ctx.sem.tys.kind(subject_ty) {
+            TyKind::Nullable(_) => {
+                let b = as_base(ctx, subject, span);
+                let flag = ctx.temp();
+                ctx.emit(Instr::Load {
+                    dst: flag,
+                    base: b,
+                    idx: Operand::Const(Const::Int(0)),
+                    ty: ctx.i8_ty,
+                });
+                let t = ctx.temp();
+                ctx.emit(Instr::Un {
+                    dst: t,
+                    op: UnOp::Not,
+                    a: Operand::Temp(flag),
+                    ty: ctx.sem.tys.bool_,
+                });
+                Operand::Temp(t)
+            }
+            _ => Operand::Const(Const::Bool(true)),
+        },
+        PatKind::Constructor { args, .. } => {
+            // 变体序号：pat_res 优先（sem resolve 写入），缺失按主语类型+名本地解析
+            let (parent, vidx) = match ctx.sem.pat_res.get(pat.id).copied() {
+                Some(pr) => (pr.ctor, pr.variant.unwrap_or(0)),
+                None => {
+                    ctx.diag(pat.span, "构造器模式无 pat_res（sem 契约破缺）");
+                    return Operand::Const(Const::Bool(false));
+                }
+            };
+            let parent = match ctx.sem.tys.kind(subject_ty) {
+                TyKind::Named(d, _) => *d,
+                TyKind::Nullable(_) => {
+                    ctx.diag(pat.span, "nullable 主语的构造器模式在 M-later");
+                    return Operand::Const(Const::Bool(false));
+                }
+                _ => parent,
+            };
+            let b = as_base(ctx, subject, span);
+            let tag = ctx.temp();
+            ctx.emit(Instr::Load {
+                dst: tag,
+                base: b,
+                idx: Operand::Const(Const::Int(0)),
+                ty: ctx.i8_ty,
+            });
+            let mut cond = cmp_const(
+                ctx,
+                BinOp::Eq,
+                Operand::Temp(tag),
+                Const::Int(vidx as i128),
+                ctx.i8_ty,
+            );
+            // payload 实参绑定（Load + 递归； conjunction 经 && 物化）
+            let params = ctx.sem.defs.get(parent).sig.variants[vidx].1.clone();
+            for (i, arg) in args.iter().enumerate() {
+                let Some((_, pty)) = params.get(i) else {
+                    ctx.diag(arg.span, "变体模式实参越界（sem 契约破缺）");
+                    break;
+                };
+                let off = 1 + crate::layout::variant_param_slot(ctx, parent, vidx, i);
+                let v = ctx.temp();
+                let sty = crate::layout::slot_ty(ctx, subject_ty, off);
+                ctx.emit(Instr::Load {
+                    dst: v,
+                    base: b,
+                    idx: Operand::Const(Const::Int(off as i128)),
+                    ty: sty,
+                });
+                let c = lower_pattern(ctx, arg, Operand::Temp(v), *pty, arg.span);
+                cond = and_operands(ctx, cond, c);
+            }
+            cond
+        }
+        PatKind::Struct { fields, .. } => {
+            let parent = match ctx.sem.tys.kind(subject_ty) {
+                TyKind::Named(d, _) => *d,
+                _ => {
+                    ctx.diag(pat.span, "Struct 模式主语非命名类型（sem 契约破缺）");
+                    return Operand::Const(Const::Bool(false));
+                }
+            };
+            let b = as_base(ctx, subject, span);
+            let mut cond = Operand::Const(Const::Bool(true));
+            for (fname, fpat) in fields {
+                let Some(idx) = ctx
+                    .sem
+                    .defs
+                    .get(parent)
+                    .sig
+                    .fields
+                    .iter()
+                    .position(|(n, _)| n == fname)
+                else {
+                    ctx.diag(fpat.span, "模式字段名不存在（sem 契约破缺）");
+                    continue;
+                };
+                let fty = ctx.sem.defs.get(parent).sig.fields[idx].1;
+                let off = crate::layout::field_slot(ctx, parent, idx);
+                let v = ctx.temp();
+                let sty = crate::layout::slot_ty(ctx, subject_ty, off);
+                ctx.emit(Instr::Load {
+                    dst: v,
+                    base: b,
+                    idx: Operand::Const(Const::Int(off as i128)),
+                    ty: sty,
+                });
+                let c = lower_pattern(ctx, fpat, Operand::Temp(v), fty, fpat.span);
+                cond = and_operands(ctx, cond, c);
+            }
+            cond
+        }
+        PatKind::Tuple { elements, rest } | PatKind::Array { elements, rest } => {
+            if rest.is_some() {
+                ctx.diag(pat.span, "带 .. 的元组/数组模式在 M-later");
+                return Operand::Const(Const::Bool(false));
+            }
+            let elem_tys: Vec<TyId> = match ctx.sem.tys.kind(subject_ty) {
+                TyKind::Tuple(es) => es.clone(),
+                TyKind::Array(el, _) => vec![*el; elements.len()],
+                _ => {
+                    ctx.diag(pat.span, "元组/数组模式主语类型不匹配（sem 契约破缺）");
+                    return Operand::Const(Const::Bool(false));
+                }
+            };
+            let b = as_base(ctx, subject, span);
+            let mut off = 0;
+            let mut cond = Operand::Const(Const::Bool(true));
+            for (i, el) in elements.iter().enumerate() {
+                let ety = elem_tys.get(i).copied().unwrap_or(subject_ty);
+                let es = crate::layout::scalar_slots(ctx, ety);
+                if es > 1 {
+                    ctx.diag(el.span, "聚合元素的元组/数组模式在 M-later");
+                    return Operand::Const(Const::Bool(false));
+                }
+                let v = ctx.temp();
+                ctx.emit(Instr::Load {
+                    dst: v,
+                    base: b,
+                    idx: Operand::Const(Const::Int(off as i128)),
+                    ty: ety,
+                });
+                let c = lower_pattern(ctx, el, Operand::Temp(v), ety, el.span);
+                cond = and_operands(ctx, cond, c);
+                off += es;
+            }
+            cond
+        }
+        PatKind::Or(ps) => {
+            if ps.iter().any(pat_contains_binding) {
+                ctx.diag(pat.span, "含绑定的 Or 模式在循环值定型解冻后（共享槽绑定）");
+                return Operand::Const(Const::Bool(false));
+            }
+            let mut cond = lower_pattern(ctx, &ps[0], subject.clone(), subject_ty, span);
+            for p in &ps[1..] {
+                let c = lower_pattern(ctx, p, subject.clone(), subject_ty, span);
+                cond = or_operands(ctx, cond, c);
+            }
+            cond
+        }
+        PatKind::Range { lo, hi, inclusive } => {
+            // 区间模式：lo <= subject <= hi（..= 含上界，.. 不含）
+            let ity = subject_ty;
+            let lov = pattern_bound(ctx, lo);
+            let c1 = cmp_const(ctx, BinOp::Ge, subject.clone(), lov, ity);
+            let hv = pattern_bound(ctx, hi);
+            if *inclusive {
+                let c2 = cmp_const(ctx, BinOp::Le, subject, hv, ity);
+                and_operands(ctx, c1, c2)
+            } else {
+                let c2 = cmp_const(ctx, BinOp::Lt, subject, hv, ity);
+                and_operands(ctx, c1, c2)
+            }
+        }
+        PatKind::Error(_) | PatKind::Missing(_) => {
+            ctx.diag(pat.span, "错误/缺失模式穿透 sem 门禁（内部不变量破缺）");
+            Operand::Const(Const::Bool(false))
+        }
+    }
+}
+
+/// 字面量/布尔模式的常量操作数
+fn lit_const(op: Operand) -> Const {
+    match op {
+        Operand::Const(c) => c,
+        Operand::Temp(_) => Const::Int(0),
+    }
+}
+
+/// 模式边界的字面量求值（Literal/Bool 模式的 lo/hi）
+fn pattern_bound(ctx: &mut Ctx, pat: &ast::syntax::pat::PatWrap) -> Const {
+    match &pat.kind {
+        ast::syntax::pat::PatKind::Literal(kind) => {
+            let text = pat.span.slice(ctx.source);
+            match kind {
+                LiteralKind::Integer => text
+                    .replace('_', "")
+                    .parse()
+                    .map(Const::Int)
+                    .unwrap_or(Const::Int(0)),
+                LiteralKind::Float => text
+                    .replace('_', "")
+                    .parse()
+                    .map(Const::Float)
+                    .unwrap_or(Const::Float(0.0)),
+                _ => Const::Int(0),
+            }
+        }
+        ast::syntax::pat::PatKind::Bool(b) => Const::Bool(*b),
+        _ => Const::Int(0),
+    }
+}
+
+/// subject OP const 比较（操作数公共型 = ty 参数）
+fn cmp_const(ctx: &mut Ctx, op: BinOp, s: Operand, c: Const, ty: TyId) -> Operand {
+    let dst = ctx.temp();
+    ctx.emit(Instr::Bin {
+        dst,
+        op,
+        l: s,
+        r: Operand::Const(c),
+        ty,
+    });
+    Operand::Temp(dst)
+}
+
+/// 两个 bool 操作数的 && 物化（Br 链）
+fn and_operands(ctx: &mut Ctx, l: Operand, r: Operand) -> Operand {
+    // 常量短路（发射期折叠，与 coerce 常量快路径同哲学）
+    match (&l, &r) {
+        (Operand::Const(Const::Bool(true)), _) => return r,
+        (Operand::Const(Const::Bool(false)), _) => return l,
+        (_, Operand::Const(Const::Bool(true))) => return l,
+        (_, Operand::Const(Const::Bool(false))) => return r,
+        _ => {}
+    }
+    materialize_logic_operands(ctx, l, r, true)
+}
+
+/// 两个 bool 操作数的 || 物化
+fn or_operands(ctx: &mut Ctx, l: Operand, r: Operand) -> Operand {
+    match (&l, &r) {
+        (Operand::Const(Const::Bool(false)), _) => return r,
+        (Operand::Const(Const::Bool(true)), _) => return l,
+        (_, Operand::Const(Const::Bool(false))) => return l,
+        (_, Operand::Const(Const::Bool(true))) => return r,
+        _ => {}
+    }
+    materialize_logic_operands(ctx, l, r, false)
+}
+
+fn materialize_logic_operands(ctx: &mut Ctx, l: Operand, r: Operand, is_and: bool) -> Operand {
+    let result = ctx.temp();
+    let bool_ty = ctx.sem.tys.bool_;
+    let eval_rhs = ctx.reserve_block();
+    let done_true = ctx.reserve_block();
+    let done_false = ctx.reserve_block();
+    let merge = ctx.reserve_block();
+    let (then_, else_) = if is_and {
+        (eval_rhs, done_false)
+    } else {
+        (done_true, eval_rhs)
+    };
+    ctx.terminate(Term::Br {
+        cond: l,
+        then_,
+        else_,
+    });
+    ctx.switch_to(eval_rhs);
+    ctx.terminate(Term::Br {
+        cond: r,
+        then_: done_true,
+        else_: done_false,
+    });
+    ctx.switch_to(done_true);
+    ctx.emit(Instr::Copy {
+        dst: result,
+        src: Operand::Const(Const::Bool(true)),
+        ty: bool_ty,
+    });
+    ctx.terminate(Term::Jmp(merge));
+    ctx.switch_to(done_false);
+    ctx.emit(Instr::Copy {
+        dst: result,
+        src: Operand::Const(Const::Bool(false)),
+        ty: bool_ty,
+    });
+    ctx.terminate(Term::Jmp(merge));
+    ctx.switch_to(merge);
+    Operand::Temp(result)
+}
+
+/// is：模式匹配 + 绑定进当前作用域；negated 取反。调用方（if/while）
+/// 负责在 then 分支作用域内推入/弹出（见 lower_cond_expr）
+fn lower_is(
+    ctx: &mut Ctx,
+    e: &ExprWrap,
+    lhs: &ExprWrap,
+    pattern: &ast::syntax::pat::PatWrap,
+    negated: bool,
+) -> Operand {
+    let lty = ctx.expr_ty(lhs);
+    let s = lower_expr(ctx, lhs);
+    let cond = lower_pattern(ctx, pattern, s, lty, e.span);
+    if negated {
+        let t = ctx.temp();
+        ctx.emit(Instr::Un {
+            dst: t,
+            op: UnOp::Not,
+            a: cond,
+            ty: ctx.sem.tys.bool_,
+        });
+        Operand::Temp(t)
+    } else {
+        cond
+    }
+}
+
+/// in：区间 → 双比较短路；数组 → 线性扫描循环
+fn lower_in(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> Operand {
+    let lty = ctx.expr_ty(lhs);
+    let rty = ctx.expr_ty(rhs);
+    let s = lower_expr(ctx, lhs);
+    match ctx.sem.tys.kind(rty).clone() {
+        TyKind::Range(_) => {
+            // 区间字面量 1..5（Binary DotDot/DotDotEq）直取 lo/hi；
+            // 物化 Range 值按闭区间（Range 类型不区分开闭）
+            if let ExprKind::Binary {
+                op,
+                lhs: lo,
+                rhs: hi,
+            } = &rhs.kind
+                && matches!(op, OperatorKind::DotDot | OperatorKind::DotDotEq)
+            {
+                let lo_op = lower_expr(ctx, lo);
+                let lov = coerce(ctx, lo_op, ctx.expr_ty(lo), lty);
+                let hi_op = lower_expr(ctx, hi);
+                let hiv = coerce(ctx, hi_op, ctx.expr_ty(hi), lty);
+                let c1 = cmp_const(ctx, BinOp::Ge, s.clone(), lit_const(lov), lty);
+                let op2 = if *op == OperatorKind::DotDot {
+                    BinOp::Lt
+                } else {
+                    BinOp::Le
+                };
+                let c2 = cmp_const(ctx, op2, s, lit_const(hiv), lty);
+                return and_operands(ctx, c1, c2);
+            }
+            let rhs_op = lower_expr(ctx, rhs);
+            let rb = as_base(ctx, rhs_op, e.span);
+            let lo = ctx.temp();
+            ctx.emit(Instr::Load {
+                dst: lo,
+                base: rb,
+                idx: Operand::Const(Const::Int(0)),
+                ty: lty,
+            });
+            let hi = ctx.temp();
+            ctx.emit(Instr::Load {
+                dst: hi,
+                base: rb,
+                idx: Operand::Const(Const::Int(1)),
+                ty: lty,
+            });
+            let c1 = cmp_const(ctx, BinOp::Ge, s.clone(), Const::Int(0), lty);
+            let _ = c1;
+            let t1 = ctx.temp();
+            ctx.emit(Instr::Bin {
+                dst: t1,
+                op: BinOp::Ge,
+                l: s.clone(),
+                r: Operand::Temp(lo),
+                ty: lty,
+            });
+            let t2 = ctx.temp();
+            ctx.emit(Instr::Bin {
+                dst: t2,
+                op: BinOp::Le,
+                l: s,
+                r: Operand::Temp(hi),
+                ty: lty,
+            });
+            and_operands(ctx, Operand::Temp(t1), Operand::Temp(t2))
+        }
+        TyKind::Array(elem, len) => {
+            let es = crate::layout::scalar_slots(ctx, elem);
+            if es > 1 {
+                ctx.diag(e.span, "聚合元素的 in 线性扫描在 M-later");
+                return Operand::Const(Const::Bool(false));
+            }
+            let rhs_op = lower_expr(ctx, rhs);
+            let arr = as_base(ctx, rhs_op, e.span);
+            let cty = ctx.sem.tys.default_int;
+            let counter = ctx.temp();
+            ctx.emit(Instr::Store {
+                base: counter,
+                idx: Operand::Const(Const::Int(0)),
+                src: Operand::Const(Const::Int(0)),
+                ty: cty,
+            });
+            let result = ctx.temp();
+            ctx.emit(Instr::Copy {
+                dst: result,
+                src: Operand::Const(Const::Bool(false)),
+                ty: ctx.sem.tys.bool_,
+            });
+            let cond_b = ctx.reserve_block();
+            let body_b = ctx.reserve_block();
+            let found_b = ctx.reserve_block();
+            let step_b = ctx.reserve_block();
+            let done_b = ctx.reserve_block();
+            ctx.terminate(Term::Jmp(cond_b));
+            ctx.switch_to(cond_b);
+            let c = ctx.temp();
+            ctx.emit(Instr::Load {
+                dst: c,
+                base: counter,
+                idx: Operand::Const(Const::Int(0)),
+                ty: cty,
+            });
+            let cmp = ctx.temp();
+            ctx.emit(Instr::Bin {
+                dst: cmp,
+                op: BinOp::Lt,
+                l: Operand::Temp(c),
+                r: Operand::Const(Const::Int(len as i128)),
+                ty: cty,
+            });
+            ctx.terminate(Term::Br {
+                cond: Operand::Temp(cmp),
+                then_: body_b,
+                else_: done_b,
+            });
+            ctx.switch_to(body_b);
+            let el = ctx.temp();
+            ctx.emit(Instr::Load {
+                dst: el,
+                base: arr,
+                idx: Operand::Temp(c),
+                ty: elem,
+            });
+            let eq = ctx.temp();
+            let s2 = coerce(ctx, s.clone(), lty, elem);
+            ctx.emit(Instr::Bin {
+                dst: eq,
+                op: BinOp::Eq,
+                l: s2,
+                r: Operand::Temp(el),
+                ty: elem,
+            });
+            ctx.terminate(Term::Br {
+                cond: Operand::Temp(eq),
+                then_: found_b,
+                else_: step_b,
+            });
+            ctx.switch_to(found_b);
+            ctx.emit(Instr::Copy {
+                dst: result,
+                src: Operand::Const(Const::Bool(true)),
+                ty: ctx.sem.tys.bool_,
+            });
+            ctx.terminate(Term::Jmp(done_b));
+            ctx.switch_to(step_b);
+            let one = ctx.temp();
+            ctx.emit(Instr::Bin {
+                dst: one,
+                op: BinOp::Add,
+                l: Operand::Temp(c),
+                r: Operand::Const(Const::Int(1)),
+                ty: cty,
+            });
+            ctx.emit(Instr::Store {
+                base: counter,
+                idx: Operand::Const(Const::Int(0)),
+                src: Operand::Temp(one),
+                ty: cty,
+            });
+            ctx.terminate(Term::Jmp(cond_b));
+            ctx.switch_to(done_b);
+            Operand::Temp(result)
+        }
+        _ => {
+            ctx.diag(e.span, "in 的右操作数非数组/区间（sem 契约破缺）");
+            Operand::Const(Const::Bool(false))
+        }
+    }
+}
+
+/// when：主语单求值 → 源序逐分支 Br 链（模式条件 + guard 内嵌）→
+/// 值语境走结果槽（两分支 Store、汇合 Load）；链尾 fallthrough 发
+/// unreachable（sem 穷尽性已保证，防御松弛项穿透）
+fn lower_when(
+    ctx: &mut Ctx,
+    e: &ExprWrap,
+    subject: Option<&ExprWrap>,
+    branches: &[ast::syntax::expr::WhenBranch],
+) -> Operand {
+    let value_ctx = !ctx.is_unit(ctx.expr_ty(e));
+    let result_ty = ctx.expr_ty(e);
+    let (subj, sty) = match subject {
+        Some(s) => {
+            let op = lower_expr(ctx, s);
+            let sty = ctx.expr_ty(s);
+            let b = as_base(ctx, op, e.span);
+            (b, sty)
+        }
+        None => {
+            // 无主语 when（裸 bool 分支等）：subject 恒 true
+            let t = ctx.temp();
+            ctx.emit(Instr::Copy {
+                dst: t,
+                src: Operand::Const(Const::Bool(true)),
+                ty: ctx.sem.tys.bool_,
+            });
+            (t, ctx.sem.tys.bool_)
+        }
+    };
+    let result_slot = if value_ctx { Some(ctx.temp()) } else { None };
+    let merge_b = ctx.reserve_block();
+    let mut else_seen = false;
+    for (i, branch) in branches.iter().enumerate() {
+        let body_b = ctx.reserve_block();
+        let next_b = ctx.reserve_block();
+        // 条件：else 无条件；表达式分支 = 主语相等；模式分支 = 模式匹配
+        match &branch.pattern {
+            ast::syntax::expr::WhenPattern::Else => {
+                else_seen = true;
+                ctx.terminate(Term::Jmp(body_b));
+            }
+            ast::syntax::expr::WhenPattern::Expression(expr) => {
+                let v = lower_expr(ctx, expr);
+                let vty = ctx.expr_ty(expr);
+                let sv = coerce(ctx, Operand::Temp(subj), sty, vty);
+                let vv = coerce(ctx, v, vty, vty);
+                let eq = ctx.temp();
+                ctx.emit(Instr::Bin {
+                    dst: eq,
+                    op: BinOp::Eq,
+                    l: sv,
+                    r: vv,
+                    ty: vty,
+                });
+                ctx.terminate(Term::Br {
+                    cond: Operand::Temp(eq),
+                    then_: body_b,
+                    else_: next_b,
+                });
+            }
+            ast::syntax::expr::WhenPattern::Pattern(pat) => {
+                let c = lower_pattern(ctx, pat, Operand::Temp(subj), sty, pat.span);
+                ctx.terminate(Term::Br {
+                    cond: c,
+                    then_: body_b,
+                    else_: next_b,
+                });
+            }
+        }
+        ctx.switch_to(body_b);
+        ctx.env_push();
+        // guard：附加条件，假则落入下一分支
+        if let Some(guard) = &branch.guard {
+            let g = lower_expr(ctx, guard);
+            let guard_ok = ctx.reserve_block();
+            ctx.terminate(Term::Br {
+                cond: g,
+                then_: guard_ok,
+                else_: next_b,
+            });
+            ctx.switch_to(guard_ok);
+        }
+        let tail = match &branch.body {
+            ast::syntax::expr::WhenBody::Expr(expr) => {
+                Some((lower_expr(ctx, expr), ctx.expr_ty(expr)))
+            }
+            ast::syntax::expr::WhenBody::Block(b) => ctx.lower_block(b),
+        };
+        if let (Some(slot), Some((op, from))) = (result_slot, tail) {
+            let v = coerce(ctx, op, from, result_ty);
+            ctx.emit(Instr::Store {
+                base: slot,
+                idx: Operand::Const(Const::Int(0)),
+                src: v,
+                ty: result_ty,
+            });
+        }
+        ctx.env_pop();
+        ctx.terminate(Term::Jmp(merge_b));
+        ctx.switch_to(next_b);
+        let _ = i;
+    }
+    // 穷尽性 sem 已验证；else 存在时链尾不可达但需终止器
+    let _ = else_seen;
+    ctx.terminate(Term::Unreachable);
+    ctx.switch_to(merge_b);
+    match result_slot {
+        Some(slot) => {
+            let dst = ctx.temp();
+            ctx.emit(Instr::Load {
+                dst,
+                base: slot,
+                idx: Operand::Const(Const::Int(0)),
+                ty: result_ty,
+            });
+            Operand::Temp(dst)
+        }
+        None => Operand::Const(Const::Unit),
+    }
+}
+
+/// ?. 安全调用（标量成员）：flag 检查，null 传播整个表达式
+/// （结果型按 sem 定型：Nullable → 新 nullable 值；非 nullable → 诊断）
+fn lower_safe_member(ctx: &mut Ctx, e: &ExprWrap, base: &ExprWrap) -> Operand {
+    let bty = ctx.expr_ty(base);
+    let to = ctx.expr_ty(e);
+    let TyKind::Nullable(inner) = ctx.sem.tys.kind(to) else {
+        ctx.diag(e.span, "?. 结果非 nullable（sem 契约破缺）");
+        return Operand::Const(Const::Unit);
+    };
+    let inner = *inner;
+    let Some(crate::layout::MemberRes::Field { parent, index }) =
+        crate::layout::resolve_member(ctx, bty, member_name(e))
+    else {
+        ctx.diag(e.span, "?. 目标非字段成员（sem v1 方法调用已跳过）");
+        return Operand::Const(Const::Unit);
+    };
+    let bop = lower_expr(ctx, base);
+    let b = as_base(ctx, bop, e.span);
+    let flag = ctx.temp();
+    ctx.emit(Instr::Load {
+        dst: flag,
+        base: b,
+        idx: Operand::Const(Const::Int(0)),
+        ty: ctx.i8_ty,
+    });
+    let ok_b = ctx.reserve_block();
+    let null_b = ctx.reserve_block();
+    let merge_b = ctx.reserve_block();
+    ctx.terminate(Term::Br {
+        cond: Operand::Temp(flag),
+        then_: ok_b,
+        else_: null_b,
+    });
+    // 非空：字段在 payload 区（slot 1 + 字段偏移）
+    ctx.switch_to(ok_b);
+    let slot = 1 + crate::layout::field_slot(ctx, parent, index);
+    let fty = ctx.sem.defs.get(parent).sig.fields[index].1;
+    let v = ctx.temp();
+    ctx.emit(Instr::Load {
+        dst: v,
+        base: b,
+        idx: Operand::Const(Const::Int(slot as i128)),
+        ty: fty,
+    });
+    let out = ctx.temp();
+    ctx.emit(Instr::Store {
+        base: out,
+        idx: Operand::Const(Const::Int(0)),
+        src: Operand::Const(Const::Int(1)),
+        ty: ctx.i8_ty,
+    });
+    copy_slots(ctx, (out, 1), (Operand::Temp(v), 0), fty, inner, e.span);
+    ctx.terminate(Term::Jmp(merge_b));
+    // 空：flag=0，payload 不初始化
+    ctx.switch_to(null_b);
+    ctx.emit(Instr::Store {
+        base: out,
+        idx: Operand::Const(Const::Int(0)),
+        src: Operand::Const(Const::Int(0)),
+        ty: ctx.i8_ty,
+    });
+    ctx.terminate(Term::Jmp(merge_b));
+    ctx.switch_to(merge_b);
+    Operand::Temp(out)
+}
+
+/// ?? elvis：lhs 为 nullable → flag 分支（some 取 payload，none 取 rhs）；
+/// 非 nullable lhs 恒取 lhs
+fn lower_elvis(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> Operand {
+    let lty = ctx.expr_ty(lhs);
+    let to = ctx.expr_ty(e);
+    let lop = lower_expr(ctx, lhs);
+    let TyKind::Nullable(s_inner) = ctx.sem.tys.kind(lty) else {
+        return coerce(ctx, lop, lty, to);
+    };
+    let s_inner = *s_inner;
+    let lb = as_base(ctx, lop, e.span);
+    let flag = ctx.temp();
+    ctx.emit(Instr::Load {
+        dst: flag,
+        base: lb,
+        idx: Operand::Const(Const::Int(0)),
+        ty: ctx.i8_ty,
+    });
+    let some_b = ctx.reserve_block();
+    let none_b = ctx.reserve_block();
+    let merge_b = ctx.reserve_block();
+    ctx.terminate(Term::Br {
+        cond: Operand::Temp(flag),
+        then_: some_b,
+        else_: none_b,
+    });
+    ctx.switch_to(some_b);
+    let some_v = if crate::layout::scalar_slots(ctx, s_inner) <= 1 {
+        let sty = crate::layout::slot_ty(ctx, lty, 1);
+        let t = ctx.temp();
+        ctx.emit(Instr::Load {
+            dst: t,
+            base: lb,
+            idx: Operand::Const(Const::Int(1)),
+            ty: sty,
+        });
+        coerce(ctx, Operand::Temp(t), sty, to)
+    } else {
+        let base = ctx.temp();
+        copy_slots(ctx, (base, 0), (Operand::Temp(lb), 1), s_inner, to, e.span);
+        Operand::Temp(base)
+    };
+    ctx.terminate(Term::Jmp(merge_b));
+    ctx.switch_to(none_b);
+    let none_v = {
+        let v = lower_expr(ctx, rhs);
+        coerce(ctx, v, ctx.expr_ty(rhs), to)
+    };
+    ctx.terminate(Term::Jmp(merge_b));
+    ctx.switch_to(merge_b);
+    // 汇合：phi 绕法——结果槽
+    let slot = ctx.temp();
+    let n = crate::layout::scalar_slots(ctx, to).max(1);
+    if n <= 1 {
+        ctx.emit(Instr::Store {
+            base: slot,
+            idx: Operand::Const(Const::Int(0)),
+            src: some_v,
+            ty: to,
+        });
+        ctx.emit(Instr::Store {
+            base: slot,
+            idx: Operand::Const(Const::Int(0)),
+            src: none_v,
+            ty: to,
+        });
+        let dst = ctx.temp();
+        ctx.emit(Instr::Load {
+            dst,
+            base: slot,
+            idx: Operand::Const(Const::Int(0)),
+            ty: to,
+        });
+        Operand::Temp(dst)
+    } else {
+        let sb = as_base(ctx, some_v, e.span);
+        copy_slots(ctx, (slot, 0), (Operand::Temp(sb), 0), to, to, e.span);
+        let nb = as_base(ctx, none_v, e.span);
+        copy_slots(ctx, (slot, 0), (Operand::Temp(nb), 0), to, to, e.span);
+        Operand::Temp(slot)
+    }
+}
+
+/// if/while 条件：Expr 直接 lowering；Val（val 模式 = 表达式）开新作用域
+/// 绑定模式名（sem：val 条件绑定限块内可见），is 条件的绑定同样限 then 分支
+pub(crate) fn lower_cond(ctx: &mut Ctx, cond: &ast::syntax::expr::Condition) -> (Operand, bool) {
+    use ast::syntax::expr::Condition;
+    match cond {
+        Condition::Expr(e) => (lower_expr(ctx, e), matches!(e.kind, ExprKind::Is { .. })),
+        Condition::Val { pattern, expr } => {
+            let sty = ctx.expr_ty(expr);
+            let s = lower_expr(ctx, expr);
+            ctx.env_push();
+            let c = lower_pattern(ctx, pattern, s, sty, pattern.span);
+            (c, true)
+        }
     }
 }

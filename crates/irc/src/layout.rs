@@ -160,7 +160,12 @@ pub(crate) fn resolve_member(
     base_ty: TyId,
     name: ast::interner::Symbol,
 ) -> Option<MemberRes> {
-    let mut def = match ctx.sem.tys.kind(base_ty) {
+    // nullable 剥壳：?. 安全调用的 base 是 T?，成员属于内层 T
+    let mut ty = base_ty;
+    if let TyKind::Nullable(inner) = ctx.sem.tys.kind(ty) {
+        ty = *inner;
+    }
+    let mut def = match ctx.sem.tys.kind(ty) {
         TyKind::Named(d, _) | TyKind::TypeObject(d) => *d,
         _ => return None,
     };

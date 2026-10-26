@@ -87,6 +87,8 @@ pub struct SemanticOutput {
     pub flow_res: SideTable<FlowRes>,
     /// 绑定模式 → LocalBinding DefId（irc 按 DefId 取 sig.ty 与 mutability）
     pub pat_binding_def: SideTable<DefId>,
+    /// 类型注解节点 → 定型结果（irc 取模式标注的 widening 目标）
+    pub ty_of_node: SideTable<TyId>,
 }
 
 /// 语义分析入口；parser 诊断原样保留在前，语义诊断附加在后
@@ -188,6 +190,7 @@ impl Sem {
             pat_res: self.st.pat_res,
             flow_res: self.st.flow_res,
             pat_binding_def: self.st.pat_binding_def,
+            ty_of_node: self.st.ty_of_node,
         }
     }
 }

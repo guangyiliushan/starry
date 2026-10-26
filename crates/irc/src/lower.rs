@@ -27,8 +27,10 @@ pub(crate) struct SemRef<'a> {
     pub defs: &'a DefArena,
     pub expr_ty: &'a SideTable<TyId>,
     pub expr_def: &'a SideTable<DefId>,
+    pub pat_res: &'a SideTable<sem::PatRes>,
     pub pat_binding_def: &'a SideTable<DefId>,
     pub flow_res: &'a SideTable<FlowRes>,
+    pub ty_of_node: &'a SideTable<TyId>,
     pub interner: &'a mut Interner,
 }
 
@@ -62,6 +64,9 @@ pub(crate) struct Ctx<'r, 'a> {
     /// 作用域栈：Symbol → (存放处, 类型)；param 在根作用域
     env: Vec<HashMap<Symbol, (Place, TyId)>>,
     loops: Vec<LoopCtx>,
+    /// defer 栈（与块作用域同深）：每块一个待发射 defer 体队列（克隆持有，
+    /// 规避 AST 引用生命期穿透 Ctx——defer 是低频构造，克隆成本可忽略）
+    defers: Vec<Vec<crate::syntax_reexport::Block>>,
 }
 
 pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> TacOutput {
@@ -109,6 +114,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             cur_open: false,
             env: Vec::new(),
             loops: Vec::new(),
+            defers: Vec::new(),
         }
     }
 
@@ -308,13 +314,20 @@ impl<'r, 'a> Ctx<'r, 'a> {
 
     pub(crate) fn lower_block(&mut self, b: &Block) -> Option<(Operand, TyId)> {
         self.env.push(HashMap::new());
+        self.defers.push(Vec::new());
         for s in &b.stmts {
             self.lower_stmt(s);
         }
-        self.env.pop();
-        b.tail
+        // 尾表达式在块作用域内求值（M1 潜在 bug 修复：绑定须对尾式可见）
+        let tail = b
+            .tail
             .as_ref()
-            .map(|t| (expr::lower_expr(self, t), self.expr_ty(t)))
+            .map(|t| (expr::lower_expr(self, t), self.expr_ty(t)));
+        let pending = self.defers.pop().unwrap_or_default();
+        // defer 在块出口（尾式求值后、调用方终止块前）逆序发射
+        self.emit_defers(&pending);
+        self.env.pop();
+        tail
     }
 
     fn lower_stmt(&mut self, s: &StmtWrap) {
@@ -340,13 +353,24 @@ impl<'r, 'a> Ctx<'r, 'a> {
                     let op = expr::lower_expr(self, v);
                     expr::coerce(self, op, self.expr_ty(v), self.fun.ret)
                 });
+                self.emit_all_defers();
                 self.terminate(Term::Ret {
                     value: op,
                     ty: self.fun.ret,
                 });
             }
-            StmtKind::For { .. } => self.diag(s.span, "for 的 lowering 在 M2（下标循环 desugar）"),
-            StmtKind::Defer { .. } => self.diag(s.span, "defer 的 lowering 在 M2（defer 栈）"),
+            StmtKind::For {
+                pattern,
+                iterable,
+                body,
+                ..
+            } => self.lower_for(pattern, iterable, body),
+            StmtKind::Defer { body } => {
+                self.defers
+                    .last_mut()
+                    .expect("defer 栈与块同深")
+                    .push((**body).clone());
+            }
             StmtKind::Comptime { .. } => self.diag(s.span, "comptime 语句的 lowering 在 M2"),
             StmtKind::Grow { .. } => self.diag(s.span, "grow 的 lowering 未排期"),
             StmtKind::Error(_) | StmtKind::Missing(_) => {
@@ -460,17 +484,15 @@ impl<'r, 'a> Ctx<'r, 'a> {
     }
 
     fn lower_while(&mut self, node: NodeId, span: Span, cond: &Condition, body: &Block) {
-        let Condition::Expr(cond_expr) = cond else {
-            self.diag(span, "while val 条件的 lowering 在 M2（模式条件）");
-            return;
-        };
         let cond_b = self.reserve_block();
         let body_b = self.reserve_block();
         let merge_b = self.reserve_block();
         self.terminate(Term::Jmp(cond_b));
 
+        // val/is 条件的模式绑定每迭代刷新（cond_b 每轮重入），
+        // 作用域覆盖 cond_b + body（scoped 时 lower_cond 推作用域）
         self.switch_to(cond_b);
-        let c = expr::lower_expr(self, cond_expr);
+        let (c, scoped) = expr::lower_cond(self, cond);
         self.terminate(Term::Br {
             cond: c,
             then_: body_b,
@@ -485,9 +507,13 @@ impl<'r, 'a> Ctx<'r, 'a> {
         });
         self.lower_block(body);
         self.loops.pop();
+        if scoped {
+            self.env_pop();
+        }
         self.terminate(Term::Jmp(cond_b));
 
         self.switch_to(merge_b);
+        let _ = span;
     }
 
     fn lower_loop(&mut self, node: NodeId, _span: Span, body: &Block) {
@@ -523,13 +549,354 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 expr::FlowTarget::Continue => l.cont_b,
             });
         match target {
-            Some(b) => self.terminate(Term::Jmp(b)),
+            Some(b) => {
+                // 循环出口：挂起的 defer（循环体内注册）先于跳转发射
+                self.emit_all_defers();
+                self.terminate(Term::Jmp(b));
+            }
             None => self.diag(span, "break/continue 目标不在循环栈（sem 契约破缺）"),
         }
     }
 
     pub(crate) fn env_top(&mut self) -> &mut HashMap<Symbol, (Place, TyId)> {
         self.env.last_mut().expect("env root scope")
+    }
+
+    /// for Pattern in iterable：Array → 下标循环；Range 字面量 → 计数循环。
+    /// 循环变量绑定进 body 作用域（每迭代重写的 slot/快照拷贝）
+    fn lower_for(
+        &mut self,
+        pattern: &ast::syntax::pat::PatWrap,
+        iterable: &ast::syntax::expr::ExprWrap,
+        body: &Block,
+    ) {
+        let ity = self.expr_ty(iterable);
+        let ity_kind = self.sem.tys.kind(ity).clone();
+        let (elem_ty, len) = match &ity_kind {
+            TyKind::Array(el, len) => (*el, *len as i128),
+            _ => {
+                if let ast::syntax::expr::ExprKind::Binary { op, lhs, rhs } = &iterable.kind
+                    && matches!(
+                        op,
+                        ast::token::OperatorKind::DotDot | ast::token::OperatorKind::DotDotEq
+                    )
+                {
+                    return self.lower_for_range(pattern, lhs, rhs, *op, body);
+                }
+                if matches!(ity_kind, TyKind::Range(_)) {
+                    return self.lower_for_range_value(pattern, iterable, body);
+                }
+                self.diag(iterable.span, "for 只支持数组与区间迭代（sem 契约破缺）");
+                return;
+            }
+        };
+        let es = crate::layout::scalar_slots(self, elem_ty);
+        if es > 1 {
+            self.diag(iterable.span, "聚合元素的 for 迭代在 M-later");
+            return;
+        }
+        let cty = self.sem.tys.default_int;
+        let counter = self.temp();
+        self.emit(Instr::Store {
+            base: counter,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            src: Operand::Const(crate::tac::Const::Int(0)),
+            ty: cty,
+        });
+        let cond_b = self.reserve_block();
+        let body_b = self.reserve_block();
+        let merge_b = self.reserve_block();
+        self.terminate(Term::Jmp(cond_b));
+        self.switch_to(cond_b);
+        let c = self.temp();
+        self.emit(Instr::Load {
+            dst: c,
+            base: counter,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            ty: cty,
+        });
+        let cmp = self.temp();
+        self.emit(Instr::Bin {
+            dst: cmp,
+            op: crate::tac::BinOp::Lt,
+            l: Operand::Temp(c),
+            r: Operand::Const(crate::tac::Const::Int(len)),
+            ty: cty,
+        });
+        self.terminate(Term::Br {
+            cond: Operand::Temp(cmp),
+            then_: body_b,
+            else_: merge_b,
+        });
+        self.switch_to(body_b);
+        self.loops.push(LoopCtx {
+            node: pattern.id,
+            break_b: merge_b,
+            cont_b: cond_b,
+        });
+        self.env_push();
+        let elem = self.temp();
+        let arr = expr::lower_expr(self, iterable);
+        let arr = match arr {
+            Operand::Temp(t) => t,
+            Operand::Const(_) => {
+                self.diag(iterable.span, "数组迭代源为常量（sem 契约破缺）");
+                self.temp()
+            }
+        };
+        let i = self.temp();
+        self.emit(Instr::Load {
+            dst: i,
+            base: counter,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            ty: cty,
+        });
+        self.emit(Instr::Load {
+            dst: elem,
+            base: arr,
+            idx: Operand::Temp(i),
+            ty: elem_ty,
+        });
+        expr::lower_pattern(self, pattern, Operand::Temp(elem), elem_ty, pattern.span);
+        self.lower_block(body);
+        self.env_pop();
+        self.loops.pop();
+        let one = self.temp();
+        self.emit(Instr::Bin {
+            dst: one,
+            op: crate::tac::BinOp::Add,
+            l: Operand::Temp(i),
+            r: Operand::Const(crate::tac::Const::Int(1)),
+            ty: cty,
+        });
+        self.emit(Instr::Store {
+            base: counter,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            src: Operand::Temp(one),
+            ty: cty,
+        });
+        self.terminate(Term::Jmp(cond_b));
+        self.switch_to(merge_b);
+    }
+
+    /// for Pattern in lo..hi（含 ..=）：计数循环，绑定别名计数 slot
+    fn lower_for_range(
+        &mut self,
+        pattern: &ast::syntax::pat::PatWrap,
+        lhs: &ast::syntax::expr::ExprWrap,
+        rhs: &ast::syntax::expr::ExprWrap,
+        op: ast::token::OperatorKind,
+        body: &Block,
+    ) {
+        let lo = expr::lower_expr(self, lhs);
+        let hi = expr::lower_expr(self, rhs);
+        let cty = self.expr_ty(lhs);
+        let counter = self.temp();
+        self.emit(Instr::Store {
+            base: counter,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            src: lo,
+            ty: cty,
+        });
+        let cond_b = self.reserve_block();
+        let body_b = self.reserve_block();
+        let merge_b = self.reserve_block();
+        self.terminate(Term::Jmp(cond_b));
+        self.switch_to(cond_b);
+        let c = self.temp();
+        self.emit(Instr::Load {
+            dst: c,
+            base: counter,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            ty: cty,
+        });
+        let cmp_op = if op == ast::token::OperatorKind::DotDot {
+            crate::tac::BinOp::Lt
+        } else {
+            crate::tac::BinOp::Le
+        };
+        let cmp = self.temp();
+        self.emit(Instr::Bin {
+            dst: cmp,
+            op: cmp_op,
+            l: Operand::Temp(c),
+            r: hi,
+            ty: cty,
+        });
+        self.terminate(Term::Br {
+            cond: Operand::Temp(cmp),
+            then_: body_b,
+            else_: merge_b,
+        });
+        self.switch_to(body_b);
+        self.loops.push(LoopCtx {
+            node: pattern.id,
+            break_b: merge_b,
+            cont_b: cond_b,
+        });
+        self.env_push();
+        let v = self.temp();
+        self.emit(Instr::Load {
+            dst: v,
+            base: counter,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            ty: cty,
+        });
+        expr::lower_pattern(self, pattern, Operand::Temp(v), cty, pattern.span);
+        self.lower_block(body);
+        self.env_pop();
+        self.loops.pop();
+        let one = self.temp();
+        self.emit(Instr::Bin {
+            dst: one,
+            op: crate::tac::BinOp::Add,
+            l: Operand::Temp(v),
+            r: Operand::Const(crate::tac::Const::Int(1)),
+            ty: cty,
+        });
+        self.emit(Instr::Store {
+            base: counter,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            src: Operand::Temp(one),
+            ty: cty,
+        });
+        self.terminate(Term::Jmp(cond_b));
+        self.switch_to(merge_b);
+    }
+
+    /// for Pattern in range_value：lo/hi 两槽（Range 类型不区分开闭，按闭区间）
+    fn lower_for_range_value(
+        &mut self,
+        pattern: &ast::syntax::pat::PatWrap,
+        iterable: &ast::syntax::expr::ExprWrap,
+        body: &Block,
+    ) {
+        let rty = self.expr_ty(iterable);
+        let inner = match self.sem.tys.kind(rty) {
+            TyKind::Range(inner) => *inner,
+            _ => {
+                self.diag(iterable.span, "Range 迭代类型破缺（sem 契约破缺）");
+                return;
+            }
+        };
+        let rop = expr::lower_expr(self, iterable);
+        let rbase = match rop {
+            Operand::Temp(t) => t,
+            Operand::Const(_) => {
+                self.diag(iterable.span, "Range 迭代源为常量（sem 契约破缺）");
+                self.temp()
+            }
+        };
+        let lo = self.temp();
+        self.emit(Instr::Load {
+            dst: lo,
+            base: rbase,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            ty: inner,
+        });
+        let hi = self.temp();
+        self.emit(Instr::Load {
+            dst: hi,
+            base: rbase,
+            idx: Operand::Const(crate::tac::Const::Int(1)),
+            ty: inner,
+        });
+        let counter = self.temp();
+        self.emit(Instr::Store {
+            base: counter,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            src: Operand::Temp(lo),
+            ty: inner,
+        });
+        let cond_b = self.reserve_block();
+        let body_b = self.reserve_block();
+        let merge_b = self.reserve_block();
+        self.terminate(Term::Jmp(cond_b));
+        self.switch_to(cond_b);
+        let c = self.temp();
+        self.emit(Instr::Load {
+            dst: c,
+            base: counter,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            ty: inner,
+        });
+        let cmp = self.temp();
+        self.emit(Instr::Bin {
+            dst: cmp,
+            op: crate::tac::BinOp::Le,
+            l: Operand::Temp(c),
+            r: Operand::Temp(hi),
+            ty: inner,
+        });
+        self.terminate(Term::Br {
+            cond: Operand::Temp(cmp),
+            then_: body_b,
+            else_: merge_b,
+        });
+        self.switch_to(body_b);
+        self.loops.push(LoopCtx {
+            node: pattern.id,
+            break_b: merge_b,
+            cont_b: cond_b,
+        });
+        self.env_push();
+        let v = self.temp();
+        self.emit(Instr::Load {
+            dst: v,
+            base: counter,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            ty: inner,
+        });
+        expr::lower_pattern(self, pattern, Operand::Temp(v), inner, pattern.span);
+        self.lower_block(body);
+        self.env_pop();
+        self.loops.pop();
+        let one = self.temp();
+        self.emit(Instr::Bin {
+            dst: one,
+            op: crate::tac::BinOp::Add,
+            l: Operand::Temp(c),
+            r: Operand::Const(crate::tac::Const::Int(1)),
+            ty: inner,
+        });
+        self.emit(Instr::Store {
+            base: counter,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            src: Operand::Temp(one),
+            ty: inner,
+        });
+        self.terminate(Term::Jmp(cond_b));
+        self.switch_to(merge_b);
+    }
+
+    pub(crate) fn env_push(&mut self) {
+        self.env.push(HashMap::new());
+    }
+
+    pub(crate) fn env_pop(&mut self) {
+        self.env.pop();
+    }
+
+    /// 块出口逆序发射 defer 体（值弃用；defer 体内的 return/break 穿透
+    /// 由 sem 门禁保证不发生）
+    fn emit_defers(&mut self, bodies: &[crate::syntax_reexport::Block]) {
+        for body in bodies.iter().rev() {
+            let _ = self.lower_block(body);
+        }
+    }
+
+    /// return/break/continue 出口：发射全部挂起的 defer（自内向外）
+    pub(crate) fn emit_all_defers(&mut self) {
+        let all: Vec<crate::syntax_reexport::Block> = self
+            .defers
+            .iter()
+            .rev()
+            .flat_map(|v| v.iter().rev().cloned())
+            .collect();
+        for v in &mut self.defers {
+            v.clear();
+        }
+        self.emit_defers(&all);
     }
 
     pub(crate) fn lookup(&self, name: Symbol) -> Option<(Place, TyId)> {
