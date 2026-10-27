@@ -179,9 +179,13 @@ StrConcat 折叠；插值裸 chunk 的 span 形态（parser string_chunk 无
 
 **仍发 `IrcUnsupportedLowering`**：grow、带值 break（sem 循环值定型
 松弛项）、多段路径、元组下标、非简单绑定模式（元组/解构 val）、
-含绑定 Or/rest 模式、聚合元素的 for/in/索引/字段赋值、`?.` 赋值
-目标、nullable/聚合 part 的字符串化、顶层声明（需全局存储语义——
-TAC 存储类扩展，归 llvme/runtime 协同的独立里程碑）。
+含绑定 Or/rest 模式、聚合元素的 for/in/索引/字段赋值、`?.`
+与复合基座（成员/索引链）及 nullable 基座的赋值（写穿透的
+lvalue 基座解算限 Ident）、nullable/聚合 part 的字符串化、顶层
+声明（需全局存储语义——TAC 存储类扩展，归 llvme/runtime 协同的
+独立里程碑）。成员/索引赋值的基座经 lvalue_base 直通 Slot/Temp
+原存储（var 的 read_place 是快照拷贝，经它写入会丢失——2026-10-27
+审查修复，金样断言赋值后读取见新值）。
 
 ## 优化 pass（v1，按序）
 

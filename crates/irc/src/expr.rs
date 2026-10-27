@@ -111,12 +111,15 @@ pub(crate) fn read_place(ctx: &mut Ctx, place: Place, ty: TyId, span: Span) -> O
         Place::Temp(t) => Operand::Temp(t),
         Place::Slot(slot) => {
             if crate::layout::scalar_slots(ctx, ty) <= 1 {
+                // 单槽聚合（单字段 struct/无参 enum 的 tag）按槽类型加载，
+                // 不带聚合型——llvme 的槽是定宽标量单元
+                let sty = crate::layout::slot_ty(ctx, ty, 0);
                 let dst = ctx.temp();
                 ctx.emit(Instr::Load {
                     dst,
                     base: slot,
                     idx: Operand::Const(Const::Int(0)),
-                    ty,
+                    ty: sty,
                 });
                 Operand::Temp(dst)
             } else {
@@ -2167,6 +2170,31 @@ pub(crate) fn compound_binop(op: OperatorKind) -> Option<BinOp> {
     })
 }
 
+/// 赋值基座解算（写穿透）：Ident 直通 Slot/Temp 原存储——var 的
+/// read_place 是快照拷贝，经它写入会落在拷贝上（赋值丢失）。
+/// nullable 基座与非 Ident 基座（成员/索引链）的写穿透在 M-later
+/// （?. 赋值同样诊断，语义一致）
+fn lvalue_base(ctx: &mut Ctx, base: &ExprWrap, span: Span) -> Option<TempId> {
+    if matches!(ctx.sem.tys.kind(ctx.expr_ty(base)), TyKind::Nullable(_)) {
+        ctx.diag(span, "nullable 基座的成员/索引赋值在 M-later");
+        return None;
+    }
+    match &base.kind {
+        ExprKind::Ident(name) => match ctx.lookup(*name) {
+            Some((Place::Slot(s), _)) => Some(s),
+            Some((Place::Temp(t), _)) => Some(t),
+            None => {
+                ctx.diag(span, "赋值基座不在环境（sem 契约破缺）");
+                None
+            }
+        },
+        _ => {
+            ctx.diag(span, "复合基座（成员/索引链）的赋值在 M-later");
+            None
+        }
+    }
+}
+
 /// 赋值目标写入：Ident（标量 Store / 聚合逐槽拷贝）、成员字段
 /// （字段槽写入）、数组索引（slot 寻址）。safe 成员、聚合元素/
 /// 字段赋值在 M-later。v 已由调用方 coerce 到目标类型
@@ -2202,8 +2230,9 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
                 return;
             };
             let fty = ctx.sem.defs.get(parent).sig.fields[index].1;
-            let bop = lower_expr(ctx, base);
-            let b = as_base(ctx, bop, span);
+            let Some(b) = lvalue_base(ctx, base, span) else {
+                return;
+            };
             let off = crate::layout::field_slot(ctx, parent, index);
             if crate::layout::scalar_slots(ctx, fty) > 1 {
                 copy_slots(ctx, (b, off), (v, 0), fty, fty, span);
@@ -2230,8 +2259,9 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
                 ctx.diag(span, "聚合元素的索引赋值在 M-later");
                 return;
             }
-            let bop = lower_expr(ctx, base);
-            let b = as_base(ctx, bop, span);
+            let Some(b) = lvalue_base(ctx, base, span) else {
+                return;
+            };
             let iop = lower_expr(ctx, index);
             ctx.emit(Instr::Store {
                 base: b,
