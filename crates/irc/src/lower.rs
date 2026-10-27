@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use ast::interner::{Interner, Symbol};
 use ast::syntax::decl::{BindingDecl, DeclKind, FunDecl, FunctionBody};
-use ast::syntax::expr::{Block, Condition, ExprKind};
+use ast::syntax::expr::{Block, Condition};
 use ast::syntax::node::{DiagCode, Diagnostic, NodeId, SourceFile, Span};
 use ast::syntax::pat::PatKind;
 use ast::syntax::stmt::{StmtKind, StmtWrap};
@@ -450,39 +450,41 @@ impl<'r, 'a> Ctx<'r, 'a> {
         op: OperatorKind,
         value: &ast::syntax::expr::ExprWrap,
     ) {
-        if op != OperatorKind::Eq {
-            self.diag(target.span, "复合赋值运算符的 lowering 在 M2");
+        let Some(to) = self.target_ty_of(target) else {
+            self.diag(target.span, "赋值目标类型不可推定（sem 契约破缺）");
+            return;
+        };
+        if op == OperatorKind::Eq {
+            let v = expr::lower_expr(self, value);
+            let v = expr::coerce(self, v, self.expr_ty(value), to);
+            expr::assign_to(self, target, v, target.span);
             return;
         }
-        let ExprKind::Ident(name) = &target.kind else {
-            self.diag(
-                target.span,
-                "非标识符赋值目标的 lowering 在 M2（成员/索引赋值）",
-            );
+        // 复合赋值：读-改-写 desugar（cur OP value → 同目标写回）
+        let Some(bop) = expr::compound_binop(op) else {
+            self.diag(target.span, "该赋值运算符无 lowering 路径（sem 契约破缺）");
             return;
         };
-        let Some((place, ty)) = self.lookup(*name) else {
-            self.diag(target.span, "赋值目标不在环境（sem 契约破缺）");
-            return;
-        };
-        let Place::Slot(slot) = place else {
-            self.diag(
-                target.span,
-                "对不可变绑定赋值穿透 sem 门禁（SemAssignToVal 漏报）",
-            );
-            return;
-        };
+        let cur = expr::lower_expr(self, target);
+        let cur = expr::coerce(self, cur, to, to);
         let v = expr::lower_expr(self, value);
-        let v = expr::coerce(self, v, self.expr_ty(value), ty);
-        if crate::layout::scalar_slots(self, ty) > 1 {
-            expr::copy_slots(self, (slot, 0), (v, 0), ty, ty, target.span);
-        } else {
-            self.emit(Instr::Store {
-                base: slot,
-                idx: Operand::Const(crate::tac::Const::Int(0)),
-                src: v,
-                ty,
-            });
+        let v = expr::coerce(self, v, self.expr_ty(value), to);
+        let r = self.temp();
+        self.emit(Instr::Bin {
+            dst: r,
+            op: bop,
+            l: cur,
+            r: v,
+            ty: to,
+        });
+        expr::assign_to(self, target, Operand::Temp(r), target.span);
+    }
+
+    /// 赋值目标的值类型（Ident 走环境绑定类型；成员/索引走 expr_ty）
+    fn target_ty_of(&self, target: &ast::syntax::expr::ExprWrap) -> Option<TyId> {
+        match &target.kind {
+            ast::syntax::expr::ExprKind::Ident(name) => self.lookup(*name).map(|(_, ty)| ty),
+            _ => self.sem.expr_ty.get(target.id).copied(),
         }
     }
 

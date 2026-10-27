@@ -300,6 +300,38 @@ fn for_iterable_hoisted_out_of_loop() {
 }
 
 #[test]
+fn string_interpolation_runtime_chain() {
+    assert_tac(
+        "fun f(x: int): string {\n    return \"a${x}b\"\n}",
+        "fun f(%t0: i64) -> str:\n  b0:\n    param \"a\" : str\n    %t1 = call starry_str_conv : str\n    param %t0 : i64\n    %t2 = call starry_str_conv : str\n    param %t1 : str\n    param %t2 : str\n    %t3 = call starry_str_concat : str\n    param \"b\" : str\n    %t4 = call starry_str_conv : str\n    param %t3 : str\n    param %t4 : str\n    %t5 = call starry_str_concat : str\n    ret %t5 : str\n",
+    );
+}
+
+#[test]
+fn compound_assignment_desugars() {
+    assert_tac(
+        "fun f(): int {\n    var i: int = 0\n    i += 2\n    i *= 3\n    return i\n}",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i64\n    %t1 = load i64 %t0[0]\n    %t2 = add i64 %t1, 2\n    store %t0[0] = %t2 : i64\n    %t3 = load i64 %t0[0]\n    %t4 = mul i64 %t3, 3\n    store %t0[0] = %t4 : i64\n    %t5 = load i64 %t0[0]\n    ret %t5 : i64\n",
+    );
+}
+
+#[test]
+fn member_field_assignment() {
+    assert_tac(
+        "struct P {\n    x: int\n    y: int\n}\nfun f(): int {\n    var p = P(1, 2)\n    p.x = 9\n    return p.x\n}",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i64\n    store %t0[1] = 2 : i64\n    %t2 = load i64 %t0[0]\n    store %t1[0] = %t2 : i64\n    %t3 = load i64 %t0[1]\n    store %t1[1] = %t3 : i64\n    %t5 = load i64 %t1[0]\n    store %t4[0] = %t5 : i64\n    %t6 = load i64 %t1[1]\n    store %t4[1] = %t6 : i64\n    store %t4[0] = 9 : i64\n    %t8 = load i64 %t1[0]\n    store %t7[0] = %t8 : i64\n    %t9 = load i64 %t1[1]\n    store %t7[1] = %t9 : i64\n    %t10 = load i64 %t7[0]\n    ret %t10 : i64\n",
+    );
+}
+
+#[test]
+fn array_index_assignment() {
+    assert_tac(
+        "fun f(): int {\n    var a = [1, 2, 3]\n    a[1] = 9\n    return a[1]\n}",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i32\n    store %t0[1] = 2 : i32\n    store %t0[2] = 3 : i32\n    %t2 = load i32 %t0[0]\n    store %t1[0] = %t2 : i32\n    %t3 = load i32 %t0[1]\n    store %t1[1] = %t3 : i32\n    %t4 = load i32 %t0[2]\n    store %t1[2] = %t4 : i32\n    %t6 = load i32 %t1[0]\n    store %t5[0] = %t6 : i32\n    %t7 = load i32 %t1[1]\n    store %t5[1] = %t7 : i32\n    %t8 = load i32 %t1[2]\n    store %t5[2] = %t8 : i32\n    store %t5[1] = 9 : i32\n    %t10 = load i32 %t1[0]\n    store %t9[0] = %t10 : i32\n    %t11 = load i32 %t1[1]\n    store %t9[1] = %t11 : i32\n    %t12 = load i32 %t1[2]\n    store %t9[2] = %t12 : i32\n    %t13 = load i32 %t9[1]\n    %t14 = conv %t13 : i32 -> i64\n    ret %t14 : i64\n",
+    );
+}
+
+#[test]
 fn sem_error_gates_lowering() {
     let (text, codes) = dump("fun f(): int {\n    return nosuch\n}");
     assert!(codes.contains(&DiagCode::SemUndefinedName));
@@ -308,7 +340,7 @@ fn sem_error_gates_lowering() {
 
 #[test]
 fn unsupported_construct_reports_and_stops() {
-    // StringInterp 的 lowering 在 M3（stringify+concat 运行时契约）
-    let (_, codes) = dump("fun f(x: int): string {\n    return \"a${x}b\"\n}");
+    // 元组解构绑定（非简单绑定模式）在 M-later
+    let (_, codes) = dump("fun f(): int {\n    val (x, y) = (1, 2)\n    return x\n}");
     assert!(codes.contains(&DiagCode::IrcUnsupportedLowering));
 }

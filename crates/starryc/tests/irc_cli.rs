@@ -38,10 +38,10 @@ fn irc_sem_errors_gate_lowering() {
 
 #[test]
 fn irc_unsupported_construct_reports_and_stops() {
-    // StringInterp 的 lowering 在 M3（stringify+concat 运行时契约）
+    // 元组解构绑定（非简单绑定模式）在 M-later
     let (code, stdout, stderr) = irc_file(
-        "interp",
-        "fun f(x: int): string {\n    return \"a${x}b\"\n}",
+        "destructure",
+        "fun f(): int {\n    val (x, y) = (1, 2)\n    return x\n}",
     );
     assert_eq!(code, Some(1));
     assert!(stderr.contains("IrcUnsupportedLowering"), "{stderr}");

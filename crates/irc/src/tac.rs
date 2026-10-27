@@ -70,6 +70,24 @@ pub enum UnOp {
     Conv(TyId),
 }
 
+/// 调用目标：用户函数（sem 解析的 DefId）或运行时入口（llvme 侧 extern
+/// declare；std-only 红线下运行时以符号存在，不进 crate）
+#[derive(Debug, Clone, Copy)]
+pub enum Callee {
+    Def(DefId),
+    Runtime(RuntimeFn),
+}
+
+/// 运行时入口（v1：字符串化与拼接；名字由 llvme 映射 starry_str_conv /
+/// starry_str_concat）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeFn {
+    /// 标量 → string（源类型由前置 Param 指令的 ty 携带）
+    StrConv,
+    /// (string, string) → string
+    StrConcat,
+}
+
 /// 三地址指令（终止符除外）
 #[derive(Debug, Clone)]
 pub enum Instr {
@@ -111,7 +129,7 @@ pub enum Instr {
     },
     Call {
         dst: Option<TempId>,
-        callee: DefId,
+        callee: Callee,
         ty: TyId,
     },
 }
@@ -361,7 +379,11 @@ impl TacOutput {
                 if let Some(dst) = dst {
                     let _ = write!(out, "%t{} = ", dst.0);
                 }
-                let name = interner.resolve(defs.get(*callee).name);
+                let name = match callee {
+                    Callee::Def(d) => interner.resolve(defs.get(*d).name).to_string(),
+                    Callee::Runtime(RuntimeFn::StrConv) => "starry_str_conv".to_string(),
+                    Callee::Runtime(RuntimeFn::StrConcat) => "starry_str_concat".to_string(),
+                };
                 let _ = write!(
                     out,
                     "call {name} : {}",

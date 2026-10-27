@@ -60,8 +60,10 @@ pub enum Instr {
     Jmp { block: BlockId },
     Br  { cond: Operand, then_: BlockId, else_: BlockId },
     Param{ a: Operand, ty: TyId },
-    Call { dst: Option<TempId>, callee: DefId,          ty: TyId },
+    Call { dst: Option<TempId>, callee: Callee,         ty: TyId },
 }
+pub enum Callee { Def(DefId), Runtime(RuntimeFn) }  // 2026-10-27 修正案
+pub enum RuntimeFn { StrConv /*标量→string，源类型在 Param.ty*/, StrConcat }
 pub enum Term { Jmp(BlockId), Br { cond, then_, else_ }, Ret { value, ty }, Unreachable }
 pub struct Block { pub id: BlockId, pub instrs: Vec<Instr>, pub term: Term }
 pub struct TacOutput { pub funs: Vec<FunBody>, pub diags: Vec<Diagnostic> } // 有 Error 则 opt 不启动
@@ -163,10 +165,23 @@ return/break/continue 出口全量发射，出口后清空防重复；顺带修�
 汇合）；`?.` 安全调用（标量字段：flag 检查 + nullable 结果传播）；
 and/or 操作数常量短路在发射期折叠。
 
-**仍发 `IrcUnsupportedLowering`（M3）**：StringInterp（stringify+concat
-运行时契约）、grow、复合赋值、非标识符赋值目标、带值 break（sem
-循环值定型松弛项）、多段路径、元组下标、Or/含绑定模式、rest 模式、
-聚合元素的 for/in/元组模式、顶层非 fun 声明。
+**M3（2026-10-27）运行时契约与赋值补全**：`Callee` 枚举修正案——
+调用目标分 `Def(DefId)`（用户函数）与 `Runtime(RuntimeFn)`（运行时
+extern 入口：v1 = StrConv/StrConcat，名字由 llvme 映射
+`starry_str_conv`/`starry_str_concat` 并 declare；std-only 红线下
+运行时以符号存在不进 crate。opt 侧影响：五个 pass 对 Call 均按
+"有副作用"处理，callee 形状不可见，零改动成立）。StringInterp
+lowering：逐 part StrConv（源类型由前置 Param 的 ty 携带）+ 左结合
+StrConcat 折叠；插值裸 chunk 的 span 形态（parser string_chunk 无
+引号）在字面量层兼容。赋值补全：复合赋值读-改-写 desugar（十个
+复合算子全族）；赋值目标扩展到成员字段（字段槽写入）与数组索引
+（slot 寻址）；`literal()` 兼容插值 chunk span。
+
+**仍发 `IrcUnsupportedLowering`**：grow、带值 break（sem 循环值定型
+松弛项）、多段路径、元组下标、非简单绑定模式（元组/解构 val）、
+含绑定 Or/rest 模式、聚合元素的 for/in/索引/字段赋值、`?.` 赋值
+目标、nullable/聚合 part 的字符串化、顶层声明（需全局存储语义——
+TAC 存储类扩展，归 llvme/runtime 协同的独立里程碑）。
 
 ## 优化 pass（v1，按序）
 

@@ -8,7 +8,7 @@ use ast::token::{LiteralKind, OperatorKind};
 use sem::{DefKind, TyId, TyKind};
 
 use crate::lower::{Ctx, Place};
-use crate::tac::{BinOp, Const, Instr, Operand, TempId, Term, UnOp};
+use crate::tac::{BinOp, Callee, Const, Instr, Operand, RuntimeFn, TempId, Term, UnOp};
 
 /// lower_jump 的目标种类（与 sem::FlowKind 对齐，避免公开依赖其私有语义）
 #[derive(Debug, Clone, Copy)]
@@ -63,13 +63,7 @@ pub(crate) fn lower_expr(ctx: &mut Ctx, e: &ExprWrap) -> Operand {
         ExprKind::Tuple(elems) => tuple_literal(ctx, e, elems),
         ExprKind::Array(elems) => array_literal(ctx, e, elems),
         ExprKind::ArrayRepeat { value, count } => array_repeat(ctx, e, value, *count),
-        ExprKind::StringInterp { .. } => {
-            ctx.diag(
-                e.span,
-                "字符串插值的 lowering 在 M3（stringify+concat 契约）",
-            );
-            Operand::Const(Const::Unit)
-        }
+        ExprKind::StringInterp { parts } => string_interp(ctx, e, parts),
         ExprKind::ForceUnwrap { expr } => unwrap(ctx, e, expr, ctx.expr_ty(e)),
         ExprKind::Lambda { .. }
         | ExprKind::Concurrent { .. }
@@ -216,10 +210,15 @@ fn literal(ctx: &mut Ctx, kind: LiteralKind, span: Span) -> Operand {
             Operand::Const(Const::Float(v))
         }
         LiteralKind::String => {
-            let inner = text
-                .strip_prefix('"')
-                .and_then(|s| s.strip_suffix('"'))
-                .expect("lexer 保证引号配对");
+            // 两种 span 形态：整字面量 token（带引号）与插值裸 chunk
+            // （parser string_chunk 的 span 即去引号文本）
+            let inner = if text.starts_with('"') {
+                text.strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .expect("lexer 保证引号配对")
+            } else {
+                text
+            };
             let decoded = unescape(ctx, inner, span);
             Operand::Const(Const::Str(ctx.intern(&decoded)))
         }
@@ -644,7 +643,7 @@ fn call(
     };
     ctx.emit(Instr::Call {
         dst,
-        callee: def,
+        callee: Callee::Def(def),
         ty: ret,
     });
     match dst {
@@ -2092,5 +2091,155 @@ pub(crate) fn lower_cond(ctx: &mut Ctx, cond: &ast::syntax::expr::Condition) -> 
             let c = lower_pattern(ctx, pattern, s, sty, pattern.span);
             (c, true)
         }
+    }
+}
+
+// ---- M3：字符串插值 + 赋值补全 ----
+
+/// 字符串插值 "a${x}b"：逐 part 经运行时 starry_str_conv（源类型在
+/// Param 的 ty 上），再左结合 starry_str_concat 折叠。runtime 以
+/// extern 符号存在（llvme declare），std-only 红线不进 crate
+fn string_interp(ctx: &mut Ctx, e: &ExprWrap, parts: &[ExprWrap]) -> Operand {
+    let str_ty = ctx.expr_ty(e);
+    let mut acc: Option<TempId> = None;
+    for part in parts {
+        let pty = ctx.expr_ty(part);
+        if crate::layout::scalar_slots(ctx, pty) != 1 {
+            ctx.diag(part.span, "聚合 part 的字符串化在 M-later");
+            continue;
+        }
+        if matches!(ctx.sem.tys.kind(pty), TyKind::Nullable(_)) {
+            ctx.diag(part.span, "nullable part 的字符串化在 M-later");
+            continue;
+        }
+        let v = lower_expr(ctx, part);
+        ctx.emit(Instr::Param { a: v, ty: pty });
+        let conv = ctx.temp();
+        ctx.emit(Instr::Call {
+            dst: Some(conv),
+            callee: Callee::Runtime(RuntimeFn::StrConv),
+            ty: str_ty,
+        });
+        acc = Some(match acc {
+            None => conv,
+            Some(prev) => {
+                ctx.emit(Instr::Param {
+                    a: Operand::Temp(prev),
+                    ty: str_ty,
+                });
+                ctx.emit(Instr::Param {
+                    a: Operand::Temp(conv),
+                    ty: str_ty,
+                });
+                let d = ctx.temp();
+                ctx.emit(Instr::Call {
+                    dst: Some(d),
+                    callee: Callee::Runtime(RuntimeFn::StrConcat),
+                    ty: str_ty,
+                });
+                d
+            }
+        });
+    }
+    match acc {
+        Some(t) => Operand::Temp(t),
+        None => {
+            ctx.diag(e.span, "插值无可用 part（诊断后置信下游不启动）");
+            Operand::Const(Const::Unit)
+        }
+    }
+}
+
+/// 复合赋值算子 → 底层二元算子
+pub(crate) fn compound_binop(op: OperatorKind) -> Option<BinOp> {
+    Some(match op {
+        OperatorKind::PlusEq => BinOp::Add,
+        OperatorKind::MinusEq => BinOp::Sub,
+        OperatorKind::StarEq => BinOp::Mul,
+        OperatorKind::SlashEq => BinOp::Div,
+        OperatorKind::PercentEq => BinOp::Rem,
+        OperatorKind::BitAndEq => BinOp::BitAnd,
+        OperatorKind::BitOrEq => BinOp::BitOr,
+        OperatorKind::BitXorEq => BinOp::BitXor,
+        OperatorKind::ShlEq => BinOp::Shl,
+        OperatorKind::ShrEq => BinOp::Shr,
+        _ => return None,
+    })
+}
+
+/// 赋值目标写入：Ident（标量 Store / 聚合逐槽拷贝）、成员字段
+/// （字段槽写入）、数组索引（slot 寻址）。safe 成员、聚合元素/
+/// 字段赋值在 M-later。v 已由调用方 coerce 到目标类型
+pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span) {
+    match &target.kind {
+        ExprKind::Ident(name) => {
+            let Some((place, ty)) = ctx.lookup(*name) else {
+                ctx.diag(span, "赋值目标不在环境（sem 契约破缺）");
+                return;
+            };
+            let Place::Slot(slot) = place else {
+                ctx.diag(span, "对不可变绑定赋值穿透 sem 门禁（SemAssignToVal 漏报）");
+                return;
+            };
+            if crate::layout::scalar_slots(ctx, ty) > 1 {
+                copy_slots(ctx, (slot, 0), (v, 0), ty, ty, span);
+            } else {
+                ctx.emit(Instr::Store {
+                    base: slot,
+                    idx: Operand::Const(Const::Int(0)),
+                    src: v,
+                    ty,
+                });
+            }
+        }
+        ExprKind::Member {
+            base, safe: false, ..
+        } => {
+            let Some(crate::layout::MemberRes::Field { parent, index }) =
+                crate::layout::resolve_member(ctx, ctx.expr_ty(base), member_name(target))
+            else {
+                ctx.diag(span, "?. 目标或字段解析失败（sem 契约破缺）");
+                return;
+            };
+            let fty = ctx.sem.defs.get(parent).sig.fields[index].1;
+            let bop = lower_expr(ctx, base);
+            let b = as_base(ctx, bop, span);
+            let off = crate::layout::field_slot(ctx, parent, index);
+            if crate::layout::scalar_slots(ctx, fty) > 1 {
+                copy_slots(ctx, (b, off), (v, 0), fty, fty, span);
+            } else {
+                ctx.emit(Instr::Store {
+                    base: b,
+                    idx: Operand::Const(Const::Int(off as i128)),
+                    src: v,
+                    ty: fty,
+                });
+            }
+        }
+        ExprKind::Member { safe: true, .. } => {
+            ctx.diag(span, "?. 赋值目标的 lowering 未支持（sem 契约破缺）");
+        }
+        ExprKind::Index { base, index } => {
+            let bty = ctx.expr_ty(base);
+            let TyKind::Array(elem, _) = ctx.sem.tys.kind(bty) else {
+                ctx.diag(span, "索引赋值目标非数组（sem 契约破缺）");
+                return;
+            };
+            let elem = *elem;
+            if crate::layout::scalar_slots(ctx, elem) > 1 {
+                ctx.diag(span, "聚合元素的索引赋值在 M-later");
+                return;
+            }
+            let bop = lower_expr(ctx, base);
+            let b = as_base(ctx, bop, span);
+            let iop = lower_expr(ctx, index);
+            ctx.emit(Instr::Store {
+                base: b,
+                idx: iop,
+                src: v,
+                ty: elem,
+            });
+        }
+        _ => ctx.diag(span, "该赋值目标无 lowering 路径（sem 契约破缺）"),
     }
 }
