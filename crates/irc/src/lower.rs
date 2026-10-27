@@ -53,6 +53,18 @@ pub(crate) struct LoopCtx {
     pub defer_depth: usize,
 }
 
+impl<'r, 'a> crate::layout::LayoutView for Ctx<'r, 'a> {
+    fn tys(&self) -> &TyArena {
+        self.sem.tys
+    }
+    fn defs(&self) -> &DefArena {
+        self.sem.defs
+    }
+    fn i8_ty(&self) -> TyId {
+        self.i8_ty
+    }
+}
+
 pub(crate) struct Ctx<'r, 'a> {
     pub sem: &'r mut SemRef<'a>,
     pub source: &'a str,

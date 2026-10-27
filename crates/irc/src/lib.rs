@@ -12,12 +12,12 @@
 //! 尚未 lower 的构造（`IrcUnsupportedLowering`）。
 
 mod expr;
+pub mod layout;
 
 /// AST 类型的单一重出口（defer 体克隆持有用）
 pub(crate) mod syntax_reexport {
     pub(crate) use ast::syntax::expr::Block;
 }
-mod layout;
 mod lower;
 pub mod tac;
 

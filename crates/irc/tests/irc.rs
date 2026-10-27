@@ -143,7 +143,7 @@ fn array_literal_and_dynamic_index() {
 fn array_repeat_fill_loop() {
     assert_tac(
         "fun f(): int {\n    val a = [9; 3]\n    return a[0]\n}",
-        "fun f() -> i64:\n  b0:\n    store %t1[0] = 0 : i32\n    jmp b1\n  b1:\n    %t2 = load i32 %t1[0]\n    %t3 = lt i32 %t2, 3\n    br %t3 -> b2, b3\n  b2:\n    %t4 = load i32 %t1[0]\n    store %t0[%t4] = 9 : i32\n    %t5 = add i32 %t4, 1\n    store %t1[0] = %t5 : i32\n    jmp b1\n  b3:\n    %t6 = load i32 %t0[0]\n    %t7 = conv %t6 : i32 -> i64\n    ret %t7 : i64\n",
+        "fun f() -> i64:\n  b0:\n    %t0 = slot [3]\n    store %t1[0] = 0 : i32\n    jmp b1\n  b1:\n    %t2 = load i32 %t1[0]\n    %t3 = lt i32 %t2, 3\n    br %t3 -> b2, b3\n  b2:\n    %t4 = load i32 %t1[0]\n    store %t0[%t4] = 9 : i32\n    %t5 = add i32 %t4, 1\n    store %t1[0] = %t5 : i32\n    jmp b1\n  b3:\n    %t6 = load i32 %t0[0]\n    %t7 = conv %t6 : i32 -> i64\n    ret %t7 : i64\n",
     );
 }
 

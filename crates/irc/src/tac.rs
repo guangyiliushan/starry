@@ -122,6 +122,13 @@ pub enum Instr {
         src: Operand,
         ty: TyId,
     },
+    /// 聚合基址声明：dst 是 count 个槽的块基址。当前由数组填充
+    /// [v; n] 发射（其槽写入全动态，llvme 需静态尺寸分配存储）。
+    /// opt 侧契约：声明非计算值——DCE 永不删，fold/CSE/copy-prop 跳过
+    Slot {
+        dst: TempId,
+        count: u32,
+    },
     /// 调用实参（按形参序发射，紧邻随后的 Call）
     Param {
         a: Operand,
@@ -369,6 +376,9 @@ impl TacOutput {
                 out.push_str("] = ");
                 op_text(src, interner, out);
                 let _ = write!(out, " : {}", ty_display(tys, defs, interner, *ty));
+            }
+            Instr::Slot { dst, count } => {
+                let _ = write!(out, "%t{} = slot [{}]", dst.0, count);
             }
             Instr::Param { a, ty } => {
                 out.push_str("param ");

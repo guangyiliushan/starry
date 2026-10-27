@@ -8,6 +8,7 @@
 //! - `starryc check <file>`：parse → sem 全链诊断
 //!   （exit 0 干净 / exit 1 有诊断，逐条 stderr `path:start..end: code: msg`）
 //! - `starryc irc <file>`：parse → sem → irc，TAC 文本 stdout
+//! - `starryc llvme <file>`：parse → sem → irc → llvme，.ll 文本 stdout
 //!   （exit 0 干净 / exit 1 有诊断，格式同 check）
 
 use std::process::ExitCode;
@@ -38,13 +39,14 @@ fn main() -> ExitCode {
         [cmd, source] if cmd == "tokenize" => cmd_tokenize(source),
         [cmd, path] if cmd == "check" => cmd_check(path),
         [cmd, path] if cmd == "irc" => cmd_irc(path),
+        [cmd, path] if cmd == "llvme" => cmd_llvme(path),
         _ => usage(),
     }
 }
 
 fn usage() -> ExitCode {
     eprintln!(
-        "用法: starryc match <regex> <input> | starryc dump-nfa <regex> | starryc tokenize <source> | starryc check <file> | starryc irc <file>"
+        "用法: starryc match <regex> <input> | starryc dump-nfa <regex> | starryc tokenize <source> | starryc check <file> | starryc irc <file> | starryc llvme <file>"
     );
     ExitCode::from(2)
 }
@@ -197,5 +199,46 @@ fn cmd_irc(path: &str) -> ExitCode {
         return ExitCode::FAILURE;
     }
     print!("{}", tac.dump(&output.tys, &output.defs, &output.interner));
+    ExitCode::SUCCESS
+}
+
+/// parse → sem → irc → llvme：.ll 文本走 stdout；诊断同 irc 子命令
+fn cmd_llvme(path: &str) -> ExitCode {
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(e) => {
+            eprintln!("starryc: 无法读取 {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let parsed = match parser::parse_source(&source) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("starryc: {path}: 解析失败（机器层）: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut output = sem::analyze(parsed);
+    if !output.diagnostics.is_empty() {
+        for d in &output.diagnostics {
+            eprintln!(
+                "{path}:{}..{}: {:?}: {}",
+                d.span.start, d.span.end, d.code, d.message
+            );
+        }
+        return ExitCode::FAILURE;
+    }
+    let tac = irc::lower(&mut output, &source);
+    if !tac.diags.is_empty() {
+        for d in &tac.diags {
+            eprintln!(
+                "{path}:{}..{}: {:?}: {}",
+                d.span.start, d.span.end, d.code, d.message
+            );
+        }
+        return ExitCode::FAILURE;
+    }
+    let text = llvme::emit(&tac, &output.tys, &output.defs, &output.interner);
+    print!("{text}");
     ExitCode::SUCCESS
 }

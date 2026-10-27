@@ -10,3 +10,4 @@ lex = { path = "../lex" }
 parser = { path = "../parser" }
 sem = { path = "../sem" }
 irc = { path = "../irc" }
+llvme = { path = "../llvme" }

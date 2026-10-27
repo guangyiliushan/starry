@@ -60,6 +60,7 @@ pub enum Instr {
     Jmp { block: BlockId },
     Br  { cond: Operand, then_: BlockId, else_: BlockId },
     Param{ a: Operand, ty: TyId },
+    Slot { dst: TempId, count: u32 },  // 2026-10-27：聚合基址声明（数组填充的动态槽写入尺寸）
     Call { dst: Option<TempId>, callee: Callee,         ty: TyId },
 }
 pub enum Callee { Def(DefId), Runtime(RuntimeFn) }  // 2026-10-27 修正案
@@ -206,6 +207,21 @@ v1 跳过（记入扩展位，不归本阶段）：全局数据流（到达定�
 分配——机器码层面 LLVM 后端全包。教科书后半程 pass 需要时按同一
 `&mut FunBody` 接口加。扩展位另记：跳表 switch、Conv 常量折叠、
 值编号/DAG。
+
+## llvme 落地（2026-10-27）
+
+存储模型定案：每个 temp = 入口块恰好一个 alloca（Cell = i64 槽；
+Block(n) = [n x i64]；PtrCell = ptr 槽装聚合指针——聚合实参/返回值
+按指针，sem v1 形参不可变故别名安全）；槽寻址统一
+`getelementptr [n x i64], ptr p, i64 0, i64 i`，tag/flag 是槽 0 里的
+i8（写时就地 store i8，免 bitcast——不透明指针风格，LLVM 15+）；
+升 SSA 全交外部 `opt -mem2reg`。temp 存储分类两遍法：常量槽访问 /
+Slot 声明 / 聚合返回值推断槽数。浮点一律十六进制字面量（f32/f64
+各按位模式）；字符串常量 @.str.N private constant + gep 操作数；
+运行时入口按调用点参数类型实例化声明（starry_str_conv.i64 等）；
+main 包装 = 无参 main 存在时 `define i32 @main` 调它返 0。
+`irc::layout` 公开为 LayoutView trait（irc/llvme 共享槽布局的
+跨 crate 契约）。可选验收层：llvm-as 在测试侧调用，无工具链即跳过。
 
 ## LLVM IR 发射契约（llvme）
 

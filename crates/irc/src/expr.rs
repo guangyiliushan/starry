@@ -1005,6 +1005,11 @@ fn array_repeat(ctx: &mut Ctx, e: &ExprWrap, value: &ExprWrap, count: u32) -> Op
     let v = lower_expr(ctx, value);
     let v = coerce(ctx, v, ctx.expr_ty(value), elem);
     let base = ctx.temp();
+    // 动态槽写入的静态尺寸声明（llvme 分配存储的信息源）
+    ctx.emit(Instr::Slot {
+        dst: base,
+        count: (es.max(1) * count as usize) as u32,
+    });
     let ity = ctx.sem.tys.default_int;
     // 元素序计数器（slot）
     let counter = ctx.temp();
