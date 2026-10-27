@@ -252,6 +252,54 @@ fn safe_call_chain_with_elvis() {
 }
 
 #[test]
+fn for_loop_break_targets_loop() {
+    assert_tac(
+        "fun f(): int {\n    var s = 0\n    for i in 1..3 {\n        s = s + i\n        break\n    }\n    return s\n}",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i32\n    store %t1[0] = 1 : i32\n    jmp b1\n  b1:\n    %t2 = load i32 %t1[0]\n    %t3 = lt i32 %t2, 3\n    br %t3 -> b2, b3\n  b2:\n    %t4 = load i32 %t1[0]\n    %t5 = load i32 %t0[0]\n    %t6 = add i32 %t5, %t4\n    store %t0[0] = %t6 : i32\n    jmp b3\n  b3:\n    %t8 = load i32 %t0[0]\n    %t9 = conv %t8 : i32 -> i64\n    ret %t9 : i64\n  b4:\n    %t7 = add i32 %t4, 1\n    store %t1[0] = %t7 : i32\n    jmp b1\n",
+    );
+}
+
+#[test]
+fn defer_at_return_runs_innermost_first() {
+    assert_tac(
+        "fun f(): int {\n    var a = 0\n    defer {\n        a = a + 10\n    }\n    if true {\n        defer {\n            a = a + 1\n        }\n        return a\n    }\n    return 0\n}",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i32\n    br true -> b1, b2\n  b1:\n    %t1 = load i32 %t0[0]\n    %t2 = conv %t1 : i32 -> i64\n    %t3 = load i32 %t0[0]\n    %t4 = add i32 %t3, 1\n    store %t0[0] = %t4 : i32\n    %t5 = load i32 %t0[0]\n    %t6 = add i32 %t5, 10\n    store %t0[0] = %t6 : i32\n    ret %t2 : i64\n  b2:\n    jmp b3\n  b3:\n    ret 0 : i64\n",
+    );
+}
+
+#[test]
+fn defer_at_break_runs_loop_level_only() {
+    assert_tac(
+        "fun f(): int {\n    var a = 0\n    defer {\n        a = a + 10\n    }\n    while a < 1 {\n        defer {\n            a = a + 1\n        }\n        break\n    }\n    return a\n}",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i32\n    jmp b1\n  b1:\n    %t1 = load i32 %t0[0]\n    %t2 = lt i32 %t1, 1\n    br %t2 -> b2, b3\n  b2:\n    %t3 = load i32 %t0[0]\n    %t4 = add i32 %t3, 1\n    store %t0[0] = %t4 : i32\n    jmp b3\n  b3:\n    %t5 = load i32 %t0[0]\n    %t6 = conv %t5 : i32 -> i64\n    %t7 = load i32 %t0[0]\n    %t8 = add i32 %t7, 10\n    store %t0[0] = %t8 : i32\n    ret %t6 : i64\n",
+    );
+}
+
+#[test]
+fn when_with_literal_subject() {
+    assert_tac(
+        "fun f(): int {\n    return when 0 {\n        0 -> 1\n        else -> 2\n    }\n}",
+        "fun f() -> i64:\n  b0:\n    %t0 = copy 0 : i32\n    %t2 = eq i32 %t0, 0\n    br %t2 -> b2, b3\n  b1:\n    %t3 = load i32 %t1[0]\n    %t4 = conv %t3 : i32 -> i64\n    ret %t4 : i64\n  b2:\n    store %t1[0] = 1 : i32\n    jmp b1\n  b3:\n    jmp b4\n  b4:\n    store %t1[0] = 2 : i32\n    jmp b1\n  b5:\n    unreachable\n",
+    );
+}
+
+#[test]
+fn range_value_materializes_two_slots() {
+    assert_tac(
+        "fun f(x: i32): bool {\n    val r = 1..5\n    return x in r\n}",
+        "fun f(%t0: i32) -> i1:\n  b0:\n    store %t1[0] = 1 : i32\n    store %t1[1] = 5 : i32\n    %t2 = load i32 %t1[0]\n    %t3 = load i32 %t1[1]\n    %t4 = ge i32 %t0, %t2\n    %t5 = le i32 %t0, %t3\n    br %t4 -> b1, b3\n  b1:\n    br %t5 -> b2, b3\n  b2:\n    %t6 = copy true : i1\n    jmp b4\n  b3:\n    %t6 = copy false : i1\n    jmp b4\n  b4:\n    ret %t6 : i1\n",
+    );
+}
+
+#[test]
+fn for_iterable_hoisted_out_of_loop() {
+    assert_tac(
+        "fun f(): int {\n    var arr = [1, 2, 3]\n    var s: int = 0\n    for i in arr {\n        s = s + i\n    }\n    return s\n}",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i32\n    store %t0[1] = 2 : i32\n    store %t0[2] = 3 : i32\n    %t2 = load i32 %t0[0]\n    store %t1[0] = %t2 : i32\n    %t3 = load i32 %t0[1]\n    store %t1[1] = %t3 : i32\n    %t4 = load i32 %t0[2]\n    store %t1[2] = %t4 : i32\n    store %t5[0] = 0 : i64\n    %t7 = load i32 %t1[0]\n    store %t6[0] = %t7 : i32\n    %t8 = load i32 %t1[1]\n    store %t6[1] = %t8 : i32\n    %t9 = load i32 %t1[2]\n    store %t6[2] = %t9 : i32\n    store %t10[0] = 0 : i32\n    jmp b1\n  b1:\n    %t11 = load i32 %t10[0]\n    %t12 = lt i32 %t11, 3\n    br %t12 -> b2, b3\n  b2:\n    %t14 = load i32 %t10[0]\n    %t13 = load i32 %t6[%t14]\n    %t15 = load i64 %t5[0]\n    %t16 = conv %t13 : i32 -> i64\n    %t17 = add i64 %t15, %t16\n    store %t5[0] = %t17 : i64\n    %t18 = add i32 %t14, 1\n    store %t10[0] = %t18 : i32\n    jmp b1\n  b3:\n    %t19 = load i64 %t5[0]\n    ret %t19 : i64\n",
+    );
+}
+
+#[test]
 fn sem_error_gates_lowering() {
     let (text, codes) = dump("fun f(): int {\n    return nosuch\n}");
     assert!(codes.contains(&DiagCode::SemUndefinedName));

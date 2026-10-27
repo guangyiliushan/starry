@@ -354,6 +354,9 @@ fn binary(
     if op == OperatorKind::QuestionQuestion {
         return lower_elvis(ctx, e, lhs, rhs);
     }
+    if op == OperatorKind::DotDot || op == OperatorKind::DotDotEq {
+        return range_value(ctx, e, lhs, rhs);
+    }
     let Some(bop) = binop(op) else {
         ctx.diag(e.span, "该二元运算符无 TAC 映射（sem 契约破缺）");
         return Operand::Const(Const::Unit);
@@ -1639,8 +1642,6 @@ fn lower_in(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> Oper
                 idx: Operand::Const(Const::Int(1)),
                 ty: lty,
             });
-            let c1 = cmp_const(ctx, BinOp::Ge, s.clone(), Const::Int(0), lty);
-            let _ = c1;
             let t1 = ctx.temp();
             ctx.emit(Instr::Bin {
                 dst: t1,
@@ -1778,7 +1779,20 @@ fn lower_when(
         Some(s) => {
             let op = lower_expr(ctx, s);
             let sty = ctx.expr_ty(s);
-            let b = as_base(ctx, op, e.span);
+            // 主语一律物化为 temp：字面量/常量主语经 Copy（复制传播会吃掉），
+            // 模式分支的槽 Load 与表达式分支的比较共用同一基址
+            let b = match op {
+                Operand::Temp(t) => t,
+                Operand::Const(c) => {
+                    let t = ctx.temp();
+                    ctx.emit(Instr::Copy {
+                        dst: t,
+                        src: Operand::Const(c),
+                        ty: sty,
+                    });
+                    t
+                }
+            };
             (b, sty)
         }
         None => {
@@ -2031,6 +2045,38 @@ fn lower_elvis(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> O
         copy_slots(ctx, (slot, 0), (Operand::Temp(nb), 0), to, to, e.span);
         Operand::Temp(slot)
     }
+}
+
+/// 区间值物化 lo..hi：两槽基址（slot0 = lo，slot1 = hi）。
+/// `in` 的物化路径与 for-over-Range 值消费此形态；类型不区分开闭
+/// （Range(T) 无 exclusivity 信息，消费端按闭区间，见 opt-notes corner）
+fn range_value(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> Operand {
+    let rty = ctx.expr_ty(e);
+    let inner = match ctx.sem.tys.kind(rty) {
+        TyKind::Range(inner) => *inner,
+        _ => {
+            ctx.diag(e.span, "区间表达式类型非 Range（sem 契约破缺）");
+            return Operand::Const(Const::Unit);
+        }
+    };
+    let lo_op = lower_expr(ctx, lhs);
+    let lo = coerce(ctx, lo_op, ctx.expr_ty(lhs), inner);
+    let hi_op = lower_expr(ctx, rhs);
+    let hi = coerce(ctx, hi_op, ctx.expr_ty(rhs), inner);
+    let base = ctx.temp();
+    ctx.emit(Instr::Store {
+        base,
+        idx: Operand::Const(Const::Int(0)),
+        src: lo,
+        ty: inner,
+    });
+    ctx.emit(Instr::Store {
+        base,
+        idx: Operand::Const(Const::Int(1)),
+        src: hi,
+        ty: inner,
+    });
+    Operand::Temp(base)
 }
 
 /// if/while 条件：Expr 直接 lowering；Val（val 模式 = 表达式）开新作用域

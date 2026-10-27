@@ -42,12 +42,15 @@ pub(crate) enum Place {
     Slot(TempId),
 }
 
-/// 具名/匿名循环的已解析跳转目标（flow_res 回指 node 匹配）
+/// 具名/匿名循环的已解析跳转目标（flow_res 回指 node 匹配）。
+/// defer_depth = 进入循环时 defer 栈深：break/continue 只发射
+/// 深度以上的 defer（循环内注册的），外层 defer 归各自的出口
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LoopCtx {
     pub node: NodeId,
     pub break_b: BlockId,
     pub cont_b: BlockId,
+    pub defer_depth: usize,
 }
 
 pub(crate) struct Ctx<'r, 'a> {
@@ -325,7 +328,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             .map(|t| (expr::lower_expr(self, t), self.expr_ty(t)));
         let pending = self.defers.pop().unwrap_or_default();
         // defer 在块出口（尾式求值后、调用方终止块前）逆序发射
-        self.emit_defers(&pending);
+        self.emit_defers(&pending.iter().rev().cloned().collect::<Vec<_>>());
         self.env.pop();
         tail
     }
@@ -353,7 +356,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
                     let op = expr::lower_expr(self, v);
                     expr::coerce(self, op, self.expr_ty(v), self.fun.ret)
                 });
-                self.emit_all_defers();
+                self.emit_defers_above(0);
                 self.terminate(Term::Ret {
                     value: op,
                     ty: self.fun.ret,
@@ -364,7 +367,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 iterable,
                 body,
                 ..
-            } => self.lower_for(pattern, iterable, body),
+            } => self.lower_for(s.id, pattern, iterable, body),
             StmtKind::Defer { body } => {
                 self.defers
                     .last_mut()
@@ -504,6 +507,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             node,
             break_b: merge_b,
             cont_b: cond_b,
+            defer_depth: self.defers.len(),
         });
         self.lower_block(body);
         self.loops.pop();
@@ -526,6 +530,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             node,
             break_b: merge_b,
             cont_b: body_b,
+            defer_depth: self.defers.len(),
         });
         self.lower_block(body);
         self.loops.pop();
@@ -544,14 +549,19 @@ impl<'r, 'a> Ctx<'r, 'a> {
             .iter()
             .rev()
             .find(|l| l.node == flow.target)
-            .map(|l| match kind {
-                expr::FlowTarget::Break => l.break_b,
-                expr::FlowTarget::Continue => l.cont_b,
+            .map(|l| {
+                (
+                    match kind {
+                        expr::FlowTarget::Break => l.break_b,
+                        expr::FlowTarget::Continue => l.cont_b,
+                    },
+                    l.defer_depth,
+                )
             });
         match target {
-            Some(b) => {
-                // 循环出口：挂起的 defer（循环体内注册）先于跳转发射
-                self.emit_all_defers();
+            Some((b, depth)) => {
+                // 循环出口：只发射循环内注册的 defer（内→外），外层归各自出口
+                self.emit_defers_above(depth);
                 self.terminate(Term::Jmp(b));
             }
             None => self.diag(span, "break/continue 目标不在循环栈（sem 契约破缺）"),
@@ -566,6 +576,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
     /// 循环变量绑定进 body 作用域（每迭代重写的 slot/快照拷贝）
     fn lower_for(
         &mut self,
+        node: NodeId,
         pattern: &ast::syntax::pat::PatWrap,
         iterable: &ast::syntax::expr::ExprWrap,
         body: &Block,
@@ -581,10 +592,10 @@ impl<'r, 'a> Ctx<'r, 'a> {
                         ast::token::OperatorKind::DotDot | ast::token::OperatorKind::DotDotEq
                     )
                 {
-                    return self.lower_for_range(pattern, lhs, rhs, *op, body);
+                    return self.lower_for_range(node, pattern, lhs, rhs, *op, body);
                 }
                 if matches!(ity_kind, TyKind::Range(_)) {
-                    return self.lower_for_range_value(pattern, iterable, body);
+                    return self.lower_for_range_value(node, pattern, iterable, body);
                 }
                 self.diag(iterable.span, "for 只支持数组与区间迭代（sem 契约破缺）");
                 return;
@@ -595,6 +606,15 @@ impl<'r, 'a> Ctx<'r, 'a> {
             self.diag(iterable.span, "聚合元素的 for 迭代在 M-later");
             return;
         }
+        // iterable 入口块一次求值（副作用只执行一次；基址 temp 穿入循环）
+        let arr_op = expr::lower_expr(self, iterable);
+        let arr = match arr_op {
+            Operand::Temp(t) => t,
+            Operand::Const(_) => {
+                self.diag(iterable.span, "数组迭代源为常量（sem 契约破缺）");
+                self.temp()
+            }
+        };
         let cty = self.sem.tys.default_int;
         let counter = self.temp();
         self.emit(Instr::Store {
@@ -630,20 +650,13 @@ impl<'r, 'a> Ctx<'r, 'a> {
         });
         self.switch_to(body_b);
         self.loops.push(LoopCtx {
-            node: pattern.id,
+            node,
             break_b: merge_b,
             cont_b: cond_b,
+            defer_depth: self.defers.len(),
         });
         self.env_push();
         let elem = self.temp();
-        let arr = expr::lower_expr(self, iterable);
-        let arr = match arr {
-            Operand::Temp(t) => t,
-            Operand::Const(_) => {
-                self.diag(iterable.span, "数组迭代源为常量（sem 契约破缺）");
-                self.temp()
-            }
-        };
         let i = self.temp();
         self.emit(Instr::Load {
             dst: i,
@@ -682,6 +695,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
     /// for Pattern in lo..hi（含 ..=）：计数循环，绑定别名计数 slot
     fn lower_for_range(
         &mut self,
+        node: NodeId,
         pattern: &ast::syntax::pat::PatWrap,
         lhs: &ast::syntax::expr::ExprWrap,
         rhs: &ast::syntax::expr::ExprWrap,
@@ -730,9 +744,10 @@ impl<'r, 'a> Ctx<'r, 'a> {
         });
         self.switch_to(body_b);
         self.loops.push(LoopCtx {
-            node: pattern.id,
+            node,
             break_b: merge_b,
             cont_b: cond_b,
+            defer_depth: self.defers.len(),
         });
         self.env_push();
         let v = self.temp();
@@ -767,6 +782,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
     /// for Pattern in range_value：lo/hi 两槽（Range 类型不区分开闭，按闭区间）
     fn lower_for_range_value(
         &mut self,
+        node: NodeId,
         pattern: &ast::syntax::pat::PatWrap,
         iterable: &ast::syntax::expr::ExprWrap,
         body: &Block,
@@ -835,9 +851,10 @@ impl<'r, 'a> Ctx<'r, 'a> {
         });
         self.switch_to(body_b);
         self.loops.push(LoopCtx {
-            node: pattern.id,
+            node,
             break_b: merge_b,
             cont_b: cond_b,
+            defer_depth: self.defers.len(),
         });
         self.env_push();
         let v = self.temp();
@@ -877,26 +894,28 @@ impl<'r, 'a> Ctx<'r, 'a> {
         self.env.pop();
     }
 
-    /// 块出口逆序发射 defer 体（值弃用；defer 体内的 return/break 穿透
-    /// 由 sem 门禁保证不发生）
+    /// 发射给定 defer 体（顺序 = 给定序；调用方负责内→外排序）。
+    /// defer 体内的 return/break 穿透由 sem 门禁保证不发生
     fn emit_defers(&mut self, bodies: &[crate::syntax_reexport::Block]) {
-        for body in bodies.iter().rev() {
+        for body in bodies {
             let _ = self.lower_block(body);
         }
     }
 
-    /// return/break/continue 出口：发射全部挂起的 defer（自内向外）
-    pub(crate) fn emit_all_defers(&mut self) {
-        let all: Vec<crate::syntax_reexport::Block> = self
-            .defers
-            .iter()
-            .rev()
-            .flat_map(|v| v.iter().rev().cloned())
-            .collect();
-        for v in &mut self.defers {
-            v.clear();
+    /// 发射并消费 defer 栈 depth 以上的全部 defer（自最内层向外，
+    /// 与注册逆序一致），栈弹出到 depth。return 用 depth=0（函数
+    /// 整体退出）；break/continue 用循环入口深度（只清循环内注册的）
+    pub(crate) fn emit_defers_above(&mut self, depth: usize) {
+        // 只掏空不弹栈：队列结构与 lower_block 出口的 push/pop 配对
+        // 保持不变（弹空队列曾导致 lower_block 误弹外层队列——外层
+        // defer 落进循环回边后的孤儿块）
+        for q in (depth..self.defers.len()).rev() {
+            let bodies: Vec<crate::syntax_reexport::Block> =
+                self.defers[q].drain(..).rev().collect();
+            for body in &bodies {
+                let _ = self.lower_block(body);
+            }
         }
-        self.emit_defers(&all);
     }
 
     pub(crate) fn lookup(&self, name: Symbol) -> Option<(Place, TyId)> {
