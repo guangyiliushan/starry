@@ -87,6 +87,24 @@ fn commutative_operands_normalized() {
 }
 
 #[test]
+fn dce_keeps_temp_used_in_successor_block() {
+    // 回归：val temp 跨块引用（b1 用 b0 的 t1/t2），块内活性扫描曾误删定义
+    assert_opt(
+        "fun f(a: int): int {\n    val x = a + 1\n    if a > 0 {\n        return x\n    }\n    return 0\n}",
+        "fun f(%t0: i64) -> i64:\n  b0:\n    %t1 = add i64 %t0, 1\n    %t2 = copy %t1 : i64\n    %t3 = gt i64 %t0, 0\n    br %t3 -> b1, b2\n  b1:\n    ret %t2 : i64\n  b2:\n    jmp b3\n  b3:\n    ret 0 : i64\n",
+    );
+}
+
+#[test]
+fn dce_removes_temp_unused_across_all_blocks() {
+    // 全函数无使用 → 跨块也该删（与上一例互补）
+    assert_opt(
+        "fun f(a: int): int {\n    val x = a + 1\n    if a > 0 {\n        return a\n    }\n    return 0\n}",
+        "fun f(%t0: i64) -> i64:\n  b0:\n    %t3 = gt i64 %t0, 0\n    br %t3 -> b1, b2\n  b1:\n    ret %t0 : i64\n  b2:\n    jmp b3\n  b3:\n    ret 0 : i64\n",
+    );
+}
+
+#[test]
 fn div_by_zero_not_folded() {
     assert_opt(
         "fun f(a: int): int {\n    return a / 0\n}",

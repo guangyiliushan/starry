@@ -4,8 +4,8 @@
 //! TacOutput ──→ fold（常量折叠：Bin/Un 双常数 → Copy const；Br 定值 → Jmp）
 //!           ──→ copy（复制传播：块内 x = y 使用点替换，Call 为屏障）
 //!           ──→ cse（局部公共子表达式：块内可用表达式表，交换律归一）
-//!           ──→ dce（死代码消除：结果未使用的纯计算删除，Call/Load/
-//!                     Store/Param/Slot 永不删）
+//!           ──→ dce（死代码消除：全函数使用集——val temp 跨块引用，
+//!                     块内扫描会误删——纯计算未使用即删，Call/Load/Store/Param/Slot 永不删）
 //!           ──→ （块级不动点，至无变化；cap 8）
 //! ```
 //!
@@ -352,9 +352,12 @@ fn cse_fun(fun: &mut FunBody) -> bool {
 // ── 死代码消除 ────────────────────────────────────────────
 
 fn dce_fun(fun: &mut FunBody) -> bool {
-    let mut changed = false;
-    for block in &mut fun.blocks {
-        let mut live: HashSet<TempId> = HashSet::new();
+    // 活性 = 全函数使用集：val temp 跨块引用合法（前驱支配后继，见
+    // opt-notes 数据布局），块内扫描会把"只在后继块使用"的定义误删。
+    // temp 单定义（irc 发射纪律），"函数内无任何使用"即精确死亡判定；
+    // 级联（消费者删后生产者变死）由不动点循环消化。
+    let mut used: HashSet<TempId> = HashSet::new();
+    for block in &fun.blocks {
         match &block.term {
             Term::Ret {
                 value: Some(Operand::Temp(t)),
@@ -364,46 +367,47 @@ fn dce_fun(fun: &mut FunBody) -> bool {
                 cond: Operand::Temp(t),
                 ..
             } => {
-                live.insert(*t);
+                used.insert(*t);
             }
             _ => {}
         }
-        let mut keep = vec![true; block.instrs.len()];
-        for (i, instr) in block.instrs.iter().enumerate().rev() {
-            // 反向活性扫描：dst 不被后续使用且无副作用 → 死
-            if !has_side_effects(instr) && !live.contains(&def_temp(instr).unwrap()) {
-                keep[i] = false;
-                changed = true;
-                continue;
-            }
-            if let Some(dst) = def_temp(instr) {
-                live.remove(&dst);
-            }
+        for instr in &block.instrs {
             match instr {
                 Instr::Bin { l, r, .. } => {
-                    mark(l, &mut live);
-                    mark(r, &mut live);
+                    mark(l, &mut used);
+                    mark(r, &mut used);
                 }
                 Instr::Un { a, .. } | Instr::Copy { src: a, .. } | Instr::Param { a, .. } => {
-                    mark(a, &mut live)
+                    mark(a, &mut used)
                 }
                 Instr::Load { base, idx, .. } => {
-                    live.insert(*base);
-                    mark(idx, &mut live);
+                    used.insert(*base);
+                    mark(idx, &mut used);
                 }
                 Instr::Store { base, idx, src, .. } => {
-                    live.insert(*base);
-                    mark(idx, &mut live);
-                    mark(src, &mut live);
+                    used.insert(*base);
+                    mark(idx, &mut used);
+                    mark(src, &mut used);
                 }
                 // Call 无读操作数；Slot 无操作数
                 Instr::Call { .. } | Instr::Slot { .. } => {}
             }
         }
-        if changed {
-            let mut it = keep.into_iter();
-            block.instrs.retain(|_| it.next().unwrap());
-        }
+    }
+    let mut changed = false;
+    for block in &mut fun.blocks {
+        block.instrs.retain(|instr| {
+            if has_side_effects(instr) {
+                return true;
+            }
+            match def_temp(instr) {
+                Some(dst) if !used.contains(&dst) => {
+                    changed = true;
+                    false
+                }
+                _ => true,
+            }
+        });
     }
     changed
 }
