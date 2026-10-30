@@ -6,6 +6,8 @@
 //!           ──→ cse（局部公共子表达式：块内可用表达式表，交换律归一）
 //!           ──→ dce（死代码消除：全函数使用集——val temp 跨块引用，
 //!                     块内扫描会误删——纯计算未使用即删，Call/Load/Store/Param/Slot 永不删）
+//!           ──→ licm（循环不变外提：支配集定回边/自然循环；无 trap 族
+//!                     Bin/Un 且操作数循环外定值 → preheader）
 //!           ──→ （块级不动点，至无变化；cap 8）
 //! ```
 //!
@@ -15,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use irc::tac::{BinOp, Const, FunBody, Instr, Operand, TacOutput, TempId, Term, UnOp};
+use irc::tac::{BinOp, BlockId, Const, FunBody, Instr, Operand, TacOutput, TempId, Term, UnOp};
 
 /// 优化入口：逐函数跑块级不动点。
 pub fn optimize(tac: &mut TacOutput) {
@@ -31,6 +33,7 @@ fn optimize_fun(fun: &mut FunBody) {
         changed |= copy_fun(fun);
         changed |= cse_fun(fun);
         changed |= dce_fun(fun);
+        changed |= licm_fun(fun);
         if !changed {
             break;
         }
@@ -408,6 +411,173 @@ fn dce_fun(fun: &mut FunBody) -> bool {
                 _ => true,
             }
         });
+    }
+    changed
+}
+
+// ── 循环不变代码外提（龙书 9.7） ─────────────────────────
+
+/// v1 可提升算子：纯计算且无 trap/UB 族——Div/Rem（除零）与 Shl/Shr
+/// （越界移位）在零次执行循环里外提会发明陷阱语义，保守排除。
+fn hoistable_bin(op: BinOp) -> bool {
+    !matches!(op, BinOp::Div | BinOp::Rem | BinOp::Shl | BinOp::Shr)
+}
+
+/// 前驱表（Jmp/Br 目标；Ret/Unreachable 无出边）
+fn preds_of(fun: &FunBody) -> HashMap<BlockId, Vec<BlockId>> {
+    let mut preds: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+    for block in &fun.blocks {
+        let targets: &[BlockId] = match &block.term {
+            Term::Jmp(t) => std::slice::from_ref(t),
+            Term::Br { then_, else_, .. } => &[*then_, *else_],
+            _ => &[],
+        };
+        for t in targets {
+            preds.entry(*t).or_default().push(block.id);
+        }
+    }
+    preds
+}
+
+/// 支配集（数据流不动点：dom[entry]={entry}，dom[b]={b} ∪ ∩ dom[pred]）。
+fn dominators(
+    fun: &FunBody,
+    preds: &HashMap<BlockId, Vec<BlockId>>,
+) -> HashMap<BlockId, HashSet<BlockId>> {
+    let all: HashSet<BlockId> = fun.blocks.iter().map(|b| b.id).collect();
+    let mut dom: HashMap<BlockId, HashSet<BlockId>> = HashMap::new();
+    for block in &fun.blocks {
+        dom.insert(block.id, all.clone());
+    }
+    dom.insert(fun.entry, [fun.entry].into_iter().collect());
+    // 块数编译期规模，不动点直接收敛
+    loop {
+        let mut changed = false;
+        for block in &fun.blocks {
+            if block.id == fun.entry {
+                continue;
+            }
+            let Some(ps) = preds.get(&block.id) else {
+                continue; // 不可达块：dom 保持全集，不支配任何回边判定
+            };
+            let mut new: HashSet<BlockId> = match ps.first() {
+                Some(first) => dom[first].clone(),
+                None => continue,
+            };
+            for p in &ps[1..] {
+                new.retain(|d| dom[p].contains(d));
+            }
+            new.insert(block.id);
+            if new != dom[&block.id] {
+                dom.insert(block.id, new);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    dom
+}
+
+/// temp 定义块（参数视为 entry 定义——irc 纪律：temp 单定义）。
+fn def_blocks(fun: &FunBody) -> HashMap<TempId, BlockId> {
+    let mut defs = HashMap::new();
+    for (t, _) in &fun.params {
+        defs.insert(*t, fun.entry);
+    }
+    for block in &fun.blocks {
+        for instr in &block.instrs {
+            if let Some(dst) = def_temp(instr) {
+                defs.insert(dst, block.id);
+            }
+        }
+    }
+    defs
+}
+
+fn licm_fun(fun: &mut FunBody) -> bool {
+    let preds = preds_of(fun);
+    let dom = dominators(fun, &preds);
+    let defs = def_blocks(fun);
+    let mut changed = false;
+    // 回边：header 支配 source（irc 结构化输出下即循环尾部跳转）
+    let mut backedges: Vec<(BlockId, BlockId)> = Vec::new();
+    for block in &fun.blocks {
+        let targets: &[BlockId] = match &block.term {
+            Term::Jmp(t) => std::slice::from_ref(t),
+            Term::Br { then_, else_, .. } => &[*then_, *else_],
+            _ => &[],
+        };
+        for t in targets {
+            if *t != block.id && dom[&block.id].contains(t) {
+                backedges.push((*t, block.id));
+            }
+        }
+    }
+    backedges.sort_by_key(|(h, s)| (h.0, s.0));
+    for (header, source) in backedges {
+        // 自然循环：沿前驱从 source 回溯到 header（含两端）
+        let mut loop_set: HashSet<BlockId> = [header, source].into_iter().collect();
+        let mut stack = vec![source];
+        while let Some(n) = stack.pop() {
+            if n == header {
+                continue;
+            }
+            for p in preds.get(&n).into_iter().flatten() {
+                if loop_set.insert(*p) {
+                    stack.push(*p);
+                }
+            }
+        }
+        // preheader = header 唯一循环外前驱，且无条件进 header（Jmp），
+        // 否则外提点是有条件的，零次执行循环会发明计算
+        let outside: Vec<BlockId> = match preds.get(&header) {
+            Some(ps) => ps
+                .iter()
+                .copied()
+                .filter(|p| !loop_set.contains(p))
+                .collect(),
+            None => continue,
+        };
+        let [pre] = outside[..] else {
+            continue;
+        };
+        let Some(pre_idx) = fun.blocks.iter().position(|b| b.id == pre) else {
+            continue;
+        };
+        if !matches!(fun.blocks[pre_idx].term, Term::Jmp(h) if h == header) {
+            continue;
+        }
+        // 提升：循环内（块序保持）无 trap 族 Bin/Un 且全部操作数
+        // 定值在循环外——单次扫描 + retain，每条指令至多提升一次
+        let invariant = |instr: &Instr| -> bool {
+            let (l, r) = match instr {
+                Instr::Bin { op, l, r, .. } if hoistable_bin(*op) => (l, r),
+                _ => return false,
+            };
+            [l, r].into_iter().all(|op| match op {
+                Operand::Const(_) => true,
+                Operand::Temp(t) => defs.get(t).is_none_or(|b| !loop_set.contains(b)),
+            })
+        };
+        let mut hoisted: Vec<Instr> = Vec::new();
+        for block in &fun.blocks {
+            if loop_set.contains(&block.id) {
+                hoisted.extend(block.instrs.iter().filter(|i| invariant(i)).cloned());
+            }
+        }
+        if hoisted.is_empty() {
+            continue;
+        }
+        for block in &mut fun.blocks {
+            if loop_set.contains(&block.id) {
+                block.instrs.retain(|i| !invariant(i));
+            }
+        }
+        // preheader 尾部（终止符前）追加；块序遍历保证 def-use 序
+        fun.blocks[pre_idx].instrs.extend(hoisted);
+        changed = true;
     }
     changed
 }

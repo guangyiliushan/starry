@@ -105,6 +105,31 @@ fn dce_removes_temp_unused_across_all_blocks() {
 }
 
 #[test]
+fn licm_hoists_loop_invariant_to_preheader() {
+    assert_opt(
+        "fun f(n: int): int {\n    var i = 0\n    var s: int = 0\n    while i < n {\n        s = s + n * 2\n        i = i + 1\n    }\n    return s\n}",
+        "fun f(%t0: i64) -> i64:\n  b0:\n    store %t1[0] = 0 : i32\n    store %t2[0] = 0 : i64\n    %t7 = mul i64 %t0, 2\n    jmp b1\n  b1:\n    %t3 = load i32 %t1[0]\n    %t4 = conv %t3 : i32 -> i64\n    %t5 = lt i64 %t4, %t0\n    br %t5 -> b2, b3\n  b2:\n    %t6 = load i64 %t2[0]\n    %t8 = add i64 %t6, %t7\n    store %t2[0] = %t8 : i64\n    %t9 = load i32 %t1[0]\n    %t10 = add i32 %t9, 1\n    store %t1[0] = %t10 : i32\n    jmp b1\n  b3:\n    %t11 = load i64 %t2[0]\n    ret %t11 : i64\n",
+    );
+}
+
+#[test]
+fn licm_keeps_trap_family_in_loop() {
+    // Div/Rem/Shl/Shr 零次执行循环里外提会发明陷阱语义，v1 保守排除
+    assert_opt(
+        "fun f(n: int): int {\n    var i = 0\n    var s: int = 0\n    while i < n {\n        s = s + n / 2\n        i = i + 1\n    }\n    return s\n}",
+        "fun f(%t0: i64) -> i64:\n  b0:\n    store %t1[0] = 0 : i32\n    store %t2[0] = 0 : i64\n    jmp b1\n  b1:\n    %t3 = load i32 %t1[0]\n    %t4 = conv %t3 : i32 -> i64\n    %t5 = lt i64 %t4, %t0\n    br %t5 -> b2, b3\n  b2:\n    %t6 = load i64 %t2[0]\n    %t7 = div i64 %t0, 2\n    %t8 = add i64 %t6, %t7\n    store %t2[0] = %t8 : i64\n    %t9 = load i32 %t1[0]\n    %t10 = add i32 %t9, 1\n    store %t1[0] = %t10 : i32\n    jmp b1\n  b3:\n    %t11 = load i64 %t2[0]\n    ret %t11 : i64\n",
+    );
+}
+
+#[test]
+fn licm_keeps_variant_operand_in_loop() {
+    assert_opt(
+        "fun f(n: int): int {\n    var i = 0\n    var s = 0\n    while i < n {\n        s = s + i * 2\n        i = i + 1\n    }\n    return s\n}",
+        "fun f(%t0: i64) -> i64:\n  b0:\n    store %t1[0] = 0 : i32\n    store %t2[0] = 0 : i32\n    jmp b1\n  b1:\n    %t3 = load i32 %t1[0]\n    %t4 = conv %t3 : i32 -> i64\n    %t5 = lt i64 %t4, %t0\n    br %t5 -> b2, b3\n  b2:\n    %t6 = load i32 %t2[0]\n    %t7 = load i32 %t1[0]\n    %t8 = mul i32 %t7, 2\n    %t9 = add i32 %t6, %t8\n    store %t2[0] = %t9 : i32\n    %t10 = load i32 %t1[0]\n    %t11 = add i32 %t10, 1\n    store %t1[0] = %t11 : i32\n    jmp b1\n  b3:\n    %t12 = load i32 %t2[0]\n    %t13 = conv %t12 : i32 -> i64\n    ret %t13 : i64\n",
+    );
+}
+
+#[test]
 fn div_by_zero_not_folded() {
     assert_opt(
         "fun f(a: int): int {\n    return a / 0\n}",
