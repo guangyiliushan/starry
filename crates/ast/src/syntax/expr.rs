@@ -115,8 +115,9 @@ pub enum ExprKind {
         count: u32,
     },
     Spawn(SpawnExpr),
+    /// `async Block`（EBNF AsyncExpr 取块，非任意表达式）
     Async {
-        expr: Box<ExprWrap>,
+        block: Box<Block>,
     },
     Await {
         expr: Box<ExprWrap>,

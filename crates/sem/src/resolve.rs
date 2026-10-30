@@ -377,7 +377,10 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
         }
         // 跳过的区域（semantic-notes 有记录）：lambda/spawn 内部不解析
         ExprKind::Lambda { .. } | ExprKind::Spawn(_) => {}
-        ExprKind::Async { expr } | ExprKind::Await { expr } => {
+        ExprKind::Async { block } => {
+            resolve_block(block, st, scope);
+        }
+        ExprKind::Await { expr } => {
             resolve_expr(expr, st, scope);
         }
         ExprKind::Concurrent { block } => {
@@ -424,9 +427,22 @@ pub(crate) fn declare_local_binding(
                 }
                 st.pat_binding_def.set(pat.id, def);
             }
-            PatKind::Or(ps)
-            | PatKind::Tuple { elements: ps, .. }
-            | PatKind::Array { elements: ps, .. } => {
+            // 或模式各替代绑定同名同变量：只注册首个替代，
+            // 否则 `A(x) | B(x) -> x` 在同作用域被误报重名
+            PatKind::Or(ps) => {
+                if let Some(first) = ps.first() {
+                    walk(first, immutable, scope, st);
+                }
+            }
+            PatKind::Tuple { elements: ps, rest } | PatKind::Array { elements: ps, rest } => {
+                if rest.is_some() {
+                    // rest 解构的 lowering 未排期（irc 拒收）：sem 先行诊断
+                    st.diags.emit(Diagnostic::error(
+                        DiagCode::SemUnsupportedConstruct,
+                        pat.span,
+                        "rest patterns (`..`) are not supported in semantic v1",
+                    ));
+                }
                 for p in ps {
                     walk(p, immutable, scope, st);
                 }

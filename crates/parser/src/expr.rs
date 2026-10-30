@@ -474,14 +474,15 @@ fn parse_primary(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError
         TokenKind::Keyword(HardKeyword::If) => parse_if(session),
         TokenKind::Keyword(HardKeyword::When) => parse_when(session),
         TokenKind::Keyword(HardKeyword::Async) => {
+            // EBNF AsyncExpr := "async" Block：`{` 归块不归 lambda
             session.cursor.advance();
-            let expr = parse_expr(session)?;
-            let end = expr.span;
+            let block = parse_block(session)?;
+            let end = block_tail_span(&block);
             Ok(ExprWrap::new(
                 id,
                 join_span(span, end),
                 ExprKind::Async {
-                    expr: Box::new(expr),
+                    block: Box::new(block),
                 },
             ))
         }

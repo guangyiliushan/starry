@@ -290,6 +290,7 @@ fn type_stmt(s: &StmtWrap, st: &mut SemState) {
             type_block(block, st, false);
         }
         StmtKind::Grow { expr, bits } => {
+            // grow 的 lowering 未排期（irc 拒收）：sem 先行诊断
             type_expr(expr, st, true);
             if let Some(b) = bits {
                 let bty = type_expr(b, st, true);
@@ -297,6 +298,11 @@ fn type_stmt(s: &StmtWrap, st: &mut SemState) {
                     mismatch(st, b.span);
                 }
             }
+            unsupported(
+                st,
+                s.span,
+                "grow statements are not supported in semantic v1",
+            );
         }
         StmtKind::Error(_) | StmtKind::Missing(_) => {}
     }
@@ -674,9 +680,27 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
         ExprKind::When { subject, branches } => {
             type_when(subject.as_deref(), branches, e.span, in_value, st)
         }
-        ExprKind::Await { expr } => type_expr(expr, st, in_value),
-        ExprKind::Async { expr } => type_expr(expr, st, in_value),
-        ExprKind::Concurrent { block } => type_block(block, st, in_value),
+        // concurrent 块的 lowering 未排期（irc 拒收）：sem 先行诊断
+        ExprKind::Concurrent { block } => {
+            let ty = type_block(block, st, in_value);
+            unsupported(
+                st,
+                e.span,
+                "concurrent blocks are not supported in semantic v1",
+            );
+            ty
+        }
+        // async/await 的 lowering 未排期（协程/fiber 语义未定）：sem 先行诊断
+        ExprKind::Async { block } => {
+            let ty = type_block(block, st, in_value);
+            unsupported(st, e.span, "async blocks are not supported in semantic v1");
+            ty
+        }
+        ExprKind::Await { expr } => {
+            let ty = type_expr(expr, st, in_value);
+            unsupported(st, e.span, "await is not supported in semantic v1");
+            ty
+        }
         ExprKind::Comptime { block } | ExprKind::Unsafe { block } => {
             type_block(block, st, in_value)
         }
@@ -1171,11 +1195,30 @@ fn refine_pattern_types(pat: &PatWrap, subject_ty: TyId, st: &mut SemState) {
     match &pat.kind {
         PatKind::Binding { .. } => refine_bindings(pat, subject_ty, st),
         PatKind::Wildcard | PatKind::Literal(_) | PatKind::Bool(_) | PatKind::Null => {}
-        PatKind::Or(ps)
-        | PatKind::Tuple { elements: ps, .. }
-        | PatKind::Array { elements: ps, .. } => {
+        // 或模式各替代同型：逐个按主语精化
+        PatKind::Or(ps) => {
             for p in ps {
                 refine_pattern_types(p, subject_ty, st);
+            }
+        }
+        // 元组/数组模式按元素类型解构精化（when 主语为同型聚合时）
+        PatKind::Tuple { elements, .. } | PatKind::Array { elements, .. } => {
+            let elem_tys: Option<Vec<TyId>> = match st.tys.kind(subject_ty).clone() {
+                TyKind::Tuple(ts) => Some(ts),
+                TyKind::Array(t, _) => Some(vec![t; elements.len()]),
+                _ => None,
+            };
+            match elem_tys {
+                Some(ts) => {
+                    for (p, t) in elements.iter().zip(ts.iter()) {
+                        refine_pattern_types(p, *t, st);
+                    }
+                }
+                None => {
+                    for p in elements {
+                        refine_pattern_types(p, subject_ty, st);
+                    }
+                }
             }
         }
         PatKind::Constructor { path, args } => {
@@ -1404,10 +1447,9 @@ mod verify {
             ExprKind::Unary { operand, .. }
             | ExprKind::ForceUnwrap { expr: operand }
             | ExprKind::Await { expr: operand }
-            | ExprKind::Async { expr: operand }
             | ExprKind::Cast { expr: operand, .. }
             | ExprKind::ArrayRepeat { value: operand, .. } => expr(operand, st),
-            ExprKind::Concurrent { block: b } => block(b, st),
+            ExprKind::Async { block: b } | ExprKind::Concurrent { block: b } => block(b, st),
             ExprKind::Call { callee, args, .. } => {
                 expr(callee, st);
                 for a in args {

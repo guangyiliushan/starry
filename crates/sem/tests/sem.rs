@@ -591,3 +591,50 @@ fn type_object_rejected_in_aggregates() {
         "struct P {\n    x: int\n}\nstruct Q {\n    y: int\n}\nfun f() {\n    val a = [P, Q]\n}";
     assert_has(src, DiagCode::SemTypeMismatch);
 }
+
+// ---- 第六轮（后端连通后横切）：sem 接受面与 irc 能力对齐 ----
+
+#[test]
+fn or_pattern_binds_shared_variable() {
+    // `A(x) | B(x)` 的各替代绑定同名同变量，不得报重名
+    let src = "enum E {\n    A(int),\n    B(int)\n}\nfun f(e: E) : int {\n    return when e {\n        A(x) | B(x) -> x\n    }\n}";
+    assert_clean(src);
+}
+
+#[test]
+fn when_tuple_subject_destructures_elements() {
+    let src = "fun f(t: (int, int)) : int {\n    return when t {\n        (a, b) -> a + b\n        else -> 0\n    }\n}";
+    assert_clean(src);
+}
+
+#[test]
+fn rest_pattern_reports_unsupported() {
+    let src = "fun f(a: [int; 3]) {\n    val [x, .., y] = a\n}";
+    assert_has(src, DiagCode::SemUnsupportedConstruct);
+    let src2 = "fun f(t: (int, int, int)) : int {\n    return when t {\n        (a, .., c) -> a + c\n        else -> 0\n    }\n}";
+    assert_has(src2, DiagCode::SemUnsupportedConstruct);
+}
+
+#[test]
+fn grow_and_concurrent_report_unsupported() {
+    assert_has(
+        "fun f(x: int) {\n    grow x to 64 bits\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    assert_has(
+        "fun main() {\n    concurrent {\n        val x = 1\n    }\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn async_and_await_report_unsupported() {
+    assert_has(
+        "fun main() {\n    val f = async {\n        1\n    }\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    assert_has(
+        "fun main() {\n    val x = await y\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}

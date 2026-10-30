@@ -115,6 +115,15 @@ when 分支顶层（`arrow_types == false`）把裸名解析为单段 Constructo
 不授予重新赋值权（sem v1 不区分内部可变性）。结构体字段可变性不核查
 （v1 松弛，见跳过清单）。
 
+## 模式绑定作用域裁决（第六轮，后端连通后横切）
+
+- 或模式 `A(x) | B(x)`：各替代绑定**同名同变量**——declare 只注册首个
+  替代，后续替代的同名词视为同一变量（否则 when/for 分支的标准写法
+  被误报 SemDuplicateDef）。
+- `is` 表达式的模式绑定注册进**当前作用域**（不新开）：`if x is Some(v)`
+  的 then 块经父链可见 v；两个兄弟 is 表达式绑定同名则按块内重名
+  纪律报 SemDuplicateDef（有意松弛，见跳过清单的遮蔽项）。
+- when/is 的元组/数组模式对聚合主语**按元素类型解构精化**。
 ## moveck（M3.5 近似）
 
 逐 fun 体 / 顶层绑定初始化 walk。`Own` 绑定与 **Own 形参**（类型
@@ -128,7 +137,7 @@ LocalBinding/Param）；`=` 赋值重置；分支/循环取两态**并集**
 泛型（fun 类型形参/调用实例化；签名不 lower，单一
 `SemUnsupportedConstruct` 不级联）、方法调用（成员 callee）、impl、
 actor、provide、union/dyn/Self 类型、lambda 定型、spawn 内部、
-宏展开（独立前置 pass，规格待定；调用点报 `SemMacroExpansion`）。`nclass 声明（无构造路径/方法调用；声明点报一条即注册，避免级联）。
+宏展开（独立前置 pass，规格待定；调用点报 `SemMacroExpansion`）。`nclass 声明（无构造路径/方法调用；声明点报一条即注册，避免级联）、`ngrow 语句、concurrent/async 块与 await（lowering 未排期，`nrest 模式 `..`（解构 lowering 未排期）——均由 sem 先行诊断，irc 不重复报。
 lambda/spawn 内部整体不解析不定型。
 
 `StringInterp` 不在跳过清单：sem 已完整定型（结果 `string`，parts

@@ -159,10 +159,9 @@ fn expr(e: &ExprWrap, st: &mut SemState, moved: &mut BTreeSet<DefId>) {
         ExprKind::Unary { operand, .. }
         | ExprKind::ForceUnwrap { expr: operand }
         | ExprKind::Await { expr: operand }
-        | ExprKind::Async { expr: operand }
         | ExprKind::Cast { expr: operand, .. }
         | ExprKind::ArrayRepeat { value: operand, .. } => expr(operand, st, moved),
-        ExprKind::Concurrent { block: b } => block(b, st, moved),
+        ExprKind::Async { block: b } | ExprKind::Concurrent { block: b } => block(b, st, moved),
         ExprKind::Call { callee, args, .. } => {
             expr(callee, st, moved);
             for a in args {
