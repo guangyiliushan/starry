@@ -202,7 +202,7 @@ lvalue 基座解算限 Ident）、nullable/聚合 part 的字符串化、顶层
 5. **循环不变代码外提（LICM，2026-10-30 落地）**：支配集找
    回边定自然循环（preheader = header 唯一循环外前驱且无条件进
    header，否则零次执行循环会发明计算）；无 trap/UB 族 Bin/Un
-   （Div/Rem/Shl/Shr 除外——除零/越界移位语义）且操作数循环外定值
+   （Div/Rem/Shl/Shr 除外——除零/越界移位语义）且操作数循环外定值（多定义 phi 汇合物化 temp 除外——irc 短路布尔/in 扫描产物，值随路径而变）
    → 提升到 preheader。
 
 v1 跳过（记入扩展位，不归本阶段）：全局数据流（到达定值/可用表达式

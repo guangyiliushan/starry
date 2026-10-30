@@ -131,6 +131,27 @@ pub(crate) fn read_place(ctx: &mut Ctx, place: Place, ty: TyId, span: Span) -> O
     }
 }
 
+/// 从聚合基址的 off 槽起读取一个值：单槽 → 标量 Load（槽类型，不带
+/// 聚合型）；多槽 → 逐槽拷贝出新基址（快照）。成员/索引/安全成员/
+/// 模式字段读取共用（read_place 的基址+偏移版）。
+fn read_slots(ctx: &mut Ctx, base: TempId, off: usize, ty: TyId, span: Span) -> Operand {
+    if crate::layout::scalar_slots(ctx, ty) <= 1 {
+        let sty = crate::layout::slot_ty(ctx, ty, 0);
+        let dst = ctx.temp();
+        ctx.emit(Instr::Load {
+            dst,
+            base,
+            idx: Operand::Const(Const::Int(off as i128)),
+            ty: sty,
+        });
+        Operand::Temp(dst)
+    } else {
+        let b = ctx.temp();
+        copy_slots(ctx, (b, 0), (Operand::Temp(base), off), ty, ty, span);
+        Operand::Temp(b)
+    }
+}
+
 /// 操作数必须是聚合基址 temp（构造/字面量的产物）；常量形态 = 契约破缺
 fn as_base(ctx: &mut Ctx, op: Operand, span: Span) -> TempId {
     match op {
@@ -142,13 +163,12 @@ fn as_base(ctx: &mut Ctx, op: Operand, span: Span) -> TempId {
     }
 }
 
-/// 逐槽拷贝（带跨槽类型转换）：src 槽 src_off+s 经 coerce 写入
-/// dst[dst_off+s]。槽数不一致 = 契约破缺（诊断后置信下游不启动）。
-/// 单槽快路径不插 Load（标量操作数直接 Store）。
-/// 逐槽拷贝（带跨槽类型转换）：src 槽 src_off+s 经 coerce 写入
-/// dst[dst_off+s]。槽数不一致 = 契约破缺（诊断后置信下游不启动）。
-/// 单槽快路径不插 Load（标量操作数直接 Store）。
-/// 参数以 (基址, 槽偏移) 元组成对传入。
+/// 逐槽拷贝（带跨槽类型转换）：源值（类型 src_ty，位于 src 基址的
+/// src_off 槽处）的第 s 槽经 coerce 写入 dst[dst_off+s]。slot_ty 的
+/// 下标是值类型内部下标，与基址偏移无关（off 只参与 Load/Store 的
+/// 绝对槽地址）。槽数不一致 = 契约破缺（诊断后置信下游不启动）。
+/// 单槽快路径不插 Load（标量操作数直接 Store）。参数以 (基址, 槽偏移)
+/// 元组成对传入。
 pub(crate) fn copy_slots(
     ctx: &mut Ctx,
     dst: (TempId, usize),
@@ -176,8 +196,8 @@ pub(crate) fn copy_slots(
         return;
     }
     for s in 0..n {
-        let from_sty = crate::layout::slot_ty(ctx, src_ty, src_off + s);
-        let to_sty = crate::layout::slot_ty(ctx, dst_ty, dst_off + s);
+        let from_sty = crate::layout::slot_ty(ctx, src_ty, s);
+        let to_sty = crate::layout::slot_ty(ctx, dst_ty, s);
         let v = match &src {
             Operand::Temp(b) => {
                 let t = ctx.temp();
@@ -399,7 +419,9 @@ fn binary(
 }
 
 /// 短路布尔物化（龙书 6.6 跳转代码；Br 链，见 opt-notes）：
-/// `l && r` / `l || r` → bool temp
+/// `l && r` / `l || r` → bool temp。
+/// 结果 temp 是 phi 汇合物化：true/false 两分支块各写一次（多定义），
+/// opt 侧据此永不判其循环不变（def_blocks 的 None 情形）
 fn materialize_logic(ctx: &mut Ctx, op: OperatorKind, lhs: &ExprWrap, rhs: &ExprWrap) -> Operand {
     let is_and = op == OperatorKind::And;
     let result = ctx.temp();
@@ -685,43 +707,49 @@ fn lower_if(
     if scoped {
         ctx.env_pop();
     }
-    if let (Some(slot), Some((op, from))) = (result_slot, then_tail) {
-        let v = coerce(ctx, op, from, result_ty);
-        ctx.emit(Instr::Store {
-            base: slot,
-            idx: Operand::Const(Const::Int(0)),
-            src: v,
-            ty: result_ty,
-        });
-    }
+    // 聚合结果逐槽拷贝（单槽 Store 的 ty 必须是槽类型，不是聚合型）
+    let span = e.span;
+    let store_result = |ctx: &mut Ctx, slot: Option<TempId>, tail: Option<(Operand, TyId)>| {
+        if let (Some(slot), Some((op, from))) = (slot, tail) {
+            if crate::layout::scalar_slots(ctx, result_ty) > 1 {
+                copy_slots(ctx, (slot, 0), (op, 0), from, result_ty, span);
+            } else {
+                let v = coerce(ctx, op, from, result_ty);
+                ctx.emit(Instr::Store {
+                    base: slot,
+                    idx: Operand::Const(Const::Int(0)),
+                    src: v,
+                    ty: result_ty,
+                });
+            }
+        }
+    };
+    store_result(ctx, result_slot, then_tail);
     ctx.terminate(Term::Jmp(merge_b));
 
     ctx.switch_to(else_b);
     if let Some(b) = else_block {
         let tail = ctx.lower_block(b);
-        if let (Some(slot), Some((op, from))) = (result_slot, tail) {
-            let v = coerce(ctx, op, from, result_ty);
-            ctx.emit(Instr::Store {
-                base: slot,
-                idx: Operand::Const(Const::Int(0)),
-                src: v,
-                ty: result_ty,
-            });
-        }
+        store_result(ctx, result_slot, tail);
     }
     ctx.terminate(Term::Jmp(merge_b));
 
     ctx.switch_to(merge_b);
     match result_slot {
         Some(slot) => {
-            let dst = ctx.temp();
-            ctx.emit(Instr::Load {
-                dst,
-                base: slot,
-                idx: Operand::Const(Const::Int(0)),
-                ty: result_ty,
-            });
-            Operand::Temp(dst)
+            if crate::layout::scalar_slots(ctx, result_ty) > 1 {
+                // 槽基址即结果基址（val 不可变，无重赋值）
+                Operand::Temp(slot)
+            } else {
+                let dst = ctx.temp();
+                ctx.emit(Instr::Load {
+                    dst,
+                    base: slot,
+                    idx: Operand::Const(Const::Int(0)),
+                    ty: result_ty,
+                });
+                Operand::Temp(dst)
+            }
         }
         None => Operand::Const(Const::Unit),
     }
@@ -743,7 +771,14 @@ fn nullable_null(ctx: &mut Ctx, e: &ExprWrap) -> Operand {
 }
 
 /// 无参枚举变体值 E.A：tag 槽写入变体序号
-fn variant_value(ctx: &mut Ctx, _e: &ExprWrap, index: usize) -> Operand {
+fn variant_value(ctx: &mut Ctx, e: &ExprWrap, index: usize) -> Operand {
+    if index > 255 {
+        ctx.diag_code(
+            DiagCode::IrcTooManyVariants,
+            e.span,
+            "变体序号超 tag 槽 i8 上限（>255 变体的枚举无法 lowering）",
+        );
+    }
     let base = ctx.temp();
     ctx.emit(Instr::Store {
         base,
@@ -816,6 +851,13 @@ fn variant_ctor(
     index: usize,
     args: &[ast::syntax::expr::CallArg],
 ) -> Operand {
+    if index > 255 {
+        ctx.diag_code(
+            DiagCode::IrcTooManyVariants,
+            e.span,
+            "变体序号超 tag 槽 i8 上限（>255 变体的枚举无法 lowering）",
+        );
+    }
     let params = ctx.sem.defs.get(parent).sig.variants[index].1.clone();
     if args.len() != params.len() {
         ctx.diag(e.span, "变体实参数不匹配（SemArityMismatch 漏报）");
@@ -897,15 +939,8 @@ fn lower_member(ctx: &mut Ctx, e: &ExprWrap, base: &ExprWrap, safe: bool) -> Ope
             let bop = lower_expr(ctx, base);
             let b = as_base(ctx, bop, e.span);
             let slot = crate::layout::field_slot(ctx, parent, index);
-            let ty = ctx.expr_ty(e);
-            let dst = ctx.temp();
-            ctx.emit(Instr::Load {
-                dst,
-                base: b,
-                idx: Operand::Const(Const::Int(slot as i128)),
-                ty,
-            });
-            Operand::Temp(dst)
+            let fty = ctx.sem.defs.get(parent).sig.fields[index].1;
+            read_slots(ctx, b, slot, fty, e.span)
         }
     }
 }
@@ -937,12 +972,46 @@ fn lower_index(ctx: &mut Ctx, e: &ExprWrap, base: &ExprWrap, index: &ExprWrap) -
         idx = Operand::Temp(dst);
     }
     let dst = ctx.temp();
-    ctx.emit(Instr::Load {
-        dst,
-        base: b,
-        idx,
-        ty: elem,
-    });
+    if es <= 1 {
+        ctx.emit(Instr::Load {
+            dst,
+            base: b,
+            idx,
+            ty: elem,
+        });
+    } else {
+        // 多槽元素：动态基址下标，逐槽 Load/Store 攒新基址
+        //（copy_slots 只支持常量槽偏移，动态形态在本处展开）
+        for sld in 0..es {
+            let sty = crate::layout::slot_ty(ctx, elem, sld);
+            let t = ctx.temp();
+            let off = if sld == 0 {
+                idx.clone()
+            } else {
+                let o = ctx.temp();
+                ctx.emit(Instr::Bin {
+                    dst: o,
+                    op: BinOp::Add,
+                    l: idx.clone(),
+                    r: Operand::Const(Const::Int(sld as i128)),
+                    ty: ctx.expr_ty(index),
+                });
+                Operand::Temp(o)
+            };
+            ctx.emit(Instr::Load {
+                dst: t,
+                base: b,
+                idx: off,
+                ty: sty,
+            });
+            ctx.emit(Instr::Store {
+                base: dst,
+                idx: Operand::Const(Const::Int(sld as i128)),
+                src: Operand::Temp(t),
+                ty: sty,
+            });
+        }
+    }
     Operand::Temp(dst)
 }
 
@@ -1154,7 +1223,20 @@ fn nullable_cast(ctx: &mut Ctx, e: &ExprWrap, inner: &ExprWrap) -> Operand {
                 src: Operand::Const(Const::Int(1)),
                 ty: ctx.i8_ty,
             });
-            copy_slots(ctx, (base, 1), (Operand::Temp(sb), 1), from, to, e.span);
+            // 只拷 payload：flag 已在上文各分支单独写。类型取两侧
+            // nullable 的 payload 型（值内部下标 0..，与 off=1 无关）
+            let f_inner = match ctx.sem.tys.kind(from) {
+                TyKind::Nullable(i) => *i,
+                _ => unreachable!("外层 match 已判定 Nullable"),
+            };
+            copy_slots(
+                ctx,
+                (base, 1),
+                (Operand::Temp(sb), 1),
+                f_inner,
+                u_inner,
+                e.span,
+            );
             ctx.terminate(Term::Jmp(merge_b));
             ctx.switch_to(null_b);
             ctx.emit(Instr::Store {
@@ -1815,14 +1897,31 @@ fn lower_when(
     };
     let result_slot = if value_ctx { Some(ctx.temp()) } else { None };
     let merge_b = ctx.reserve_block();
-    let mut else_seen = false;
-    for (i, branch) in branches.iter().enumerate() {
+    let span = e.span;
+    let store_result = |ctx: &mut Ctx, slot: Option<TempId>, tail: Option<(Operand, TyId)>| {
+        if let (Some(slot), Some((op, from))) = (slot, tail) {
+            if crate::layout::scalar_slots(ctx, result_ty) > 1 {
+                copy_slots(ctx, (slot, 0), (op, 0), from, result_ty, span);
+            } else {
+                let v = coerce(ctx, op, from, result_ty);
+                ctx.emit(Instr::Store {
+                    base: slot,
+                    idx: Operand::Const(Const::Int(0)),
+                    src: v,
+                    ty: result_ty,
+                });
+            }
+        }
+    };
+    for branch in branches {
         let body_b = ctx.reserve_block();
         let next_b = ctx.reserve_block();
+        // 分支作用域先推入：模式绑定限本分支（guard + 体）可见，
+        // 不泄漏进后续分支链或外层
+        ctx.env_push();
         // 条件：else 无条件；表达式分支 = 主语相等；模式分支 = 模式匹配
         match &branch.pattern {
             ast::syntax::expr::WhenPattern::Else => {
-                else_seen = true;
                 ctx.terminate(Term::Jmp(body_b));
             }
             ast::syntax::expr::WhenPattern::Expression(expr) => {
@@ -1854,7 +1953,6 @@ fn lower_when(
             }
         }
         ctx.switch_to(body_b);
-        ctx.env_push();
         // guard：附加条件，假则落入下一分支
         if let Some(guard) = &branch.guard {
             let g = lower_expr(ctx, guard);
@@ -1872,34 +1970,28 @@ fn lower_when(
             }
             ast::syntax::expr::WhenBody::Block(b) => ctx.lower_block(b),
         };
-        if let (Some(slot), Some((op, from))) = (result_slot, tail) {
-            let v = coerce(ctx, op, from, result_ty);
-            ctx.emit(Instr::Store {
-                base: slot,
-                idx: Operand::Const(Const::Int(0)),
-                src: v,
-                ty: result_ty,
-            });
-        }
+        store_result(ctx, result_slot, tail);
         ctx.env_pop();
         ctx.terminate(Term::Jmp(merge_b));
         ctx.switch_to(next_b);
-        let _ = i;
     }
     // 穷尽性 sem 已验证；else 存在时链尾不可达但需终止器
-    let _ = else_seen;
     ctx.terminate(Term::Unreachable);
     ctx.switch_to(merge_b);
     match result_slot {
         Some(slot) => {
-            let dst = ctx.temp();
-            ctx.emit(Instr::Load {
-                dst,
-                base: slot,
-                idx: Operand::Const(Const::Int(0)),
-                ty: result_ty,
-            });
-            Operand::Temp(dst)
+            if crate::layout::scalar_slots(ctx, result_ty) > 1 {
+                Operand::Temp(slot)
+            } else {
+                let dst = ctx.temp();
+                ctx.emit(Instr::Load {
+                    dst,
+                    base: slot,
+                    idx: Operand::Const(Const::Int(0)),
+                    ty: result_ty,
+                });
+                Operand::Temp(dst)
+            }
         }
         None => Operand::Const(Const::Unit),
     }
@@ -1942,13 +2034,7 @@ fn lower_safe_member(ctx: &mut Ctx, e: &ExprWrap, base: &ExprWrap) -> Operand {
     ctx.switch_to(ok_b);
     let slot = 1 + crate::layout::field_slot(ctx, parent, index);
     let fty = ctx.sem.defs.get(parent).sig.fields[index].1;
-    let v = ctx.temp();
-    ctx.emit(Instr::Load {
-        dst: v,
-        base: b,
-        idx: Operand::Const(Const::Int(slot as i128)),
-        ty: fty,
-    });
+    let v = read_slots(ctx, b, slot, fty, e.span);
     let out = ctx.temp();
     ctx.emit(Instr::Store {
         base: out,
@@ -1956,7 +2042,7 @@ fn lower_safe_member(ctx: &mut Ctx, e: &ExprWrap, base: &ExprWrap) -> Operand {
         src: Operand::Const(Const::Int(1)),
         ty: ctx.i8_ty,
     });
-    copy_slots(ctx, (out, 1), (Operand::Temp(v), 0), fty, inner, e.span);
+    copy_slots(ctx, (out, 1), (v, 0), fty, inner, e.span);
     ctx.terminate(Term::Jmp(merge_b));
     // 空：flag=0，payload 不初始化
     ctx.switch_to(null_b);
@@ -1997,6 +2083,10 @@ fn lower_elvis(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> O
         then_: some_b,
         else_: none_b,
     });
+    // 结果槽：Store 发在各分支内、汇合只读（phi 绕法，同 lower_if——
+    // 双 Store 都发在汇合块会让后写恒覆盖先写，?? 恒取右值）
+    let slot = ctx.temp();
+    let n = crate::layout::scalar_slots(ctx, to).max(1);
     ctx.switch_to(some_b);
     let some_v = if crate::layout::scalar_slots(ctx, s_inner) <= 1 {
         let sty = crate::layout::slot_ty(ctx, lty, 1);
@@ -2013,17 +2103,6 @@ fn lower_elvis(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> O
         copy_slots(ctx, (base, 0), (Operand::Temp(lb), 1), s_inner, to, e.span);
         Operand::Temp(base)
     };
-    ctx.terminate(Term::Jmp(merge_b));
-    ctx.switch_to(none_b);
-    let none_v = {
-        let v = lower_expr(ctx, rhs);
-        coerce(ctx, v, ctx.expr_ty(rhs), to)
-    };
-    ctx.terminate(Term::Jmp(merge_b));
-    ctx.switch_to(merge_b);
-    // 汇合：phi 绕法——结果槽
-    let slot = ctx.temp();
-    let n = crate::layout::scalar_slots(ctx, to).max(1);
     if n <= 1 {
         ctx.emit(Instr::Store {
             base: slot,
@@ -2031,12 +2110,30 @@ fn lower_elvis(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> O
             src: some_v,
             ty: to,
         });
+    } else {
+        let sb = as_base(ctx, some_v, e.span);
+        copy_slots(ctx, (slot, 0), (Operand::Temp(sb), 0), to, to, e.span);
+    }
+    ctx.terminate(Term::Jmp(merge_b));
+    ctx.switch_to(none_b);
+    let none_v = {
+        let v = lower_expr(ctx, rhs);
+        coerce(ctx, v, ctx.expr_ty(rhs), to)
+    };
+    if n <= 1 {
         ctx.emit(Instr::Store {
             base: slot,
             idx: Operand::Const(Const::Int(0)),
             src: none_v,
             ty: to,
         });
+    } else {
+        let nb = as_base(ctx, none_v, e.span);
+        copy_slots(ctx, (slot, 0), (Operand::Temp(nb), 0), to, to, e.span);
+    }
+    ctx.terminate(Term::Jmp(merge_b));
+    ctx.switch_to(merge_b);
+    if n <= 1 {
         let dst = ctx.temp();
         ctx.emit(Instr::Load {
             dst,
@@ -2046,10 +2143,6 @@ fn lower_elvis(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> O
         });
         Operand::Temp(dst)
     } else {
-        let sb = as_base(ctx, some_v, e.span);
-        copy_slots(ctx, (slot, 0), (Operand::Temp(sb), 0), to, to, e.span);
-        let nb = as_base(ctx, none_v, e.span);
-        copy_slots(ctx, (slot, 0), (Operand::Temp(nb), 0), to, to, e.span);
         Operand::Temp(slot)
     }
 }
@@ -2091,7 +2184,15 @@ fn range_value(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> O
 pub(crate) fn lower_cond(ctx: &mut Ctx, cond: &ast::syntax::expr::Condition) -> (Operand, bool) {
     use ast::syntax::expr::Condition;
     match cond {
-        Condition::Expr(e) => (lower_expr(ctx, e), matches!(e.kind, ExprKind::Is { .. })),
+        Condition::Expr(e) => {
+            let scoped = matches!(e.kind, ExprKind::Is { .. });
+            if scoped {
+                // is 绑定限 then 分支：先推作用域再 lowering，
+                // 调用方在 then 分支后配对弹出（lower.rs）
+                ctx.env_push();
+            }
+            (lower_expr(ctx, e), scoped)
+        }
         Condition::Val { pattern, expr } => {
             let sty = ctx.expr_ty(expr);
             let s = lower_expr(ctx, expr);

@@ -480,16 +480,24 @@ fn dominators(
     dom
 }
 
-/// temp 定义块（参数视为 entry 定义——irc 纪律：temp 单定义）。
-fn def_blocks(fun: &FunBody) -> HashMap<TempId, BlockId> {
-    let mut defs = HashMap::new();
+/// temp 定义块（参数视为 entry 定义）。irc 纪律：temp 单定义，唯一
+/// 例外是短路布尔/in 扫描的 phi 汇合物化 temp（两分支块各写一次）——
+/// 多定义记 None：其值随路径而变，LICM 据此永不判其循环不变。
+fn def_blocks(fun: &FunBody) -> HashMap<TempId, Option<BlockId>> {
+    let mut defs: HashMap<TempId, Option<BlockId>> = HashMap::new();
     for (t, _) in &fun.params {
-        defs.insert(*t, fun.entry);
+        defs.insert(*t, Some(fun.entry));
     }
     for block in &fun.blocks {
         for instr in &block.instrs {
             if let Some(dst) = def_temp(instr) {
-                defs.insert(dst, block.id);
+                defs.entry(dst)
+                    .and_modify(|d| {
+                        if *d != Some(block.id) {
+                            *d = None;
+                        }
+                    })
+                    .or_insert(Some(block.id));
             }
         }
     }
@@ -558,7 +566,11 @@ fn licm_fun(fun: &mut FunBody) -> bool {
             };
             [l, r].into_iter().all(|op| match op {
                 Operand::Const(_) => true,
-                Operand::Temp(t) => defs.get(t).is_none_or(|b| !loop_set.contains(b)),
+                Operand::Temp(t) => match defs.get(t).and_then(|d| *d) {
+                    Some(b) => !loop_set.contains(&b),
+                    // 多定义（phi 汇合）或未知 temp：不提升
+                    None => false,
+                },
             })
         };
         let mut hoisted: Vec<Instr> = Vec::new();

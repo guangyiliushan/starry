@@ -34,8 +34,9 @@ pub(crate) struct SemRef<'a> {
     pub interner: &'a mut Interner,
 }
 
-/// 值的存放处：Temp = 不可变局部（SSA 式单赋值）；Slot = 可变局部/
-/// 未初始化局部（Load/Store 寻址，idx 恒为 0 的标量槽）
+/// 值的存放处：Temp = 不可变局部（SSA 式单赋值，例外：短路布尔/in
+/// 扫描的 phi 汇合物化 temp 两分支各写一次，见 expr.rs 物化族）；
+/// Slot = 可变局部/未初始化局部（Load/Store 寻址，idx 恒为 0 的标量槽）
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Place {
     Temp(TempId),
@@ -500,7 +501,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
         }
     }
 
-    fn lower_while(&mut self, node: NodeId, span: Span, cond: &Condition, body: &Block) {
+    fn lower_while(&mut self, node: NodeId, _span: Span, cond: &Condition, body: &Block) {
         let cond_b = self.reserve_block();
         let body_b = self.reserve_block();
         let merge_b = self.reserve_block();
@@ -531,7 +532,6 @@ impl<'r, 'a> Ctx<'r, 'a> {
         self.terminate(Term::Jmp(cond_b));
 
         self.switch_to(merge_b);
-        let _ = span;
     }
 
     fn lower_loop(&mut self, node: NodeId, _span: Span, body: &Block) {
@@ -639,6 +639,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
         });
         let cond_b = self.reserve_block();
         let body_b = self.reserve_block();
+        let step_b = self.reserve_block();
         let merge_b = self.reserve_block();
         self.terminate(Term::Jmp(cond_b));
         self.switch_to(cond_b);
@@ -666,7 +667,8 @@ impl<'r, 'a> Ctx<'r, 'a> {
         self.loops.push(LoopCtx {
             node,
             break_b: merge_b,
-            cont_b: cond_b,
+            // continue → step（先自增再判条件；直跳 cond 会跳过自增死循环）
+            cont_b: step_b,
             defer_depth: self.defers.len(),
         });
         self.env_push();
@@ -688,6 +690,17 @@ impl<'r, 'a> Ctx<'r, 'a> {
         self.lower_block(body);
         self.env_pop();
         self.loops.pop();
+        // 自增独立 step 块：body 以 break/return 结尾时自增不再
+        // 落进 open() 惰性开的孤儿块
+        self.terminate(Term::Jmp(step_b));
+        self.switch_to(step_b);
+        let i = self.temp();
+        self.emit(Instr::Load {
+            dst: i,
+            base: counter,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            ty: cty,
+        });
         let one = self.temp();
         self.emit(Instr::Bin {
             dst: one,
@@ -728,6 +741,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
         });
         let cond_b = self.reserve_block();
         let body_b = self.reserve_block();
+        let step_b = self.reserve_block();
         let merge_b = self.reserve_block();
         self.terminate(Term::Jmp(cond_b));
         self.switch_to(cond_b);
@@ -760,7 +774,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
         self.loops.push(LoopCtx {
             node,
             break_b: merge_b,
-            cont_b: cond_b,
+            cont_b: step_b,
             defer_depth: self.defers.len(),
         });
         self.env_push();
@@ -775,6 +789,15 @@ impl<'r, 'a> Ctx<'r, 'a> {
         self.lower_block(body);
         self.env_pop();
         self.loops.pop();
+        self.terminate(Term::Jmp(step_b));
+        self.switch_to(step_b);
+        let v = self.temp();
+        self.emit(Instr::Load {
+            dst: v,
+            base: counter,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            ty: cty,
+        });
         let one = self.temp();
         self.emit(Instr::Bin {
             dst: one,
@@ -840,6 +863,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
         });
         let cond_b = self.reserve_block();
         let body_b = self.reserve_block();
+        let step_b = self.reserve_block();
         let merge_b = self.reserve_block();
         self.terminate(Term::Jmp(cond_b));
         self.switch_to(cond_b);
@@ -867,7 +891,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
         self.loops.push(LoopCtx {
             node,
             break_b: merge_b,
-            cont_b: cond_b,
+            cont_b: step_b,
             defer_depth: self.defers.len(),
         });
         self.env_push();
@@ -882,11 +906,20 @@ impl<'r, 'a> Ctx<'r, 'a> {
         self.lower_block(body);
         self.env_pop();
         self.loops.pop();
+        self.terminate(Term::Jmp(step_b));
+        self.switch_to(step_b);
+        let v = self.temp();
+        self.emit(Instr::Load {
+            dst: v,
+            base: counter,
+            idx: Operand::Const(crate::tac::Const::Int(0)),
+            ty: inner,
+        });
         let one = self.temp();
         self.emit(Instr::Bin {
             dst: one,
             op: crate::tac::BinOp::Add,
-            l: Operand::Temp(c),
+            l: Operand::Temp(v),
             r: Operand::Const(crate::tac::Const::Int(1)),
             ty: inner,
         });

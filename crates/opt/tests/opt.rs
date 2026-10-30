@@ -130,6 +130,16 @@ fn licm_keeps_variant_operand_in_loop() {
 }
 
 #[test]
+fn licm_never_treats_phi_materialized_temp_as_invariant() {
+    // 回归：&& 物化的 result temp 两分支各写一次（多定义），
+    // LICM 不得把它当循环不变外提；真不变量（a < n）仍外提
+    assert_opt(
+        "fun f(n: int, a: int): int {\n    var i = 0\n    var s = 0\n    while i < n {\n        val b = a < n && i < n\n        if b {\n            s = s + 1\n        }\n        i = i + 1\n    }\n    return s\n}",
+        "fun f(%t0: i64, %t1: i64) -> i64:\n  b0:\n    store %t2[0] = 0 : i32\n    store %t3[0] = 0 : i32\n    %t8 = lt i64 %t1, %t0\n    jmp b1\n  b1:\n    %t4 = load i32 %t2[0]\n    %t5 = conv %t4 : i32 -> i64\n    %t6 = lt i64 %t5, %t0\n    br %t6 -> b2, b3\n  b2:\n    br %t8 -> b4, b6\n  b3:\n    %t17 = load i32 %t3[0]\n    %t18 = conv %t17 : i32 -> i64\n    ret %t18 : i64\n  b4:\n    %t9 = load i32 %t2[0]\n    %t10 = conv %t9 : i32 -> i64\n    %t11 = lt i64 %t10, %t0\n    br %t11 -> b5, b6\n  b5:\n    %t7 = copy true : i1\n    jmp b7\n  b6:\n    %t7 = copy false : i1\n    jmp b7\n  b7:\n    br %t7 -> b8, b9\n  b8:\n    %t13 = load i32 %t3[0]\n    %t14 = add i32 %t13, 1\n    store %t3[0] = %t14 : i32\n    jmp b10\n  b9:\n    jmp b10\n  b10:\n    %t15 = load i32 %t2[0]\n    %t16 = add i32 %t15, 1\n    store %t2[0] = %t16 : i32\n    jmp b1\n",
+    );
+}
+
+#[test]
 fn div_by_zero_not_folded() {
     assert_opt(
         "fun f(a: int): int {\n    return a / 0\n}",
