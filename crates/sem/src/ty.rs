@@ -194,8 +194,9 @@ impl TyArena {
             (TyKind::Int(_), TyKind::Float(_)) => true,
             (TyKind::Float(f), TyKind::Float(t)) => f <= t,
             (TyKind::Named(fd, fa), TyKind::Named(td, ta)) => fd == td && fa == ta,
-            (TyKind::Array(fe, fl), TyKind::Array(te, tl)) => fe == te && fl == tl,
-            (TyKind::Range(f), TyKind::Range(t)) => f == t,
+            // 聚合逐元素走格（对齐 Tuple 臂）：`[int; 3] = [1, 2, 3]` 经 i32→int 加宽成立
+            (TyKind::Array(fe, fl), TyKind::Array(te, tl)) => fl == tl && self.assignable(*fe, *te),
+            (TyKind::Range(f), TyKind::Range(t)) => self.assignable(*f, *t),
             (TyKind::Tuple(fs), TyKind::Tuple(ts)) => {
                 fs.len() == ts.len() && fs.iter().zip(ts).all(|(f, t)| self.assignable(*f, *t))
             }
@@ -205,6 +206,12 @@ impl TyArena {
 
     /// 汇合：二元运算 / 分支汇合的公共类型；`None` = 不可比（调用方诊断）
     pub fn join(&mut self, a: TyId, b: TyId) -> Option<TyId> {
+        // 类型对象不与任何类型汇合（先于相等短路，否则 [P, P] 漏网）
+        if matches!(self.kind(a), TyKind::TypeObject(_))
+            || matches!(self.kind(b), TyKind::TypeObject(_))
+        {
+            return None;
+        }
         if a == b {
             return Some(a);
         }
@@ -240,9 +247,15 @@ impl TyArena {
             (TyKind::Int(_), TyKind::Float(t)) => Some(self.intern(TyKind::Float(*t))),
             (TyKind::Float(f), TyKind::Int(_)) => Some(self.intern(TyKind::Float(*f))),
             (TyKind::Named(fd, fa), TyKind::Named(td, ta)) if fd == td && fa == ta => Some(a),
-            (TyKind::Range(f), TyKind::Range(t)) if f == t => Some(a),
-            // 类型对象不与任何类型汇合（数组字面量等聚合处拒绝）
-            (TyKind::TypeObject(_), _) | (_, TyKind::TypeObject(_)) => None,
+            // 数组/区间逐元素汇合（长度不变）
+            (TyKind::Array(fe, fl), TyKind::Array(te, tl)) if fl == tl => {
+                let j = self.join(*fe, *te)?;
+                Some(self.intern(TyKind::Array(j, *fl)))
+            }
+            (TyKind::Range(f), TyKind::Range(t)) => {
+                let j = self.join(*f, *t)?;
+                Some(self.intern(TyKind::Range(j)))
+            }
             (TyKind::Tuple(fs), TyKind::Tuple(ts)) if fs.len() == ts.len() => {
                 let mut out = Vec::with_capacity(fs.len());
                 for (f, t) in fs.iter().zip(ts) {

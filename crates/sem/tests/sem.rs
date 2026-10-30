@@ -638,3 +638,73 @@ fn async_and_await_report_unsupported() {
         DiagCode::SemUnsupportedConstruct,
     );
 }
+
+// ---- 第七轮回归：穷尽性、聚合格、别名归一、诊断文案 ----
+
+#[test]
+fn when_irrefutable_patterns_are_exhaustive() {
+    assert_clean("fun f(x: int) : int {\n    return when x {\n        _ -> 0\n    }\n}");
+    assert_clean(
+        "fun f(p: P) : int {\n    return when p {\n        P { x, y } -> x\n    }\n}\nstruct P {\n    x: int,\n    y: int\n}",
+    );
+    assert_clean(
+        "fun f(t: (int, int)) : int {\n    return when t {\n        (a, b) -> a + b\n    }\n}",
+    );
+    assert_clean("fun f(a: [int; 2]) : int {\n    return when a {\n        [x, y] -> x\n    }\n}");
+    // 枚举主语上的通配同样穷尽
+    assert_clean(
+        "enum E {\n    A,\n    B\n}\nfun f(e: E) : int {\n    return when e {\n        _ -> 0\n    }\n}",
+    );
+    // 可驳模式仍需 else
+    assert_has(
+        "fun f(x: int) : int {\n    return when x {\n        1 -> 1\n    }\n}",
+        DiagCode::SemMissingElse,
+    );
+}
+
+#[test]
+fn array_and_range_elementwise_assignable() {
+    assert_clean("fun f() {\n    val a: [int; 3] = [1, 2, 3]\n}");
+    assert_clean("fun f() {\n    val a: [f64; 2] = [1, 2]\n}");
+    assert_clean("fun g(a: [int; 3]) {\n}\nfun f() {\n    g([1, 2, 3])\n}");
+    assert_clean("fun f(x: int) : bool {\n    return x in 1..5\n}");
+    // 收窄方向仍拒绝
+    assert_has(
+        "fun f() {\n    val a: [int; 2] = [1.5, 2.5]\n}",
+        DiagCode::SemTypeMismatch,
+    );
+}
+
+#[test]
+fn alias_normalizes_to_target_def() {
+    let src = "enum E {\n    A,\n    B\n}\ntype F = E\nfun f() : E {\n    return F.A\n}";
+    assert_clean(src);
+    let src2 = "enum Opt {\n    Some(int),\n    None\n}\ntype O = Opt\nfun f() : Opt {\n    return O.Some(1)\n}";
+    assert_clean(src2);
+    let src3 =
+        "enum E {\n    A,\n    B\n}\ntype F = E\ntype G = F\nfun f() : E {\n    return G.A\n}";
+    assert_clean(src3);
+    let src4 = "enum E {\n    A,\n    B\n}\ntype F = E\nfun f(e: E) : int {\n    return when e {\n        F.A -> 1\n        F.B -> 2\n    }\n}";
+    assert_clean(src4);
+    // 类型对象同型聚合仍拒绝
+    let src5 = "struct P {\n    x: int\n}\ntype Q = P\nfun f() {\n    val a = [P, Q]\n}";
+    assert_has(src5, DiagCode::SemTypeMismatch);
+}
+
+#[test]
+fn method_call_reports_method_not_unknown_field() {
+    let src = "struct P {\n    x: int\n}\nfun f(p: P) {\n    p.m()\n}";
+    assert_eq!(codes(src), vec![DiagCode::SemUnsupportedConstruct]);
+}
+
+#[test]
+fn self_reports_dedicated_diagnostic() {
+    let src = "fun f() : int {\n    return self\n}";
+    assert_eq!(codes(src), vec![DiagCode::SemSelfOutsideMember]);
+}
+
+#[test]
+fn class_use_site_stays_silent() {
+    let src = "class C {\n}\nfun main() {\n    C()\n}";
+    assert_eq!(codes(src), vec![DiagCode::SemUnsupportedConstruct]);
+}

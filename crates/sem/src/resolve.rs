@@ -251,11 +251,22 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
                     st.expr_def.set(e.id, def);
                 }
                 None => {
-                    st.diags.emit(Diagnostic::error(
-                        DiagCode::SemUndefinedName,
-                        e.span,
-                        format!("undefined name `{}`", st.interner.resolve(*name)),
-                    ));
+                    // `self`/`Self` 是 EBNF 关键字（parser 落成同名 Ident）：
+                    // 成员函数之外给指向性诊断，而非「未定义名」
+                    let text = st.interner.resolve(*name);
+                    if text == "self" || text == "Self" {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemSelfOutsideMember,
+                            e.span,
+                            "`self`/`Self` are only available inside class member functions (not supported in semantic v1)",
+                        ));
+                    } else {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUndefinedName,
+                            e.span,
+                            format!("undefined name `{}`", text),
+                        ));
+                    }
                 }
             }
         }

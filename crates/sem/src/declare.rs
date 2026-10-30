@@ -320,8 +320,12 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                     .collect();
                 st.defs.get_mut(def).sig.variants = variants;
             }
-            DeclKind::TypeAlias(_) => {
-                // 目标类型惰性 lower（首次使用），循环守卫在 lower_ty
+            DeclKind::TypeAlias(t) => {
+                // 急切 lower：值位置（F.A / O.Some(1)）不经 lower_ty，
+                // 惰性会让 alias_resolved 缺席、成员解析失败；循环守卫仍在 lower_ty
+                if let Some(def) = st.scopes.lookup_local(root, t.name) {
+                    alias_target(st, root, def, item.span);
+                }
             }
             DeclKind::Binding(b) => {
                 if let Some(t) = &b.ty {
@@ -637,6 +641,8 @@ fn lookup_local_no_import(st: &SemState, scope: ScopeId, name: Symbol) -> Option
 }
 
 pub(crate) fn member_lookup(st: &SemState, def: DefId, name: Symbol) -> Option<DefId> {
+    // 别名归一：`type F = E` 的 F.A 按 E.A 解析（值位置已由 def_value_ty 归一）
+    let def = st.defs.get(def).alias_resolved.unwrap_or(def);
     let ms = st.defs.get(def).member_scope?;
     let found = st.scopes.lookup_local(ms, name)?;
     expand_import(st, found)

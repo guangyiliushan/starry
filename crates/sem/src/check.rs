@@ -374,7 +374,16 @@ fn assign_target_ty(target: &ExprWrap, target_ty: TyId, st: &mut SemState) -> Ty
         }
     }
 }
-fn member_field_ty(base_ty: TyId, name: Symbol, safe: bool, span: Span, st: &mut SemState) -> TyId {
+/// 成员类型查询。`diagnose` 为 false 时不发诊断、找不到返回 None
+/// （type_call 的 Member callee 消歧用：找不到成员 = 方法调用，由调用点报）。
+fn member_field_ty_ex(
+    base_ty: TyId,
+    name: Symbol,
+    safe: bool,
+    span: Span,
+    st: &mut SemState,
+    diagnose: bool,
+) -> Option<TyId> {
     let mut ty = base_ty;
     // 枚举类型对象的成员访问 = 命名空间访问（`E.A` / `Opt.Some` / 变体构造路径）
     // ——解包为枚举值型；结构体静态访问（`P.x`）仍不支持
@@ -396,57 +405,70 @@ fn member_field_ty(base_ty: TyId, name: Symbol, safe: bool, span: Span, st: &mut
             // `E.A` / `Opt.Some` 的类型即所属枚举
             DefKind::Enum => match member_lookup(st, def, name) {
                 Some(vdef) if matches!(st.defs.get(vdef).kind, DefKind::EnumVariant { .. }) => {
-                    st.tys.builtin_named(def)
+                    Some(st.tys.builtin_named(def))
                 }
                 _ => {
-                    st.diags.emit(Diagnostic::error(
-                        DiagCode::SemUnknownMember,
-                        span,
-                        format!("unknown variant `{}`", st.interner.resolve(name)),
-                    ));
-                    st.tys.error
+                    if diagnose {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnknownMember,
+                            span,
+                            format!("unknown variant `{}`", st.interner.resolve(name)),
+                        ));
+                    }
+                    None
                 }
             },
             DefKind::Struct => {
                 let fields = st.defs.get(def).sig.fields.clone();
                 match fields.iter().find(|(n, _)| *n == name) {
-                    Some((_, t)) => *t,
+                    Some((_, t)) => Some(*t),
                     None => {
-                        st.diags.emit(Diagnostic::error(
-                            DiagCode::SemUnknownMember,
-                            span,
-                            format!("unknown field `{}`", st.interner.resolve(name)),
-                        ));
-                        st.tys.error
+                        if diagnose {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemUnknownMember,
+                                span,
+                                format!("unknown field `{}`", st.interner.resolve(name)),
+                            ));
+                        }
+                        None
                     }
                 }
             }
             _ => {
+                if diagnose {
+                    unsupported(
+                        st,
+                        span,
+                        "member access is supported on struct values only in semantic v1",
+                    );
+                }
+                None
+            }
+        },
+        TyKind::Error => None,
+        _ => {
+            if diagnose {
                 unsupported(
                     st,
                     span,
                     "member access is supported on struct values only in semantic v1",
                 );
-                st.tys.error
             }
-        },
-        TyKind::Error => st.tys.error,
-        _ => {
-            unsupported(
-                st,
-                span,
-                "member access is supported on struct values only in semantic v1",
-            );
-            st.tys.error
+            None
         }
     };
-    if nullable_base && !st.tys.is_error(result) {
-        st.tys.nullable(result)
-    } else {
-        result
-    }
+    result.map(|r| {
+        if nullable_base && !st.tys.is_error(r) {
+            st.tys.nullable(r)
+        } else {
+            r
+        }
+    })
 }
 
+fn member_field_ty(base_ty: TyId, name: Symbol, safe: bool, span: Span, st: &mut SemState) -> TyId {
+    member_field_ty_ex(base_ty, name, safe, span, st, true).unwrap_or(st.tys.error)
+}
 fn check_condition(cond: &Condition, st: &mut SemState) {
     match cond {
         Condition::Expr(e) => {
@@ -563,7 +585,7 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             };
             if let (Some(e), false) = (elem, st.tys.is_error(elem_ty))
                 && !st.tys.is_error(e)
-                && !st.tys.assignable(elem_ty, e)
+                && st.tys.join(elem_ty, e).is_none()
             {
                 mismatch(st, lhs.span);
             }
@@ -827,7 +849,31 @@ fn type_call(
     span: Span,
     st: &mut SemState,
 ) -> TyId {
-    let callee_ty = type_expr(callee, st, true);
+    // Member 目标的定型与消歧一次完成：字段（含函数字段）/枚举变体查得到，
+    // 查不到即方法调用（由此处报「不支持」，不让 member_field_ty 发 unknown-field 误导）
+    let callee_ty = match &callee.kind {
+        ExprKind::Member { base, name, safe } => {
+            let base_ty = type_expr(base, st, true);
+            let fty = if st.tys.is_error(base_ty) {
+                st.tys.error
+            } else {
+                match member_field_ty_ex(base_ty, *name, *safe, callee.span, st, false) {
+                    Some(t) => t,
+                    None => {
+                        unsupported(
+                            st,
+                            callee.span,
+                            "method calls are not supported in semantic v1",
+                        );
+                        st.tys.error
+                    }
+                }
+            };
+            st.expr_ty.set(callee.id, fty);
+            fty
+        }
+        _ => type_expr(callee, st, true),
+    };
     if !type_args.is_empty() {
         unsupported(
             st,
@@ -937,25 +983,19 @@ fn type_call(
         return ret;
     }
     // 有定义但不可调用（val/struct 名等）；函数值情形已在上方拦截
-    if st.expr_def.get(callee.id).is_some() {
-        st.diags.emit(Diagnostic::error(
-            DiagCode::SemNotCallable,
-            callee.span,
-            "callee is not a function",
-        ));
+    if let Some(def) = st.expr_def.get(callee.id).copied() {
+        // class 名：声明点已报 unsupported，此处静默兑现「注册避免级联」
+        if !matches!(st.defs.get(def).kind, DefKind::Class) {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemNotCallable,
+                callee.span,
+                "callee is not a function",
+            ));
+        }
         type_all_args(args, st);
         return st.tys.error;
     }
-    // 成员调用 = 方法调用（v1 不支持）；构造器情形已在上方拦截
-    if matches!(callee.kind, ExprKind::Member { .. }) {
-        unsupported(
-            st,
-            callee.span,
-            "method calls are not supported in semantic v1",
-        );
-        type_all_args(args, st);
-        return st.tys.error;
-    }
+    // 落到此处的 Member 目标 = 字段存在但非函数类型（真方法调用已在定型处诊断）
     st.diags.emit(Diagnostic::error(
         DiagCode::SemNotCallable,
         callee.span,
@@ -1052,6 +1092,20 @@ fn check_call_args(
     }
 }
 
+/// 不可驳模式判定：通配/绑定恒不可驳；元组/数组/结构体的元素全不可驳则
+/// 不可驳；Or 含任一不可驳替代即不可驳（其语义即替代的全覆盖）。
+/// 构造器/字面量/区间/布尔恒可驳。
+fn is_irrefutable(pat: &PatWrap) -> bool {
+    match &pat.kind {
+        PatKind::Wildcard | PatKind::Binding { .. } => true,
+        PatKind::Tuple { elements, .. } | PatKind::Array { elements, .. } => {
+            elements.iter().all(is_irrefutable)
+        }
+        PatKind::Struct { fields, .. } => fields.iter().all(|(_, p)| is_irrefutable(p)),
+        PatKind::Or(ps) => ps.iter().any(is_irrefutable),
+        _ => false,
+    }
+}
 /// when 覆盖收集：递归 Or 替代（`A | B -> ...` 的每个替代独立计数），
 /// 兼收布尔字面量；构造器/结构体子模式无覆盖贡献
 fn collect_pattern_coverage(
@@ -1145,7 +1199,12 @@ fn type_when(
             }),
         });
     }
-    if !has_else {
+    // 不可驳模式（通配/绑定、全解构元组/数组/结构体、含不可驳替代的 Or）
+    // 即穷尽，不再要求 else（`when x { _ -> 0 }` 的最直白假阳性）
+    let irrefutable_seen = branches
+        .iter()
+        .any(|b| matches!(&b.pattern, WhenPattern::Pattern(p) if is_irrefutable(p)));
+    if !has_else && !irrefutable_seen {
         match subject_ty {
             None => missing_else(st, span),
             Some(sty) if st.tys.is_error(sty) => {}
@@ -1329,8 +1388,13 @@ fn def_value_ty(def: DefId, st: &mut SemState) -> TyId {
             st.tys.intern(TyKind::TypeObject(def))
         }
         DefKind::EnumVariant { parent, .. } => st.tys.builtin_named(parent),
-        // 别名在值位置同样是类型对象（annotations 走 lower_ty 不受影响）
-        DefKind::TypeAlias => st.tys.intern(TyKind::TypeObject(def)),
+        // 别名在值位置归一到目标：TypeObject(alias_resolved)，
+        // 成员访问/模式路径/构造经目标 DefId 统一解析（type_call 的
+        // TypeAlias 臂仅兜未 lower 的别名）
+        DefKind::TypeAlias => {
+            let target = st.defs.get(def).alias_resolved.unwrap_or(def);
+            st.tys.intern(TyKind::TypeObject(target))
+        }
         DefKind::StructField { .. } | DefKind::ImportNs { .. } => st.tys.error,
     }
 }

@@ -115,6 +115,24 @@ when 分支顶层（`arrow_types == false`）把裸名解析为单段 Constructo
 不授予重新赋值权（sem v1 不区分内部可变性）。结构体字段可变性不核查
 （v1 松弛，见跳过清单）。
 
+## 第七轮裁决（穷尽性、聚合格、别名）
+
+- **不可驳模式即穷尽**：`when` 分支出现不可驳模式（`_`、全解构元组/数组/
+  结构体、含不可驳替代的 Or）不再要求 else（`is_irrefutable` 判定）。
+- **数组/区间逐元素走格**（对齐 Tuple 臂）：`[int; 3] = [1, 2, 3]` 经
+  i32→int 加宽成立；无需改动 int=64 位或字面量默认——提升格本就含
+  加宽边。`in` 的元素相容按**汇合**判定（比较语义，双向）：
+  `x: int in 1..5` 的区间元素是 i32 字面量，i64 与 i32 可汇合。
+- **别名急切 lower**：`lower_top_level_sigs` 期统一 alias_target——
+  值位置（`F.A`、`O.Some(1)`、模式路径）不经 lower_ty，惰性会让
+  alias_resolved 缺席；`def_value_ty` 归一到 TypeObject(alias_resolved)，
+  member_lookup 随之跟进（含链式别名）。循环守卫不变（lower_ty 内）。
+- **方法调用诊断**：Member 作调用目标时字段查询静默（
+  member_field_ty_ex diagnose=false），查不到报「方法调用不支持」，
+  不再被 unknown-field 误导；字段存在但非函数类型走 SemNotCallable。
+- **`self`/`Self`**（parser 落成同名 Ident）在成员函数外给
+  SemSelfOutsideMember，而非未定义名。
+- **join 的 TypeObject 判定先于相等短路**（否则 [P, P] 漏网）。
 ## 模式绑定作用域裁决（第六轮，后端连通后横切）
 
 - 或模式 `A(x) | B(x)`：各替代绑定**同名同变量**——declare 只注册首个

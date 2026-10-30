@@ -155,6 +155,8 @@ pub enum DiagCode {
     SemBreakOutsideLoop,
     /// 函数外 return
     SemReturnOutsideFun,
+    /// `self`/`Self` 出现在类成员函数之外
+    SemSelfOutsideMember,
     /// when 缺少 else（v1 保守穷尽早返回）
     SemMissingElse,
     /// when 未穷尽枚举变体
