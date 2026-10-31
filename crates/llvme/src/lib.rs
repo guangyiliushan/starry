@@ -21,5 +21,9 @@ use sem::{DefArena, TyArena};
 
 /// LLVM IR 文本发射入口（opt-notes 钉死的签名）
 pub fn emit(tac: &TacOutput, tys: &TyArena, defs: &DefArena, interner: &Interner) -> String {
+    // API 级契约门：有诊断的 TAC 不发射（下游契约同 opt）
+    if !tac.diags.is_empty() {
+        return String::new();
+    }
     emit::emit_module(tac, tys, defs, interner)
 }

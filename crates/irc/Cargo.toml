@@ -10,3 +10,5 @@ sem = { path = "../sem" }
 
 [dev-dependencies]
 parser = { path = "../parser" }
+opt = { path = "../opt" }
+llvme = { path = "../llvme" }

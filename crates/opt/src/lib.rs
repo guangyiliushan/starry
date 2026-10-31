@@ -21,6 +21,11 @@ use irc::tac::{BinOp, BlockId, Const, FunBody, Instr, Operand, TacOutput, TempId
 
 /// 优化入口：逐函数跑块级不动点。
 pub fn optimize(tac: &mut TacOutput) {
+    // API 级契约门（opt-notes「有 Error 则 opt 不启动」）：直接调库
+    // 也不能带诊断的 TAC 进优化器
+    if !tac.diags.is_empty() {
+        return;
+    }
     for fun in &mut tac.funs {
         optimize_fun(fun);
     }

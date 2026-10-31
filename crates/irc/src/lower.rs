@@ -83,6 +83,8 @@ pub(crate) struct Ctx<'r, 'a> {
     /// defer 栈（与块作用域同深）：每块一个待发射 defer 体队列（克隆持有，
     /// 规避 AST 引用生命期穿透 Ctx——defer 是低频构造，克隆成本可忽略）
     defers: Vec<Vec<crate::syntax_reexport::Block>>,
+    /// BlockId → blocks 下标（switch_to 维护；block_pos O(1)）
+    block_index: std::collections::HashMap<BlockId, usize>,
 }
 
 pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> TacOutput {
@@ -131,6 +133,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             env: Vec::new(),
             loops: Vec::new(),
             defers: Vec::new(),
+            block_index: std::collections::HashMap::new(),
         }
     }
 
@@ -152,7 +155,8 @@ impl<'r, 'a> Ctx<'r, 'a> {
     /// BlockId 是稀疏 id（merge 块先 reserve 后 switch），Vec 按下标
     /// 直取会越界——一切寻址经 block_pos
     pub(crate) fn switch_to(&mut self, b: BlockId) {
-        if !self.fun.blocks.iter().any(|blk| blk.id == b) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.block_index.entry(b) {
+            e.insert(self.fun.blocks.len());
             self.fun.blocks.push(crate::tac::Block {
                 id: b,
                 instrs: Vec::new(),
@@ -164,7 +168,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
     }
 
     fn block_pos(&self, b: BlockId) -> usize {
-        let pos = self.fun.blocks.iter().position(|blk| blk.id == b);
+        let pos = self.block_index.get(&b).copied();
         debug_assert!(pos.is_some(), "cur 必须是已 push 的块");
         pos.expect("cur 必须是已 push 的块")
     }

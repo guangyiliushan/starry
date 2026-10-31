@@ -12,6 +12,7 @@
 //! 尚未 lower 的构造（`IrcUnsupportedLowering`）。
 
 mod expr;
+pub mod interp;
 pub mod layout;
 
 /// AST 类型的单一重出口（defer 体克隆持有用）
