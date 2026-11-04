@@ -1,0 +1,5 @@
+package demo.traps
+
+fun main() {
+    val doubled = map(items) { it * 2 }
+}

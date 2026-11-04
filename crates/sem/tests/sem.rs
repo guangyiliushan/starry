@@ -726,6 +726,20 @@ fn tuple_subscript_requires_constant_in_bounds_index() {
 }
 
 #[test]
+fn definite_assignment_ignores_returning_branch() {
+    assert_clean(
+        "fun f(c: bool): int {\n    var x: int\n    if c {\n        return 1\n    } else {\n        x = 2\n    }\n    return x\n}",
+    );
+}
+
+#[test]
+fn function_can_reference_later_initialized_global() {
+    assert_clean(
+        "fun make(): int {\n    return B\n}\nval B: int = 2\nfun main() {\n    print(make())\n}",
+    );
+}
+
+#[test]
 fn uninitialized_local_read_reports() {
     assert_has(
         "fun f() : int {

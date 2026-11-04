@@ -59,7 +59,7 @@
 | v0.4 数组 `[T; N]` / `[v; N]` | TypeKind::Array / ExprKind::ArrayRepeat |
 | v0.4 module 声明移除 | SourceFile 仅 package；`by` 降为 slot word |
 | v0.4 LoopExpr / LoopStatement 分立 | ExprKind::Loop（表达式）/ StmtKind::Loop（带标签语句） |
-| 元组下标常量槽 | ExprKind::Index.const_index（parser 解码整数字面量） |
+| 元组下标常量槽 | ExprKind::Index.const_index（parser 解码整数字面量；动态下标仅数组） |
 
 ## v0.4 gap closures（本轮补全）
 

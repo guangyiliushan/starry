@@ -1,0 +1,69 @@
+package demo.basics
+
+import std.text.*
+
+// ========== 结构体与枚举 ==========
+
+struct Point {
+    x: f64
+    y: f64
+}
+
+enum Shape {
+    Circle(radius: f64)
+    Rectangle(width: f64, height: f64)
+}
+
+// ========== trait 与实现 ==========
+
+trait Area {
+    fun area() : f64
+}
+
+class Disc(radius: f64) : Area {
+    fun area() : f64 = 3.14159 * radius * radius
+}
+
+// ========== 函数与控制流 ==========
+
+fun area_of(s: Shape) : f64 = when s {
+    Circle(r) -> 3.14159 * r * r
+    Rectangle(w, h) -> w * h
+}
+
+fun sign_of(n: int) : String {
+    when {
+        n < 0 -> { return "负数" }
+        n == 0 -> { return "零" }
+    }
+    return "正数"
+}
+
+// ========== 定长数组与循环 ==========
+
+fun sum(values: [f64; 4]) : f64 {
+    var total = 0.0
+    for v in values {
+        total += v
+    }
+    return total
+}
+
+// ========== 主流程 ==========
+
+fun main() {
+    val origin = Point(x = 0.0, y = 0.0)
+    val shape = Shape.Circle(radius = 2.0)
+    defer { print("basics 结束") }
+
+    var counter = 0
+    while counter < 3 {
+        counter += 1
+    }
+
+    val numbers = [1.0, 2.0, 3.0, 4.0]
+    print("圆面积 ${area_of(shape)}")
+    print("数组和 ${sum(numbers)}")
+    print("计数 ${counter}，符号 ${sign_of(-5)}")
+    print("原点 (${origin.x}, ${origin.y})")
+}

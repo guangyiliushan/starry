@@ -70,8 +70,10 @@ static char *fmt_i64(long long v) {
     return from_buf(buf + i, (SIZE_T)(32 - i));
 }
 
+// %g 风格：`precision` 位有效数字。指数落在 [-4, precision) 用普通十进制
+// 记法，否则用科学记数法；有效数字的尾随零先去掉，所以 100.0 → "100"、
+// 0.5 → "0.5"、3.25 → "3.25"。输出确定性：同一输入恒同一串。
 static char *fmt_double(double v, int precision) {
-    // Small %g-style formatter: enough for deterministic sample output.
     char buf[96];
     int i = 0;
     if (v != v) return from_buf("nan", 3);
@@ -89,17 +91,48 @@ static char *fmt_double(double v, int precision) {
     for (int k = 1; k < precision; k++) scale *= 10ULL;
     unsigned long long rounded = (unsigned long long)(v * (double)scale + 0.5);
     if (rounded == scale * 10ULL) { rounded = scale; e++; }
+
+    // 有效数字，高位在前；rev 是低位在前，所以「尾随零」在 rev 头部
     char digits[32];
     int dn = 0;
-    while (rounded) { digits[dn++] = (char)('0' + (int)(rounded % 10ULL)); rounded /= 10ULL; }
-    while (dn < precision) digits[dn++] = '0';
-    for (int k = 0; k < dn; k++) buf[i + k] = digits[dn - 1 - k];
-    i += dn;
-    int last = i - 1;
-    while (last > 0 && buf[last] == '0') last--;
-    if (last > 0 && buf[last] == '.' ) last--;
-    i = last + 1;
-    if (e != 0) {
+    {
+        char rev[32];
+        int rn = 0;
+        unsigned long long u = rounded;
+        while (u) { rev[rn++] = (char)('0' + (int)(u % 10ULL)); u /= 10ULL; }
+        // rounded ∈ [scale, 10·scale) 恒有 precision 位，无需补位
+        int skip = 0;
+        while (skip + 1 < rn && rev[skip] == '0') skip++;
+        for (int k = 0; k < rn - skip; k++) digits[k] = rev[rn - 1 - k];
+        dn = rn - skip;
+    }
+
+    if (e >= -4 && e < precision) {
+        if (e < 0) {
+            // 0.<-e-1 个 0><digits>
+            buf[i++] = '0';
+            buf[i++] = '.';
+            for (int k = 0; k < -e - 1; k++) buf[i++] = '0';
+            for (int k = 0; k < dn; k++) buf[i++] = digits[k];
+        } else {
+            int int_len = e + 1;
+            if (int_len >= dn) {
+                // 整数位不够长：补零到 e+1 位，无小数部
+                for (int k = 0; k < dn; k++) buf[i++] = digits[k];
+                for (int k = dn; k < int_len; k++) buf[i++] = '0';
+            } else {
+                for (int k = 0; k < int_len; k++) buf[i++] = digits[k];
+                buf[i++] = '.';
+                for (int k = int_len; k < dn; k++) buf[i++] = digits[k];
+            }
+        }
+    } else {
+        // 科学记数法：d[.rest]e<exp>
+        buf[i++] = digits[0];
+        if (dn > 1) {
+            buf[i++] = '.';
+            for (int k = 1; k < dn; k++) buf[i++] = digits[k];
+        }
         buf[i++] = 'e';
         if (e < 0) { buf[i++] = '-'; e = -e; }
         char eb[12];

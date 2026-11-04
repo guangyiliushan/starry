@@ -127,7 +127,7 @@ pub(crate) fn read_place(ctx: &mut Ctx, place: Place, ty: TyId, span: Span) -> O
             if ctx.is_unit(ty) {
                 return Operand::Const(Const::Unit);
             }
-            if crate::layout::scalar_slots(ctx, ty) > 1 {
+            if crate::layout::is_aggregate(ctx, ty) {
                 ctx.diag(span, "聚合全局读取的 lowering 在 M-later");
                 return Operand::Const(Const::Unit);
             }
@@ -141,9 +141,8 @@ pub(crate) fn read_place(ctx: &mut Ctx, place: Place, ty: TyId, span: Span) -> O
             Operand::Temp(dst)
         }
         Place::Slot(slot) => {
-            if crate::layout::scalar_slots(ctx, ty) <= 1 {
-                // 单槽聚合（单字段 struct/无参 enum 的 tag）按槽类型加载，
-                // 不带聚合型——llvme 的槽是定宽标量单元
+            if !crate::layout::is_aggregate(ctx, ty) {
+                // 标量：槽值即值（槽类型，不带聚合型——llvme 的槽是定宽标量单元）
                 let sty = crate::layout::slot_ty(ctx, ty, 0);
                 let dst = ctx.temp();
                 ctx.emit(Instr::Load {
@@ -154,6 +153,7 @@ pub(crate) fn read_place(ctx: &mut Ctx, place: Place, ty: TyId, span: Span) -> O
                 });
                 Operand::Temp(dst)
             } else {
+                // 聚合（含单槽）：值 = 基址，逐槽拷贝出新基址（快照）
                 let base = ctx.temp();
                 copy_slots(ctx, (base, 0), (Operand::Temp(slot), 0), ty, ty, span);
                 Operand::Temp(base)
@@ -162,11 +162,11 @@ pub(crate) fn read_place(ctx: &mut Ctx, place: Place, ty: TyId, span: Span) -> O
     }
 }
 
-/// 从聚合基址的 off 槽起读取一个值：单槽 → 标量 Load（槽类型，不带
-/// 聚合型）；多槽 → 逐槽拷贝出新基址（快照）。成员/索引/安全成员/
-/// 模式字段读取共用（read_place 的基址+偏移版）。
+/// 从聚合基址的 off 槽起读取一个值：标量 → 槽类型 Load；聚合（含单槽）→
+/// 逐槽拷贝出新基址（快照）。成员/索引/安全成员/模式字段读取共用
+/// （read_place 的基址+偏移版）。
 fn read_slots(ctx: &mut Ctx, base: TempId, off: usize, ty: TyId, span: Span) -> Operand {
-    if crate::layout::scalar_slots(ctx, ty) <= 1 {
+    if !crate::layout::is_aggregate(ctx, ty) {
         let sty = crate::layout::slot_ty(ctx, ty, 0);
         let dst = ctx.temp();
         ctx.emit(Instr::Load {
@@ -198,8 +198,8 @@ fn as_base(ctx: &mut Ctx, op: Operand, span: Span) -> TempId {
 /// src_off 槽处）的第 s 槽经 coerce 写入 dst[dst_off+s]。slot_ty 的
 /// 下标是值类型内部下标，与基址偏移无关（off 只参与 Load/Store 的
 /// 绝对槽地址）。槽数不一致 = 契约破缺（诊断后置信下游不启动）。
-/// 单槽快路径不插 Load（标量操作数直接 Store）。参数以 (基址, 槽偏移)
-/// 元组成对传入。
+/// 单槽快路径只对**标量**操作数免 Load；聚合源是基址，必须先取槽值。
+/// 参数以 (基址, 槽偏移) 元组成对传入。
 pub(crate) fn copy_slots(
     ctx: &mut Ctx,
     dst: (TempId, usize),
@@ -216,8 +216,23 @@ pub(crate) fn copy_slots(
         return;
     }
     if n <= 1 {
+        let from_sty = crate::layout::slot_ty(ctx, src_ty, 0);
         let sty = crate::layout::slot_ty(ctx, dst_ty, 0);
-        let v = coerce(ctx, src, src_ty, sty);
+        // 聚合源是基址（值 = 基址 + 槽），先取槽值再入槽；标量/常量即值
+        let src_val = match &src {
+            Operand::Temp(b) if crate::layout::is_aggregate(ctx, src_ty) => {
+                let t = ctx.temp();
+                ctx.emit(Instr::Load {
+                    dst: t,
+                    base: *b,
+                    idx: Operand::Const(Const::Int(src_off as i128)),
+                    ty: from_sty,
+                });
+                Operand::Temp(t)
+            }
+            _ => src.clone(),
+        };
+        let v = coerce(ctx, src_val, from_sty, sty);
         ctx.emit(Instr::Store {
             base: dst_base,
             idx: Operand::Const(Const::Int(dst_off as i128)),
@@ -786,7 +801,7 @@ fn lower_if(
     let span = e.span;
     let store_result = |ctx: &mut Ctx, slot: Option<TempId>, tail: Option<(Operand, TyId)>| {
         if let (Some(slot), Some((op, from))) = (slot, tail) {
-            if crate::layout::scalar_slots(ctx, result_ty) > 1 {
+            if crate::layout::is_aggregate(ctx, result_ty) {
                 copy_slots(ctx, (slot, 0), (op, 0), from, result_ty, span);
             } else {
                 let v = coerce(ctx, op, from, result_ty);
@@ -812,7 +827,7 @@ fn lower_if(
     ctx.switch_to(merge_b);
     match result_slot {
         Some(slot) => {
-            if crate::layout::scalar_slots(ctx, result_ty) > 1 {
+            if crate::layout::is_aggregate(ctx, result_ty) {
                 // 槽基址即结果基址（val 不可变，无重赋值）
                 Operand::Temp(slot)
             } else {
@@ -1393,7 +1408,7 @@ fn unwrap(ctx: &mut Ctx, e: &ExprWrap, inner: &ExprWrap, to: TyId) -> Operand {
     ctx.switch_to(bad_b);
     ctx.terminate(Term::Unreachable);
     ctx.switch_to(ok_b);
-    if crate::layout::scalar_slots(ctx, to) <= 1 {
+    if !crate::layout::is_aggregate(ctx, to) {
         let sty = crate::layout::slot_ty(ctx, from, 1);
         let t = ctx.temp();
         ctx.emit(Instr::Load {
@@ -2157,7 +2172,7 @@ fn lower_when(
     let span = e.span;
     let store_result = |ctx: &mut Ctx, slot: Option<TempId>, tail: Option<(Operand, TyId)>| {
         if let (Some(slot), Some((op, from))) = (slot, tail) {
-            if crate::layout::scalar_slots(ctx, result_ty) > 1 {
+            if crate::layout::is_aggregate(ctx, result_ty) {
                 copy_slots(ctx, (slot, 0), (op, 0), from, result_ty, span);
             } else {
                 let v = coerce(ctx, op, from, result_ty);
@@ -2237,7 +2252,7 @@ fn lower_when(
     ctx.switch_to(merge_b);
     match result_slot {
         Some(slot) => {
-            if crate::layout::scalar_slots(ctx, result_ty) > 1 {
+            if crate::layout::is_aggregate(ctx, result_ty) {
                 Operand::Temp(slot)
             } else {
                 let dst = ctx.temp();
@@ -2345,7 +2360,7 @@ fn lower_elvis(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> O
     let slot = ctx.temp();
     let n = crate::layout::scalar_slots(ctx, to).max(1);
     ctx.switch_to(some_b);
-    let some_v = if crate::layout::scalar_slots(ctx, s_inner) <= 1 {
+    let some_v = if !crate::layout::is_aggregate(ctx, s_inner) {
         let sty = crate::layout::slot_ty(ctx, lty, 1);
         let t = ctx.temp();
         ctx.emit(Instr::Load {
@@ -2360,7 +2375,7 @@ fn lower_elvis(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> O
         copy_slots(ctx, (base, 0), (Operand::Temp(lb), 1), s_inner, to, e.span);
         Operand::Temp(base)
     };
-    if n <= 1 {
+    if !crate::layout::is_aggregate(ctx, to) {
         ctx.emit(Instr::Store {
             base: slot,
             idx: Operand::Const(Const::Int(0)),
@@ -2470,7 +2485,7 @@ fn string_interp(ctx: &mut Ctx, e: &ExprWrap, parts: &[ExprWrap]) -> Operand {
     let mut acc: Option<TempId> = None;
     for part in parts {
         let pty = ctx.expr_ty(part);
-        if crate::layout::scalar_slots(ctx, pty) != 1 {
+        if crate::layout::is_aggregate(ctx, pty) || crate::layout::scalar_slots(ctx, pty) != 1 {
             ctx.diag(part.span, "聚合 part 的字符串化在 M-later");
             continue;
         }
@@ -2574,7 +2589,7 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
             };
             match place {
                 Place::Slot(slot) => {
-                    if crate::layout::scalar_slots(ctx, ty) > 1 {
+                    if crate::layout::is_aggregate(ctx, ty) {
                         copy_slots(ctx, (slot, 0), (v, 0), ty, ty, span);
                     } else {
                         ctx.emit(Instr::Store {
@@ -2586,7 +2601,7 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
                     }
                 }
                 Place::Global(global) => {
-                    if crate::layout::scalar_slots(ctx, ty) > 1 || ctx.is_unit(ty) {
+                    if crate::layout::is_aggregate(ctx, ty) || ctx.is_unit(ty) {
                         ctx.diag(span, "聚合/unit 全局赋值的 lowering 在 M-later");
                         return;
                     }
@@ -2611,7 +2626,7 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
                 return;
             };
             let off = crate::layout::field_slot(ctx, parent, index);
-            if crate::layout::scalar_slots(ctx, fty) > 1 {
+            if crate::layout::is_aggregate(ctx, fty) {
                 copy_slots(ctx, (b, off), (v, 0), fty, fty, span);
             } else {
                 ctx.emit(Instr::Store {
@@ -2635,7 +2650,7 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
                 return;
             };
             if let Some((elem, off)) = tuple_index_slot(ctx, bty, *const_index, span) {
-                if crate::layout::scalar_slots(ctx, elem) > 1 {
+                if crate::layout::is_aggregate(ctx, elem) {
                     copy_slots(ctx, (b, off), (v, 0), elem, elem, span);
                 } else {
                     ctx.emit(Instr::Store {
@@ -2654,7 +2669,7 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
             let elem = *elem;
             let es = crate::layout::scalar_slots(ctx, elem);
             let iop = lower_expr(ctx, index);
-            if es <= 1 {
+            if !crate::layout::is_aggregate(ctx, elem) {
                 ctx.emit(Instr::Store {
                     base: b,
                     idx: iop,

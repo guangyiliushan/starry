@@ -1,0 +1,8 @@
+package demo.traps
+
+fun demo() : int {
+    val a = 1
+    -2
+}
+
+fun two() : int { val b = 3 val c = 4 return b + c }

@@ -371,3 +371,32 @@ fn loop_expression_break_value_emits_valid_ir() {
         "{text}"
     );
 }
+
+#[test]
+fn single_slot_aggregate_var_field_assignment_emits_valid_ir() {
+    // 回归：单字段 struct 的 var 字段赋值。槽数 1 的聚合也是「基址 + 槽」，
+    // 曾把基址当 i64 值存（`store i64 %t0.slot`，ptr 当 i64）。
+    let (text, codes) = emit(
+        "struct P {\n    x: int\n}\nfun f(): int {\n    var p = P(1)\n    p.x = 50\n    return p.x\n}",
+    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    if !llvm_as_ok(&text) {
+        panic!("LLVM validator rejected:\n{text}");
+    }
+    assert!(
+        !text.contains("store i64 %t0.slot"),
+        "aggregate base stored as an i64 value:\n{text}"
+    );
+}
+
+#[test]
+fn float_constants_use_llvm_bit_pattern() {
+    // 回归：浮点常量曾发 C99 十六进制浮点（0x1.8p0），LLVM 要的是位模式
+    // 十六进制（0x3FF8000000000000）。
+    let (text, codes) = emit("fun f(): f64 {\n    return 3.25\n}");
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    if !llvm_as_ok(&text) {
+        panic!("LLVM validator rejected:\n{text}");
+    }
+    assert!(text.contains("0x400A000000000000"), "{text}");
+}

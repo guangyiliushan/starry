@@ -15,6 +15,25 @@ pub trait LayoutView {
     fn i8_ty(&self) -> TyId;
 }
 
+/// 值的表示形态：聚合走「基址 temp + Load/Store 槽寻址」，标量按值传递。
+///
+/// 判据是**类型种类**而不是槽数：`struct P { x: int }` 与 `int` 同为 1 槽，
+/// 但前者是基址、后者是值。用 `scalar_slots(ty) <= 1` 当「标量」会把单槽
+/// 聚合折成标量值，成员读取随即把该值当基址用（非法 IR + 丢字段）。
+/// 与 llvme 的 `TyClass` 同口径。
+pub fn is_aggregate(v: &impl LayoutView, ty: TyId) -> bool {
+    !matches!(
+        v.tys().kind(ty),
+        TyKind::Int(_)
+            | TyKind::Float(_)
+            | TyKind::Bool
+            | TyKind::Char
+            | TyKind::String
+            | TyKind::Unit
+            | TyKind::Null
+    )
+}
+
 /// ty 的摊平标量槽数（和类型含 tag 槽；unit/null = 0）
 pub fn scalar_slots(v: &impl LayoutView, ty: TyId) -> usize {
     match v.tys().kind(ty) {

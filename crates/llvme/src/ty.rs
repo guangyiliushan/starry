@@ -46,6 +46,7 @@ pub fn scalar_ty(tys: &TyArena, ty: TyId) -> String {
         TyKind::Char => "i32".into(),
         TyKind::String => "i8*".into(),
         TyKind::Unit => "void".into(),
+        TyKind::Null => "i64".into(),
         // 聚合出现在标量位 = 契约破缺（irc 已门禁），兜底 i64
         _ => "i64".into(),
     }
@@ -65,7 +66,8 @@ pub fn class_of(tys: &TyArena, ty: TyId) -> TyClass {
         | TyKind::Bool
         | TyKind::Char
         | TyKind::String
-        | TyKind::Unit => TyClass::Scalar,
+        | TyKind::Unit
+        | TyKind::Null => TyClass::Scalar,
         _ => TyClass::Agg,
     }
 }
@@ -92,7 +94,7 @@ pub fn sanitize(s: &str) -> String {
     out
 }
 
-/// 浮点字面量：LLVM 位模式十六进制（f64 = 16 位，f32 = 8 位）。
+/// 浮点字面量：LLVM 位模式十六进制（float/double 均为 16 位模式文本）。
 /// `is_f32` 时先把值舍入到 f32 再取位模式（f64 常量落在 float 槽的兼容路径）。
 pub fn float_lit(v: f64, is_f32: bool) -> String {
     // LLVM floating hexadecimal constants carry a 64-bit pattern even when

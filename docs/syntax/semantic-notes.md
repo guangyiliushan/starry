@@ -72,6 +72,7 @@ Error 恒真，出错子树不再级联诊断。parser 诊断原样保留在前�
 - `in`/`!in`：`值 in 集合`，右操作数是集合表达式（EBNF RangeExpr 侧，
   parser 以 range 绑定幂解析），左操作数是元素，按元素类型核查可指派；
   数组/区间以外的一侧报 `SemTypeMismatch`。
+- 元组下标 v1 仅接受整数字面量；动态下标只属于数组，非字面量索引报 `SemUnsupportedConstruct`。
 - 类型别名：值位置同样是 `TypeObject`（与类型名同纪律）；`type Q = P` 的
   构造调用经 `Def.alias_resolved` 预解析目标走到 P 的字段构造器。
 

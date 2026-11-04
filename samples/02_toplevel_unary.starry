@@ -1,0 +1,4 @@
+package demo.traps
+
+val a = 1
+-2

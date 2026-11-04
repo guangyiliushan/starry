@@ -774,10 +774,6 @@ fn emit_term(e: &mut FnEmit, term: &Term) {
     }
 }
 
-fn next_wrapper_temp(body: &str) -> usize {
-    body.matches("%u").count()
-}
-
 fn emit_main_wrapper(lc: &Lc, tac: &TacOutput, body: &mut String) {
     for fun in &tac.funs {
         let def = lc.defs.get(fun.def);
@@ -790,6 +786,7 @@ fn emit_main_wrapper(lc: &Lc, tac: &TacOutput, body: &mut String) {
             scalar_ty(lc.tys, fun.ret)
         };
         let _ = writeln!(body, "define i32 @main() {{");
+        let mut next_global_temp = 0usize;
         for global in &tac.globals {
             if global.init.is_some() {
                 let gty = if scalar_ty(lc.tys, global.ty) == "i8*" {
@@ -798,7 +795,8 @@ fn emit_main_wrapper(lc: &Lc, tac: &TacOutput, body: &mut String) {
                     scalar_ty(lc.tys, global.ty)
                 };
                 let init = format!("@__starry_init_global.{}", global.def.0);
-                let v = format!("%u{}", next_wrapper_temp(body));
+                let v = format!("%u{next_global_temp}");
+                next_global_temp += 1;
                 let _ = writeln!(body, "  {} = call {} {}()", v, gty, init);
                 let _ = writeln!(
                     body,

@@ -81,15 +81,22 @@ pub struct TacOutput { funs, globals: Vec<GlobalBody>, diags } // opt gates on d
 - **操作数类型均匀不变量**：同一指令的操作数类型一致——sem 提升格 +
   irc 强制插 `Conv` 保证；llvme 依赖此不变量，不做 per-operand 检查。
 - 常量类型从所属指令的 `ty` 取（`Const` 不自带类型）；浮点发射用
-  十六进制浮点字面量（`0x1.5p+5`）保证位精确往返（llvm-as 层抓违例）。
+  LLVM 的**位模式十六进制**字面量（float/double 均为 `0x` + 16 位模式文本）
+  保证位精确往返（validator 层抓违例）。不是 C99 的 `0x1.5p+5`——
+  那是 LLVM 拒收的语法（见「后端正确性修正案」）。
 - **有符号假设**：v1 全部整型按有符号处理，`Conv` 翻译为
   sext/sitofp/fptosi 族；未来无符号类型按 `IntKind` 分派，IR 形状不变。
 - 类型注解带在指令上：llvme 不看 `expr_ty` 侧表，只看 TAC 里的 `ty`。
 
 ## 数据布局（lowering 与 llvme 共享的表示决策）
 
-- 标量：iN/f64/bool/unit 直接对应 LLVM iN/double/i1。
+- 标量：iN/f64/bool/unit/null 直接对应 LLVM iN/double/i1（null 常量按 i64 兜底）。
 - **聚合值 = 基址 temp + Load/Store 槽寻址**。
+- **基址 vs 值的判据是类型种类，不是槽数**（2026-11-04 修正案，见下）：
+  `irc::layout::is_aggregate` 与 llvme 的 `TyClass` 同口径——
+  int/float/bool/char/string/unit/null 按值，其余（struct/enum/array/
+  tuple/range/nullable/Named）按基址。`struct P { x: int }` 与 `int`
+  同为 1 槽，但前者是基址、后者是值。
 - **和类型（enum/nullable）槽位布局**：
   - 槽 0 = tag，宽度 i8（>255 变体 → `IrcTooManyVariants` 诊断）；
   - 槽 1..k = payload，按变体声明序摊平，每个标量一槽（8 字节），
@@ -103,6 +110,26 @@ pub struct TacOutput { funs, globals: Vec<GlobalBody>, diags } // opt gates on d
   产生值 → 结果槽（两分支 Store、汇合 Load——用内存绕开 phi，
   与 mem2reg 立场一致）。
 - 函数名编码 `name_defid`（防 Symbol 重名导致 LLVM 重定义，确定性）。
+
+### 后端正确性修正案（2026-11-04）
+
+三处都是「金样测试全绿但产物非法」——验收层当时只比对文本，没跑过真
+LLVM。修法各记一条，防回退：
+
+- **基址/值判据按类型种类，不按槽数**。`read_place` / `read_slots` /
+  `copy_slots` / 赋值与结果槽汇合原先用 `scalar_slots(ty) > 1` 判「聚合」，
+  于是 `struct P { x: int }`（1 槽）被折成标量值：`var p = P(1)` 发出
+  `store %t1[0] = %t0 : P`（把基址当 i64 值存），`p.x` 又把读出的标量当
+  基址做 GEP。现统一走 `irc::layout::is_aggregate`（与 llvme `TyClass`
+  同口径）：聚合含单槽一律「基址 + 槽」，Store/Load 的 `ty` 是**槽类型**。
+  `copy_slots` 的单槽快路径对聚合源先取槽值，标量/常量才直传。
+- **浮点常量发位模式十六进制**，不是 C99 十六进制浮点。`float_lit` 曾发
+  `0x1.8p0`，LLVM 22 直接 `expected instruction opcode`；正确形式是
+  `0x3FF8000000000000` 这类 64 位模式文本；clang 22 拒收 8 位 f32 写法。NaN/Inf
+  分支本就是位模式，只有常规值路径错。
+- **验收层必须真跑**。`llvm-as` 缺席时回落 `clang -x ir -c`，两者都找不到
+  才 `SKIP:` 显式打印；`build_cli` 同纪律。跳过即静默变绿，正是上述两处
+  能长期存活的原因。
 
 ## lowering 规则速查（irc v1）
 

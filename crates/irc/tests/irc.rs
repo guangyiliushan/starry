@@ -127,7 +127,8 @@ fn struct_ctor_and_field_read() {
 fn enum_variant_value_and_ctor() {
     assert_tac(
         "enum E {\n    A\n    B\n}\nenum Opt {\n    None\n    Some(int)\n}\nfun f(): int {\n    val a = E.A\n    val o = Opt.Some(7)\n    return 0\n}",
-        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i8\n    %t1 = copy %t0 : E\n    store %t2[0] = 1 : i8\n    store %t2[1] = 7 : i64\n    ret 0 : i64\n",
+        // 不可变聚合绑定 = 别名构造基址（零拷贝）；不再发聚合型 Copy
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i8\n    store %t1[0] = 1 : i8\n    store %t1[1] = 7 : i64\n    ret 0 : i64\n",
     );
 }
 
@@ -335,7 +336,7 @@ fn array_index_assignment() {
 fn compound_assignment_through_member() {
     assert_tac(
         "struct P {\n    x: int\n}\nfun f(): int {\n    var p = P(1)\n    p.x += 2\n    return p.x\n}",
-        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i64\n    store %t1[0] = %t0 : P\n    %t2 = load i64 %t1[0]\n    %t3 = load i64 %t2[0]\n    %t4 = add i64 %t3, 2\n    store %t1[0] = %t4 : i64\n    %t5 = load i64 %t1[0]\n    %t6 = load i64 %t5[0]\n    ret %t6 : i64\n",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i64\n    %t2 = load i64 %t0[0]\n    store %t1[0] = %t2 : i64\n    %t4 = load i64 %t1[0]\n    store %t3[0] = %t4 : i64\n    %t5 = load i64 %t3[0]\n    %t6 = add i64 %t5, 2\n    store %t1[0] = %t6 : i64\n    %t8 = load i64 %t1[0]\n    store %t7[0] = %t8 : i64\n    %t9 = load i64 %t7[0]\n    ret %t9 : i64\n",
     );
 }
 
@@ -556,4 +557,26 @@ fun f(): int {
     );
     assert_eq!(codes, Vec::new(), "{codes:?}");
     assert!(text.contains("mul") && text.contains("store"), "{text}");
+}
+
+#[test]
+fn single_slot_aggregate_var_field_assignment() {
+    // 回归：单字段 struct 的 var 字段赋值。槽数 1 的聚合也是「基址 + 槽」，
+    // Store 的 ty 必须是槽类型（i64）而不是聚合型 P——把基址当 i64 值存
+    // 会让 llvme 发出 `store i64 %t0.slot`（ptr 当 i64，非法 IR）。
+    assert_tac(
+        "struct P { x: int }\nfun f(): int {\n    var p = P(1)\n    p.x = 50\n    return p.x\n}",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i64\n    %t2 = load i64 %t0[0]\n    store %t1[0] = %t2 : i64\n    store %t1[0] = 50 : i64\n    %t4 = load i64 %t1[0]\n    store %t3[0] = %t4 : i64\n    %t5 = load i64 %t3[0]\n    ret %t5 : i64\n",
+    );
+}
+
+#[test]
+fn single_slot_aggregate_read_is_a_base() {
+    // 回归：单槽聚合读出的必须是**基址**，不是标量值。折成标量会让成员
+    // 读取把该值当基址用（`load i64 %t2[0]` 对一个 i64 做 GEP）。
+    // 形参聚合是基址，字段读取就是一次槽类型 Load。
+    assert_tac(
+        "struct P { x: int }\nfun f(p: P): int {\n    return p.x\n}",
+        "fun f(%t0: P) -> i64:\n  b0:\n    %t1 = load i64 %t0[0]\n    ret %t1 : i64\n",
+    );
 }

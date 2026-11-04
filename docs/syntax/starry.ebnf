@@ -303,6 +303,7 @@ PostfixSuffix := "." IDENT
                | CallSuffix
                | "?." IDENT
                | "!!" ;
+(* A tuple base requires an integer literal index; dynamic indices are array-only in v1. *)
 CallSuffix   := TypeArgs? "(" ArgumentList? ")" ;
 ArgumentList := Argument { "," Argument } [ "," ] ;
 Argument     := [ IDENT "=" ] Expr ;

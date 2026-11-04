@@ -1,0 +1,12 @@
+package demo.traps
+
+class Counter(start: int) {
+    var count: int = start
+
+    fun bump() : int {
+        count += 1
+        return count
+    }
+
+    get { count }
+}

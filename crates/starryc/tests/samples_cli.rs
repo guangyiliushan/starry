@@ -1,4 +1,4 @@
-//! Sample corpus gate: the outer `samples/` directory is a progress meter.
+//! Sample corpus gate: the tracked `samples/` directory is a progress meter.
 //! The threshold is a floor, not an exact target, so improvements do not
 //! require churning this test.
 
@@ -7,9 +7,9 @@ use std::process::Command;
 #[test]
 fn sample_corpus_passes_floor() {
     let samples = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../samples")
+        .join("../../samples")
         .canonicalize()
-        .expect("samples directory should exist next to the nested starry checkout");
+        .expect("tracked samples directory should exist in the starry checkout");
     let mut total = 0usize;
     let mut passed = 0usize;
     let mut failures = Vec::new();

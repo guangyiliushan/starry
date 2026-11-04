@@ -1,0 +1,5 @@
+package demo.traps
+
+fun greet(name: int) {
+    print("hi ${name}")
+}

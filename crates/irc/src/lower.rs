@@ -103,7 +103,7 @@ pub(crate) struct Ctx<'r, 'a> {
     /// BlockId → blocks 下标（switch_to 维护；block_pos O(1)）
     block_index: std::collections::HashMap<BlockId, usize>,
     /// 顶层全局：Symbol → (DefId, 类型)；只含标量（v1）
-    globals: HashMap<Symbol, (DefId, TyId)>,
+    globals: &'r HashMap<Symbol, (DefId, TyId)>,
 }
 
 pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> TacOutput {
@@ -133,7 +133,7 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
             continue;
         };
         let ty = sem.defs.get(def).sig.ty;
-        if crate::layout::scalar_slots(sem, ty) > 1 {
+        if crate::layout::is_aggregate(sem, ty) {
             out.diags.push(Diagnostic::error(
                 DiagCode::IrcUnsupportedLowering,
                 binding.pattern.span,
@@ -157,7 +157,7 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
             continue;
         };
         let init = if let Some(init) = &binding.init {
-            let mut ctx = Ctx::new(sem, source, i8_ty, globals.clone());
+            let mut ctx = Ctx::new(sem, source, i8_ty, &globals);
             let entry = ctx.reserve_block();
             ctx.switch_to(entry);
             ctx.fun.entry = entry;
@@ -198,7 +198,7 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
         if !matches!(item.kind, DeclKind::Fun(_)) {
             continue;
         }
-        let mut ctx = Ctx::new(sem, source, i8_ty, globals.clone());
+        let mut ctx = Ctx::new(sem, source, i8_ty, &globals);
         ctx.lower_fun(item.span);
         out.diags.append(&mut ctx.diags);
         out.funs.push(ctx.fun);
@@ -215,7 +215,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
         sem: &'r mut SemRef<'a>,
         source: &'a str,
         i8_ty: TyId,
-        globals: HashMap<Symbol, (DefId, TyId)>,
+        globals: &'r HashMap<Symbol, (DefId, TyId)>,
     ) -> Self {
         let unit = sem.tys.unit;
         Self {
@@ -547,9 +547,8 @@ impl<'r, 'a> Ctx<'r, 'a> {
         let from = self.expr_ty(init);
         let to = target.unwrap_or(from);
         let op = expr::coerce(self, op, from, to);
-        let slots = crate::layout::scalar_slots(self, to);
         if b.immutable {
-            if slots > 1 {
+            if crate::layout::is_aggregate(self, to) {
                 // 聚合：不可变 → 别名构造基址（无重赋值，零拷贝安全）
                 if let Operand::Temp(t) = op {
                     self.env_top().insert(*name, (Place::Temp(t), to));
@@ -557,7 +556,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 }
             }
             let t = self.temp();
-            if slots > 1 {
+            if crate::layout::is_aggregate(self, to) {
                 expr::copy_slots(self, (t, 0), (op, 0), to, to, b.pattern.span);
             } else {
                 self.emit(Instr::Copy {
@@ -569,7 +568,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             self.env_top().insert(*name, (Place::Temp(t), to));
         } else {
             let slot = self.temp();
-            if slots > 1 {
+            if crate::layout::is_aggregate(self, to) {
                 expr::copy_slots(self, (slot, 0), (op, 0), to, to, b.pattern.span);
             } else {
                 self.emit(Instr::Store {
@@ -717,7 +716,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
                     let op = expr::lower_expr(self, v);
                     let op = expr::coerce(self, op, self.expr_ty(v), value_ty);
                     if let Some(slot) = value_slot {
-                        if crate::layout::scalar_slots(self, value_ty) > 1 {
+                        if crate::layout::is_aggregate(self, value_ty) {
                             expr::copy_slots(self, (slot, 0), (op, 0), value_ty, value_ty, span);
                         } else {
                             self.emit(Instr::Store {
@@ -764,7 +763,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
         self.switch_to(merge_b);
         if self.is_unit(result_ty) {
             Operand::Const(crate::tac::Const::Unit)
-        } else if crate::layout::scalar_slots(self, result_ty) > 1 {
+        } else if crate::layout::is_aggregate(self, result_ty) {
             Operand::Temp(result_slot)
         } else {
             let dst = self.temp();
