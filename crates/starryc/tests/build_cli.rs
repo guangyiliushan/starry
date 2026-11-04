@@ -4,17 +4,26 @@
 use std::process::Command;
 
 fn clang_available() -> bool {
-    Command::new("clang")
+    if Command::new("clang")
         .arg("--version")
         .output()
         .map(|out| out.status.success())
         .unwrap_or(false)
+    {
+        return true;
+    }
+    [
+        r"C:\Program Files\LLVM\bin",
+        r"C:\Program Files (x86)\LLVM\bin",
+    ]
+    .iter()
+    .any(|dir| std::path::Path::new(dir).join("clang.exe").is_file())
 }
 
 #[test]
 fn build_print_program_and_run_it() {
     if !clang_available() {
-        eprintln!("clang not found; skipping starryc build e2e test");
+        eprintln!("SKIP: starryc build e2e requires clang (PATH or C:\\Program Files\\LLVM\\bin)");
         return;
     }
     let dir = std::env::temp_dir().join(format!("starry_build_test_{}", std::process::id()));

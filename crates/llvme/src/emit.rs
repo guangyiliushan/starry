@@ -56,7 +56,29 @@ pub fn emit_module(tac: &TacOutput, tys: &TyArena, defs: &DefArena, interner: &I
             escape_cstr(text)
         );
     }
+    // 顶层全局存储 + 初始化函数（main 包装先 call init 再写回 @global）。
+    for global in &tac.globals {
+        let name = fun_name(&lc, global.def);
+        let storage_ty = if scalar_ty(lc.tys, global.ty) == "i8*" {
+            "i8*"
+        } else {
+            "i64"
+        };
+        let zero = if storage_ty == "i8*" { "null" } else { "0" };
+        let _ = writeln!(out, "{} = global {} {}", name, storage_ty, zero);
+    }
     out.push_str(&body);
+    for global in &tac.globals {
+        if let Some(init) = &global.init {
+            emit_fun_named(
+                &lc,
+                &mut g,
+                init,
+                &mut out,
+                format!("@__starry_init_global.{}", global.def.0),
+            );
+        }
+    }
     let _ = defined;
     out
 }
@@ -132,6 +154,8 @@ fn temp_max(fun: &FunBody) -> u32 {
                     max = max.max(dst.0).max(base.0);
                     see_op(idx, &mut max);
                 }
+                Instr::LoadGlobal { dst, .. } => max = max.max(dst.0),
+                Instr::StoreGlobal { .. } => {}
                 Instr::Store { base, idx, src, .. } => {
                     max = max.max(base.0);
                     see_op(idx, &mut max);
@@ -318,8 +342,12 @@ fn int_rank(k: &IntKind) -> u8 {
 }
 
 fn emit_fun(lc: &Lc, g: &mut Global, fun: &FunBody, body: &mut String) {
-    let st = classify(lc, fun);
     let name = fun_name(lc, fun.def);
+    emit_fun_named(lc, g, fun, body, name);
+}
+
+fn emit_fun_named(lc: &Lc, g: &mut Global, fun: &FunBody, body: &mut String, name: String) {
+    let st = classify(lc, fun);
     let ret_ty = if class_of(lc.tys, fun.ret) == TyClass::Agg {
         "ptr".to_string()
     } else {
@@ -592,6 +620,29 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
             let lty = scalar_ty(e.lc.tys, *ty);
             let _ = writeln!(e.out, "  store {} {}, ptr {}", lty, v, addr);
         }
+        Instr::LoadGlobal { dst, global, ty } => {
+            let lty = scalar_ty(e.lc.tys, *ty);
+            let v = e.fresh();
+            let _ = writeln!(
+                e.out,
+                "  {} = load {}, ptr {}",
+                v,
+                lty,
+                fun_name(e.lc, *global)
+            );
+            e.store_val(*dst, *ty, v);
+        }
+        Instr::StoreGlobal { global, src, ty } => {
+            let v = e.op_val(src, *ty);
+            let lty = scalar_ty(e.lc.tys, *ty);
+            let _ = writeln!(
+                e.out,
+                "  store {} {}, ptr {}",
+                lty,
+                v,
+                fun_name(e.lc, *global)
+            );
+        }
         Instr::Slot { .. } => {
             // 纯声明：alloca 已在入口按分类发出
         }
@@ -723,6 +774,10 @@ fn emit_term(e: &mut FnEmit, term: &Term) {
     }
 }
 
+fn next_wrapper_temp(body: &str) -> usize {
+    body.matches("%u").count()
+}
+
 fn emit_main_wrapper(lc: &Lc, tac: &TacOutput, body: &mut String) {
     for fun in &tac.funs {
         let def = lc.defs.get(fun.def);
@@ -735,6 +790,25 @@ fn emit_main_wrapper(lc: &Lc, tac: &TacOutput, body: &mut String) {
             scalar_ty(lc.tys, fun.ret)
         };
         let _ = writeln!(body, "define i32 @main() {{");
+        for global in &tac.globals {
+            if global.init.is_some() {
+                let gty = if scalar_ty(lc.tys, global.ty) == "i8*" {
+                    "i8*".to_string()
+                } else {
+                    scalar_ty(lc.tys, global.ty)
+                };
+                let init = format!("@__starry_init_global.{}", global.def.0);
+                let v = format!("%u{}", next_wrapper_temp(body));
+                let _ = writeln!(body, "  {} = call {} {}()", v, gty, init);
+                let _ = writeln!(
+                    body,
+                    "  store {} {}, ptr {}",
+                    gty,
+                    v,
+                    fun_name(lc, global.def)
+                );
+            }
+        }
         let _ = writeln!(body, "  call {} {}()", ret, fun_name(lc, fun.def));
         let _ = writeln!(body, "  ret i32 0");
         let _ = writeln!(body, "}}");

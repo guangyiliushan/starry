@@ -114,6 +114,19 @@ fn downstream_gates_on_diags() {
     assert_eq!(text, "", "llvme 须在有诊断时不发射");
 }
 
+#[test]
+fn string_plus_concatenates_values() {
+    let src = "fun f(): string {\n    return \"a\" + \"b\"\n}";
+    assert_eq!(run(src, "f", &[]), Value::S("ab".to_string()));
+}
+
+// top-level globals persist across function entry and assignment
+#[test]
+fn top_level_globals_persist_and_update() {
+    let src = "val G = 40\nvar H: int\nfun f(): int {\n    H = G + 2\n    return H\n}";
+    assert_eq!(run(src, "f", &[]), Value::I(42));
+}
+
 // mutable destructuring writes through the original slots
 #[test]
 fn mutable_destructuring_assignment_updates_value() {

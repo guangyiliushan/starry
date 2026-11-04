@@ -17,7 +17,7 @@ use ast::token::OperatorKind;
 use sem::{DefArena, DefId, DefKind, FlowRes, SideTable, TyArena, TyId, TyKind};
 
 use crate::expr;
-use crate::tac::{BlockId, FunBody, Instr, Operand, TacOutput, TempId, Term};
+use crate::tac::{BlockId, FunBody, GlobalBody, Instr, Operand, TacOutput, TempId, Term};
 
 /// SemanticOutput 的字段级拆分（lib.rs lower 处 destructure 产物）：
 /// 共享侧表/arena + interner 的可变字段借，disjoint 故可同船
@@ -41,6 +41,8 @@ pub(crate) struct SemRef<'a> {
 pub(crate) enum Place {
     Temp(TempId),
     Slot(TempId),
+    /// 顶层全局标量（跨函数持久存储；LoadGlobal/StoreGlobal）
+    Global(DefId),
 }
 
 /// 具名/匿名循环的已解析跳转目标（flow_res 回指 node 匹配）。
@@ -55,6 +57,18 @@ pub(crate) struct LoopCtx {
     /// loop 表达式的共享结果槽（带值 break 写入；语句循环为 None）
     pub value_slot: Option<TempId>,
     pub value_ty: TyId,
+}
+
+impl crate::layout::LayoutView for SemRef<'_> {
+    fn tys(&self) -> &TyArena {
+        self.tys
+    }
+    fn defs(&self) -> &DefArena {
+        self.defs
+    }
+    fn i8_ty(&self) -> TyId {
+        self.tys.unit
+    }
 }
 
 impl<'r, 'a> crate::layout::LayoutView for Ctx<'r, 'a> {
@@ -88,25 +102,107 @@ pub(crate) struct Ctx<'r, 'a> {
     defers: Vec<Vec<crate::syntax_reexport::Block>>,
     /// BlockId → blocks 下标（switch_to 维护；block_pos O(1)）
     block_index: std::collections::HashMap<BlockId, usize>,
+    /// 顶层全局：Symbol → (DefId, 类型)；只含标量（v1）
+    globals: HashMap<Symbol, (DefId, TyId)>,
 }
 
 pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> TacOutput {
-    // 先收集 fun 声明的 span（Ctx 持有 sem 的 &mut，不能同时持有 items 引用）
-    let mut spans: Vec<Span> = Vec::new();
-    for item in &sem.source.items {
-        if matches!(item.kind, DeclKind::Fun(_)) {
-            spans.push(item.span);
-        }
-    }
+    let ast: &'x SourceFile = sem.source;
     let mut out = TacOutput::default();
-    for span in spans {
-        let mut ctx = Ctx::new(sem, source, i8_ty);
-        ctx.lower_fun(span);
+
+    // 顶层全局表：v1 只 lower 标量 Binding；聚合全局仍需 TAC 存储扩展。
+    let mut globals: HashMap<Symbol, (DefId, TyId)> = HashMap::new();
+    for item in &ast.items {
+        let DeclKind::Binding(binding) = &item.kind else {
+            continue;
+        };
+        let PatKind::Binding { name, .. } = &binding.pattern.kind else {
+            out.diags.push(Diagnostic::error(
+                DiagCode::IrcUnsupportedLowering,
+                binding.pattern.span,
+                "非简单顶层全局声明的 lowering 在 M-later（解构全局）",
+            ));
+            continue;
+        };
+        let Some(def) = sem.pat_binding_def.get(binding.pattern.id).copied() else {
+            out.diags.push(Diagnostic::error(
+                DiagCode::IrcUnsupportedLowering,
+                binding.pattern.span,
+                "顶层全局 pat_binding_def 缺失（sem 契约破缺）",
+            ));
+            continue;
+        };
+        let ty = sem.defs.get(def).sig.ty;
+        if crate::layout::scalar_slots(sem, ty) > 1 {
+            out.diags.push(Diagnostic::error(
+                DiagCode::IrcUnsupportedLowering,
+                binding.pattern.span,
+                "聚合顶层全局声明的 lowering 在 M-later",
+            ));
+            continue;
+        }
+        globals.insert(*name, (def, ty));
+    }
+    out.globals.reserve(globals.len());
+
+    // 全局初始化函数：main 前由 llvme 调用；解释器按序执行。
+    for item in &ast.items {
+        let DeclKind::Binding(binding) = &item.kind else {
+            continue;
+        };
+        let PatKind::Binding { name, .. } = &binding.pattern.kind else {
+            continue;
+        };
+        let Some(&(def, ty)) = globals.get(name) else {
+            continue;
+        };
+        let init = if let Some(init) = &binding.init {
+            let mut ctx = Ctx::new(sem, source, i8_ty, globals.clone());
+            let entry = ctx.reserve_block();
+            ctx.switch_to(entry);
+            ctx.fun.entry = entry;
+            ctx.fun.def = def;
+            ctx.fun.ret = ty;
+            ctx.env.push(HashMap::new());
+            let value = expr::lower_expr(&mut ctx, init);
+            let from_ty = ctx.expr_ty(init);
+            let value = expr::coerce(&mut ctx, value, from_ty, ty);
+            if ctx.is_unit(ty) {
+                ctx.terminate(Term::Ret { value: None, ty });
+            } else {
+                ctx.terminate(Term::Ret {
+                    value: Some(value),
+                    ty,
+                });
+            }
+            out.diags.append(&mut ctx.diags);
+            let init_fun = std::mem::replace(
+                &mut ctx.fun,
+                FunBody {
+                    def,
+                    params: Vec::new(),
+                    ret: ty,
+                    blocks: Vec::new(),
+                    entry: BlockId(0),
+                },
+            );
+            Some(init_fun)
+        } else {
+            None
+        };
+        out.globals.push(GlobalBody { def, ty, init });
+    }
+
+    // 函数体 lowering（顶层全局表穿入 Ctx，供 Ident 读写）。
+    for item in &ast.items {
+        if !matches!(item.kind, DeclKind::Fun(_)) {
+            continue;
+        }
+        let mut ctx = Ctx::new(sem, source, i8_ty, globals.clone());
+        ctx.lower_fun(item.span);
         out.diags.append(&mut ctx.diags);
         out.funs.push(ctx.fun);
     }
-    // 其余顶层声明无 codegen 产物（struct/enum/import/extern 等静默跳过；
-    // sem 已拒构造被入口门禁，到不了这里）
     out
 }
 
@@ -115,7 +211,12 @@ impl<'r, 'a> Ctx<'r, 'a> {
     pub(crate) fn intern(&mut self, s: &str) -> ast::interner::Symbol {
         self.sem.interner.intern(s)
     }
-    fn new(sem: &'r mut SemRef<'a>, source: &'a str, i8_ty: TyId) -> Self {
+    fn new(
+        sem: &'r mut SemRef<'a>,
+        source: &'a str,
+        i8_ty: TyId,
+        globals: HashMap<Symbol, (DefId, TyId)>,
+    ) -> Self {
         let unit = sem.tys.unit;
         Self {
             sem,
@@ -137,6 +238,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             loops: Vec::new(),
             defers: Vec::new(),
             block_index: std::collections::HashMap::new(),
+            globals,
         }
     }
 
@@ -1106,5 +1208,10 @@ impl<'r, 'a> Ctx<'r, 'a> {
             .iter()
             .rev()
             .find_map(|scope| scope.get(&name).copied())
+            .or_else(|| {
+                self.globals
+                    .get(&name)
+                    .map(|(def, ty)| (Place::Global(*def), *ty))
+            })
     }
 }

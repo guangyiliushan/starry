@@ -62,11 +62,28 @@ Grammar and phase contracts live in `docs/syntax/`: `starry.ebnf`,
 ## Status
 
 The implemented surface covers scalar and aggregate data, control flow,
-patterns, nullable values, string interpolation, print I/O, calls with defaults, and the
+patterns, nullable values, string interpolation and concatenation, print I/O, scalar top-level globals, calls with defaults, and the
 optimization pipeline listed above. See `semantic-notes.md` and
 `opt-notes.md` for the intentionally deferred language features.
 
 ## Running tests
+
+### LLVM toolchain discovery
+
+The LLVM validator and `starryc build` discover tools in this order:
+
+1. `llvm-as` / `clang` on `PATH`.
+2. `C:\Program Files\LLVM\bin`.
+3. `C:\Program Files (x86)\LLVM\bin`.
+
+If none is found, validator tests print an explicit `SKIP:` line and the
+native-build end-to-end test skips; they do not fail the suite. To force a
+local LLVM install on Windows:
+
+```powershell
+$env:PATH = "C:\Program Files\LLVM\bin;" + $env:PATH
+cargo test --workspace --target-dir target\codex-check
+```
 
 ```bash
 cargo test --workspace

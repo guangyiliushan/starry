@@ -460,6 +460,24 @@ fn destructuring_binding_declaration() {
 }
 
 #[test]
+fn string_plus_lowers_to_runtime_concat() {
+    let (text, codes) = dump("fun f(): string {\n    return \"a\" + \"b\"\n}");
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(text.contains("call starry_str_concat : str"), "{text}");
+}
+
+#[test]
+fn top_level_scalar_globals_lower_to_storage_ops() {
+    let (text, codes) =
+        dump("val G = 40\nvar H: int\nfun f(): int {\n    H = G + 2\n    return H\n}");
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(
+        text.contains("load_global") && text.contains("store_global"),
+        "{text}"
+    );
+}
+
+#[test]
 fn print_builtin_lowers_to_runtime_call() {
     let (text, codes) = dump(
         "fun main() {

@@ -140,6 +140,20 @@ fn print_builtin_accepts_scalars_and_rejects_aggregates() {
 }
 
 #[test]
+fn string_plus_concat_is_clean() {
+    assert_clean("fun f(): string {\n    return \"a\" + \"b\"\n}");
+    assert_has(
+        "fun f(): string {\n    return \"a\" + 1\n}",
+        DiagCode::SemTypeMismatch,
+    );
+}
+
+#[test]
+fn top_level_scalar_globals_are_clean() {
+    assert_clean("val G = 40\nvar H: int\nfun main() {\n    H = G + 2\n    print(H)\n}");
+}
+
+#[test]
 fn when_enum_partial_coverage_reports() {
     let src = "enum E {\n    A,\n    B\n}\nfun f(e: E) : int {\n    return when e {\n        E.A -> 1\n    }\n}";
     assert_has(src, DiagCode::SemNonExhaustiveWhen);

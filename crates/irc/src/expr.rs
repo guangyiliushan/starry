@@ -123,6 +123,23 @@ fn ident(ctx: &mut Ctx, name: ast::interner::Symbol, span: Span) -> Operand {
 pub(crate) fn read_place(ctx: &mut Ctx, place: Place, ty: TyId, span: Span) -> Operand {
     match place {
         Place::Temp(t) => Operand::Temp(t),
+        Place::Global(global) => {
+            if ctx.is_unit(ty) {
+                return Operand::Const(Const::Unit);
+            }
+            if crate::layout::scalar_slots(ctx, ty) > 1 {
+                ctx.diag(span, "聚合全局读取的 lowering 在 M-later");
+                return Operand::Const(Const::Unit);
+            }
+            let sty = crate::layout::slot_ty(ctx, ty, 0);
+            let dst = ctx.temp();
+            ctx.emit(Instr::LoadGlobal {
+                dst,
+                global,
+                ty: sty,
+            });
+            Operand::Temp(dst)
+        }
         Place::Slot(slot) => {
             if crate::layout::scalar_slots(ctx, ty) <= 1 {
                 // 单槽聚合（单字段 struct/无参 enum 的 tag）按槽类型加载，
@@ -393,6 +410,9 @@ fn binary(
     if op == OperatorKind::DotDot || op == OperatorKind::DotDotEq {
         return range_value(ctx, e, lhs, rhs);
     }
+    if op == OperatorKind::Plus && matches!(ctx.sem.tys.kind(ctx.expr_ty(e)), TyKind::String) {
+        return string_concat(ctx, lhs, rhs);
+    }
     let Some(bop) = binop(op) else {
         ctx.diag(e.span, "该二元运算符无 TAC 映射（sem 契约破缺）");
         return Operand::Const(Const::Unit);
@@ -484,6 +504,21 @@ fn materialize_logic(ctx: &mut Ctx, op: OperatorKind, lhs: &ExprWrap, rhs: &Expr
 
     ctx.switch_to(merge);
     Operand::Temp(result)
+}
+
+fn string_concat(ctx: &mut Ctx, lhs: &ExprWrap, rhs: &ExprWrap) -> Operand {
+    let str_ty = ctx.expr_ty(lhs);
+    let l = lower_expr(ctx, lhs);
+    let r = lower_expr(ctx, rhs);
+    ctx.emit(Instr::Param { a: l, ty: str_ty });
+    ctx.emit(Instr::Param { a: r, ty: str_ty });
+    let dst = ctx.temp();
+    ctx.emit(Instr::Call {
+        dst: Some(dst),
+        callee: Callee::Runtime(RuntimeFn::StrConcat),
+        ty: str_ty,
+    });
+    Operand::Temp(dst)
 }
 
 fn unary(ctx: &mut Ctx, e: &ExprWrap, op: OperatorKind, operand: &ExprWrap) -> Operand {
@@ -2511,6 +2546,10 @@ fn lvalue_base(ctx: &mut Ctx, base: &ExprWrap, span: Span) -> Option<TempId> {
         ExprKind::Ident(name) => match ctx.lookup(*name) {
             Some((Place::Slot(s), _)) => Some(s),
             Some((Place::Temp(t), _)) => Some(t),
+            Some((Place::Global(_), _)) => {
+                ctx.diag(span, "全局聚合基座的成员/索引赋值在 M-later");
+                None
+            }
             None => {
                 ctx.diag(span, "赋值基座不在环境（sem 契约破缺）");
                 None
@@ -2533,19 +2572,29 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
                 ctx.diag(span, "赋值目标不在环境（sem 契约破缺）");
                 return;
             };
-            let Place::Slot(slot) = place else {
-                ctx.diag(span, "对不可变绑定赋值穿透 sem 门禁（SemAssignToVal 漏报）");
-                return;
-            };
-            if crate::layout::scalar_slots(ctx, ty) > 1 {
-                copy_slots(ctx, (slot, 0), (v, 0), ty, ty, span);
-            } else {
-                ctx.emit(Instr::Store {
-                    base: slot,
-                    idx: Operand::Const(Const::Int(0)),
-                    src: v,
-                    ty,
-                });
+            match place {
+                Place::Slot(slot) => {
+                    if crate::layout::scalar_slots(ctx, ty) > 1 {
+                        copy_slots(ctx, (slot, 0), (v, 0), ty, ty, span);
+                    } else {
+                        ctx.emit(Instr::Store {
+                            base: slot,
+                            idx: Operand::Const(Const::Int(0)),
+                            src: v,
+                            ty,
+                        });
+                    }
+                }
+                Place::Global(global) => {
+                    if crate::layout::scalar_slots(ctx, ty) > 1 || ctx.is_unit(ty) {
+                        ctx.diag(span, "聚合/unit 全局赋值的 lowering 在 M-later");
+                        return;
+                    }
+                    ctx.emit(Instr::StoreGlobal { global, src: v, ty });
+                }
+                Place::Temp(_) => {
+                    ctx.diag(span, "对不可变绑定赋值穿透 sem 门禁（SemAssignToVal 漏报）");
+                }
             }
         }
         ExprKind::Member {

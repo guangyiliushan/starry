@@ -57,6 +57,8 @@ pub enum Instr {
     Copy{ dst: TempId, src: Operand,                    ty: TyId },
     Load{ dst: TempId, base: TempId, idx: Operand,      ty: TyId },  // 槽寻址
     Store{ base: TempId, idx: Operand, src: Operand,    ty: TyId },
+    LoadGlobal{ dst: TempId, global: DefId, ty: TyId },  // top-level global read
+    StoreGlobal{ global: DefId, src: Operand, ty: TyId }, // top-level global write
     Jmp { block: BlockId },
     Br  { cond: Operand, then_: BlockId, else_: BlockId },
     Param{ a: Operand, ty: TyId },
@@ -67,7 +69,7 @@ pub enum Callee { Def(DefId), Runtime(RuntimeFn) }  // 2026-10-27 修正案
 pub enum RuntimeFn { StrConv /*标量→string，源类型在 Param.ty*/, StrConcat, Print /*标量→stdout*/ }
 pub enum Term { Jmp(BlockId), Br { cond, then_, else_ }, Ret { value, ty }, Unreachable }
 pub struct Block { pub id: BlockId, pub instrs: Vec<Instr>, pub term: Term }
-pub struct TacOutput { pub funs: Vec<FunBody>, pub diags: Vec<Diagnostic> } // 有 Error 则 opt 不启动
+pub struct TacOutput { funs, globals: Vec<GlobalBody>, diags } // opt gates on diagnostics
 ```
 
 ### 命名与不变量
@@ -179,11 +181,11 @@ StrConcat 折叠；插值裸 chunk 的 span 形态（parser string_chunk 无
 复合算子全族）；赋值目标扩展到成员字段（字段槽写入）、数组动态索引与
 常量元组下标（parser 记录 const_index；动态数组下标按 i × 元素槽数）；`literal()`
 兼容插值 chunk span。
+String `+` shares the StrConcat runtime with interpolation; scalar top-level globals use LoadGlobal/StoreGlobal plus a synthetic GlobalBody.init function called before main.
 
 **仍发 `IrcUnsupportedLowering`**：grow、复合基座（成员/索引链）及
 nullable/`?.` 基座的赋值（写穿透的 lvalue 基座解算限 Ident）、
-nullable/聚合 part 的字符串化、顶层声明（需全局存储语义——TAC
-存储类扩展，归 llvme/runtime 协同的独立里程碑）。
+nullable/aggregate stringification, aggregate/destructured top-level globals (scalar top-level globals are implemented).
 成员/索引赋值的基座经 lvalue_base 直通 Slot/Temp
 原存储（var 的 read_place 是快照拷贝，经它写入会丢失——2026-10-27
 审查修复，金样断言赋值后读取见新值）。

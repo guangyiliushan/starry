@@ -819,7 +819,21 @@ fn type_binary(
         return st.tys.error;
     }
     match op {
-        Op::Plus | Op::Minus | Op::Star | Op::Slash | Op::Percent => match st.tys.join(l, r) {
+        Op::Plus => {
+            // 字符串连接是 v1 唯一非数值 `+`；运行时入口与插值共用 StrConcat。
+            if l == st.tys.string && r == st.tys.string {
+                st.tys.string
+            } else {
+                match st.tys.join(l, r) {
+                    Some(t) if st.tys.is_numeric(t) => t,
+                    _ => {
+                        mismatch(st, span);
+                        st.tys.error
+                    }
+                }
+            }
+        }
+        Op::Minus | Op::Star | Op::Slash | Op::Percent => match st.tys.join(l, r) {
             Some(t) if st.tys.is_numeric(t) => t,
             _ => {
                 mismatch(st, span);

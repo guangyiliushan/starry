@@ -54,6 +54,8 @@ fn has_side_effects(instr: &Instr) -> bool {
         instr,
         Instr::Load { .. }
             | Instr::Store { .. }
+            | Instr::LoadGlobal { .. }
+            | Instr::StoreGlobal { .. }
             | Instr::Param { .. }
             | Instr::Call { .. }
             | Instr::Slot { .. }
@@ -317,8 +319,9 @@ fn copy_fun(fun: &mut FunBody) -> bool {
                     subst(idx, &map, &mut changed);
                     subst(src, &map, &mut changed);
                 }
+                Instr::StoreGlobal { src, .. } => subst(src, &map, &mut changed),
                 Instr::Param { a, .. } => subst(a, &map, &mut changed),
-                Instr::Call { .. } | Instr::Slot { .. } => {}
+                Instr::LoadGlobal { .. } | Instr::Call { .. } | Instr::Slot { .. } => {}
             }
             match instr {
                 Instr::Copy { dst, src, .. } => {
@@ -511,8 +514,9 @@ fn dce_fun(fun: &mut FunBody) -> bool {
                     mark(idx, &mut used);
                     mark(src, &mut used);
                 }
-                // Call 无读操作数；Slot 无操作数
-                Instr::Call { .. } | Instr::Slot { .. } => {}
+                Instr::StoreGlobal { src, .. } => mark(src, &mut used),
+                // Call/LoadGlobal 无读操作数；Slot 无操作数
+                Instr::Call { .. } | Instr::LoadGlobal { .. } | Instr::Slot { .. } => {}
             }
         }
     }

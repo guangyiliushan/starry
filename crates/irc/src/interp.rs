@@ -122,7 +122,19 @@ pub fn run_fun(
         tys,
         interner,
         strings: Vec::new(),
+        globals: Vec::new(),
     };
+    // 全局初始化：按源序执行合成 init 函数，后续函数经 globals 表读写。
+    for global in &tac.globals {
+        let value = match &global.init {
+            Some(init) => machine
+                .exec_nested(init, &[], 0)?
+                .map(|(v, _)| v)
+                .unwrap_or(0),
+            None => 0,
+        };
+        machine.globals.push((global.def, value));
+    }
     // 槽存储：temp → u64 单元（惰性增长）
     let n = fun
         .params
@@ -136,8 +148,9 @@ pub fn run_fun(
                 | Instr::Load { dst, .. }
                 | Instr::Slot { dst, .. } => Some(dst.0),
                 Instr::Store { base, .. } => Some(base.0),
+                Instr::LoadGlobal { dst, .. } => Some(dst.0),
                 Instr::Call { dst, .. } => dst.map(|d| d.0),
-                Instr::Param { .. } => None,
+                Instr::Param { .. } | Instr::StoreGlobal { .. } => None,
             })
         }))
         .max()
@@ -158,6 +171,7 @@ struct Machine<'a> {
     tys: &'a TyArena,
     interner: &'a Interner,
     strings: Vec<String>,
+    globals: Vec<(DefId, u64)>,
 }
 
 impl<'a> Machine<'a> {
@@ -441,6 +455,23 @@ impl<'a> Machine<'a> {
                     slot.resize(i + 1, 0);
                 }
                 slot[i] = v;
+                Ok(())
+            }
+            Instr::LoadGlobal { dst, global, ty } => {
+                let v = self
+                    .globals
+                    .iter()
+                    .find(|(def, _)| def == global)
+                    .map(|(_, v)| *v)
+                    .unwrap_or(0);
+                Self::put(cells, *dst, self.norm(v, *ty));
+                Ok(())
+            }
+            Instr::StoreGlobal { global, src, ty } => {
+                let v = self.norm(self.op(cells, src), *ty);
+                if let Some(entry) = self.globals.iter_mut().find(|(def, _)| def == global) {
+                    entry.1 = v;
+                }
                 Ok(())
             }
             Instr::Slot { dst, count } => {

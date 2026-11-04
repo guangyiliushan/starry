@@ -310,6 +310,27 @@ fn cmd_llvme(path: &str) -> ExitCode {
 /// runtime 不是 Cargo 依赖；源码在编译 starryc 时经 include_str! 固定。
 const RUNTIME_C: &str = include_str!("../../../runtime/starry_runtime.c");
 
+fn llvm_tool_path(name: &str) -> PathBuf {
+    if std::process::Command::new(name)
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+    {
+        return PathBuf::from(name);
+    }
+    for dir in [
+        r"C:\Program Files\LLVM\bin",
+        r"C:\Program Files (x86)\LLVM\bin",
+    ] {
+        let candidate = Path::new(dir).join(format!("{name}.exe"));
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from(name)
+}
+
 fn cmd_build(path: &str, output: Option<&str>) -> ExitCode {
     let text = match compile_ll(path) {
         Ok(text) => text,
@@ -333,7 +354,8 @@ fn cmd_build(path: &str, output: Option<&str>) -> ExitCode {
         eprintln!("starryc: 无法写临时构建文件: {e}");
         return ExitCode::FAILURE;
     }
-    let mut clang = std::process::Command::new("clang");
+    let clang_path = llvm_tool_path("clang");
+    let mut clang = std::process::Command::new(&clang_path);
     clang.arg(&ll_path).arg(&c_path);
     if cfg!(windows) {
         // The bundled runtime is freestanding and provides mainCRTStartup.
@@ -352,7 +374,7 @@ fn cmd_build(path: &str, output: Option<&str>) -> ExitCode {
             ExitCode::FAILURE
         }
         Err(e) => {
-            eprintln!("starryc: 无法启动 clang（请确认 LLVM/clang 在 PATH 中）: {e}");
+            eprintln!("starryc: 无法启动 clang（已查 PATH 与 C:\\Program Files\\LLVM\\bin）: {e}");
             ExitCode::FAILURE
         }
     }

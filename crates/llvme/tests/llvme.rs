@@ -12,29 +12,51 @@ fn emit(source: &str) -> (String, Vec<ast::syntax::node::DiagCode>) {
     (text, codes)
 }
 
+fn llvm_tool_path(name: &str) -> Option<std::path::PathBuf> {
+    if std::process::Command::new(name)
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+    {
+        return Some(std::path::PathBuf::from(name));
+    }
+    for dir in [
+        "C:\\Program Files\\LLVM\\bin",
+        "C:\\Program Files (x86)\\LLVM\\bin",
+    ] {
+        let candidate = std::path::Path::new(dir).join(format!("{name}.exe"));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn llvm_as_ok(text: &str) -> bool {
-    let mut child = match std::process::Command::new("llvm-as")
-        .arg("-")
-        .arg("-o")
-        .arg(if cfg!(windows) { "NUL" } else { "/dev/null" })
+    let tool = llvm_tool_path("llvm-as")
+        .map(|path| (path, false))
+        .or_else(|| llvm_tool_path("clang").map(|path| (path, true)));
+    let Some((program, is_clang)) = tool else {
+        eprintln!(
+            "SKIP: LLVM validator requires llvm-as or clang on PATH (checked C:\\Program Files\\LLVM\\bin)"
+        );
+        return true;
+    };
+    let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let mut command = std::process::Command::new(program);
+    if is_clang {
+        command.args(["-x", "ir", "-c", "-", "-o"]);
+    } else {
+        command.args(["-", "-o"]);
+    }
+    let mut child = command
+        .arg(null_device)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => match std::process::Command::new("clang")
-            .args(["-x", "ir", "-c", "-", "-o"])
-            .arg(if cfg!(windows) { "NUL" } else { "/dev/null" })
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return true, // 可选验收层：无工具链即跳过（契约）
-        },
-    };
+        .expect("validator discovered but failed to spawn");
     use std::io::Write as _;
     let _ = child
         .stdin
@@ -177,6 +199,37 @@ fn print_runtime_declares_and_calls_void() {
     assert!(
         text.contains("declare void @starry_print_i32(i32)")
             && text.contains("call void @starry_print_i32"),
+        "{text}"
+    );
+}
+
+#[test]
+fn string_plus_concat_emits_valid_ir() {
+    let (text, codes) = emit("fun f(): string {\n    return \"a\" + \"b\"\n}");
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    if !llvm_as_ok(&text) {
+        panic!("LLVM validator rejected:\n{text}");
+    }
+    assert!(
+        text.contains("declare i8* @starry_str_concat(i8*, i8*)")
+            && text.contains("call i8* @starry_str_concat"),
+        "{text}"
+    );
+}
+
+#[test]
+fn top_level_globals_emit_storage_init_and_valid_ir() {
+    let (text, codes) =
+        emit("val G = 40\nvar H: int\nfun main() {\n    H = G + 2\n    print(H)\n}");
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    if !llvm_as_ok(&text) {
+        panic!("LLVM validator rejected:\n{text}");
+    }
+    assert!(
+        text.contains(" = global i64 0")
+            && text.contains("@__starry_init_global.")
+            && text.contains("store i64")
+            && text.contains("call void @starry_print_i64"),
         "{text}"
     );
 }
