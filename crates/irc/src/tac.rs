@@ -78,14 +78,16 @@ pub enum Callee {
     Runtime(RuntimeFn),
 }
 
-/// 运行时入口（v1：字符串化与拼接；名字由 llvme 映射 starry_str_conv /
-/// starry_str_concat）
+/// 运行时入口（v1：字符串化、拼接与 print；名字由 llvme 映射为
+/// starry_str_conv_* / starry_str_concat / starry_print_*）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeFn {
     /// 标量 → string（源类型由前置 Param 指令的 ty 携带）
     StrConv,
     /// (string, string) → string
     StrConcat,
+    /// print(标量)：源类型由前置 Param 指令的 ty 携带，返回 unit
+    Print,
 }
 
 /// 三地址指令（终止符除外）
@@ -393,6 +395,7 @@ impl TacOutput {
                     Callee::Def(d) => interner.resolve(defs.get(*d).name).to_string(),
                     Callee::Runtime(RuntimeFn::StrConv) => "starry_str_conv".to_string(),
                     Callee::Runtime(RuntimeFn::StrConcat) => "starry_str_concat".to_string(),
+                    Callee::Runtime(RuntimeFn::Print) => "starry_print".to_string(),
                 };
                 let _ = write!(
                     out,

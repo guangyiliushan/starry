@@ -163,6 +163,8 @@ pub enum DiagCode {
     SemNonExhaustiveWhen,
     /// Own 值移动后再次使用
     SemUseAfterMove,
+    /// 读取了尚未明确赋值的局部绑定
+    SemUninitializedBinding,
     /// v1 暂不支持的构造
     SemUnsupportedConstruct,
     /// 宏展开是独立前置 pass，v1 未实现

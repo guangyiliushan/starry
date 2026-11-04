@@ -308,6 +308,12 @@ fn finish_postfix(
             TokenKind::Punctuation(PunctuationKind::LBracket) => {
                 session.cursor.advance();
                 let index = parse_expr(session)?;
+                let const_index = match &index.kind {
+                    ExprKind::Literal(LiteralKind::Integer) => {
+                        integer_literal_index(session, index.span)
+                    }
+                    _ => None,
+                };
                 let close = session.cursor.peek().span;
                 if !session
                     .cursor
@@ -323,6 +329,7 @@ fn finish_postfix(
                     kind: ExprKind::Index {
                         base: Box::new(expr),
                         index: Box::new(index),
+                        const_index,
                     },
                 };
             }
@@ -473,6 +480,18 @@ fn parse_primary(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError
         }
         TokenKind::Keyword(HardKeyword::If) => parse_if(session),
         TokenKind::Keyword(HardKeyword::When) => parse_when(session),
+        TokenKind::Keyword(HardKeyword::Loop) => {
+            session.cursor.advance();
+            let body = parse_block(session)?;
+            let end = block_tail_span(&body);
+            Ok(ExprWrap::new(
+                id,
+                join_span(span, end),
+                ExprKind::Loop {
+                    body: Box::new(body),
+                },
+            ))
+        }
         TokenKind::Keyword(HardKeyword::Async) => {
             // EBNF AsyncExpr := "async" Block：`{` 归块不归 lambda
             session.cursor.advance();
@@ -1177,6 +1196,19 @@ pub(crate) fn parse_path(
         });
     }
     Ok(ast::syntax::node::Path { segments })
+}
+
+fn integer_literal_index(session: &ParseSession<'_>, span: Span) -> Option<usize> {
+    let text = span.slice(session.source).replace('_', "");
+    let (digits, radix) = match text.as_str() {
+        s if s.len() > 2 && s[..2].eq_ignore_ascii_case("0x") => (&s[2..], 16),
+        s if s.len() > 2 && s[..2].eq_ignore_ascii_case("0o") => (&s[2..], 8),
+        s if s.len() > 2 && s[..2].eq_ignore_ascii_case("0b") => (&s[2..], 2),
+        s => (s, 10),
+    };
+    i128::from_str_radix(digits, radix)
+        .ok()
+        .and_then(|value| usize::try_from(value).ok())
 }
 
 pub(crate) fn parse_identifier(

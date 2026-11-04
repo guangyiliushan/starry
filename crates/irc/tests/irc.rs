@@ -410,8 +410,132 @@ fn sem_error_gates_lowering() {
 }
 
 #[test]
-fn unsupported_construct_reports_and_stops() {
-    // 元组解构绑定（非简单绑定模式）在 M-later
-    let (_, codes) = dump("fun f(): int {\n    val (x, y) = (1, 2)\n    return x\n}");
-    assert!(codes.contains(&DiagCode::IrcUnsupportedLowering));
+fn rest_pattern_maps_to_edges() {
+    let (text, codes) = dump(
+        "fun f(a: [int; 4]): int {
+    if a is [x, .., y] {
+        return x + y
+    }
+    return 0
+}",
+    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(
+        text.contains("load i64 %t0[0]") && text.contains("load i64 %t0[3]"),
+        "{text}"
+    );
+}
+
+#[test]
+fn or_pattern_with_shared_binding() {
+    let (text, codes) = dump(
+        "enum E {
+    A(int)
+    B(int)
+}
+fun f(e: E): int {
+    if e is A(x) | B(x) {
+        return x
+    }
+    return 0
+}",
+    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(text.contains("eq i8") && text.contains("ret"), "{text}");
+}
+
+#[test]
+fn destructuring_binding_declaration() {
+    let (text, codes) = dump(
+        "fun f(): int {
+    val (x, y) = (1, 2)
+    return x + y
+}",
+    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(
+        text.contains("store %t0[0] = 1") && text.contains("store %t0[1] = 2"),
+        "{text}"
+    );
+}
+
+#[test]
+fn print_builtin_lowers_to_runtime_call() {
+    let (text, codes) = dump(
+        "fun main() {
+    print(42)
+}",
+    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(
+        text.contains("param 42 : i32") && text.contains("call starry_print : unit"),
+        "{text}"
+    );
+}
+
+#[test]
+fn mutable_destructuring_binding_assignment() {
+    let (text, codes) = dump(
+        "fun f(): int {
+    var (x, y) = (1, 2)
+    x = 3
+    return x + y
+}",
+    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(
+        text.contains("= 3 : i32") && text.contains("add i32"),
+        "{text}"
+    );
+}
+
+#[test]
+fn aggregate_element_for_loop() {
+    let (text, codes) = dump(
+        "struct P {
+    x: int
+    y: int
+}
+fun f(a: [P; 2]): int {
+    var s: int = 0
+    for p in a {
+        s = s + p.x
+    }
+    return s
+}",
+    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(text.contains("mul") && text.contains("load i64"), "{text}");
+}
+
+#[test]
+fn aggregate_element_in_scan() {
+    let (text, codes) = dump(
+        "struct P {
+    x: int
+    y: int
+}
+fun f(a: [P; 2], x: P): bool {
+    return x in a
+}",
+    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(text.contains("mul") && text.contains("eq i64"), "{text}");
+}
+
+#[test]
+fn aggregate_element_index_assignment() {
+    let (text, codes) = dump(
+        "struct P {
+    x: int
+    y: int
+}
+fun f(): int {
+    var a = [P(1, 2), P(3, 4)]
+    a[1] = P(9, 8)
+    return a[1].x
+}",
+    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(text.contains("mul") && text.contains("store"), "{text}");
 }

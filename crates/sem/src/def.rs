@@ -21,16 +21,28 @@ pub struct ScopeId(pub u32);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefKind {
     Fun,
-    LocalBinding { mutable: bool },
+    LocalBinding {
+        mutable: bool,
+    },
     Param,
     Struct,
-    StructField { parent: DefId, index: usize },
+    StructField {
+        parent: DefId,
+        index: usize,
+    },
     Enum,
-    EnumVariant { parent: DefId, index: usize },
+    EnumVariant {
+        parent: DefId,
+        index: usize,
+    },
     Class,
     TypeAlias,
     BuiltinType,
-    ImportNs { segments: Vec<Symbol> },
+    /// v1 I/O builtin `print(value)`; overload by argument type at call sites.
+    BuiltinPrint,
+    ImportNs {
+        segments: Vec<Symbol>,
+    },
 }
 
 /// 定义签名槽（各 kind 按需取用；单一结构避免按 kind 分型的抽象膨胀）

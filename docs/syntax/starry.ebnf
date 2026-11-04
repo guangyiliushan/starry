@@ -201,6 +201,10 @@ IfExpr := "if" RefutableCondition Block
           { "else" "if" RefutableCondition Block }
           [ "else" Block ] ;
 
+(* Decision: `for` has no parenthesized header form. Unlike `while`,
+ * whose RefutableCondition may be an arbitrary parenthesized Expr,
+ * `for (v in arr)` is a syntax error; the iterable stays outside Expr
+ * grouping so the header cannot be mistaken for a tuple condition. *)
 ForStatement   := [ Label ":" ] "for" Pattern "in" Expr Block ;
 WhileStatement := [ Label ":" ] "while" RefutableCondition Block ;
 LoopStatement  := [ Label ":" ] "loop" Block ;
@@ -213,6 +217,7 @@ Label          := "'" IDENT ;
 (* ---------- Expressions ---------- *)
 
 Expr := LambdaExpr
+       | LoopExpr
        | WhenExpr
        | IfExpr
        | ConcurrencyExpr
@@ -223,6 +228,9 @@ Expr := LambdaExpr
        | BinaryExpr ;
 
 LambdaExpr       := [ «move» ] "{" [ LambdaParameters "->" ] Block "}" ;
+(* Unlabelled loop is an expression whose value is a labelled or unlabelled
+ * `break Expr`. Labelled loops remain statements (their value is discarded). *)
+LoopExpr         := "loop" Block ;
 LambdaParameters := ParameterPattern { "," ParameterPattern } ;
 ParameterPattern := [ "mut" ] IDENT [ ":" Type ] | «it» ;
 

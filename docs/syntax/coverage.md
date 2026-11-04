@@ -18,6 +18,7 @@
 | # | EBNF 产生式 | AST 变体 | walk 访问 | 终端审计 | 状态 |
 |---|------------|---------|----------|---------|------|
 | 1 | LambdaExpr (params+arrow optional) | ExprKind::Lambda | params, body | «move» 无终端 | ✓ |
+| 1a | LoopExpr (`loop Block`) | ExprKind::Loop | body | `loop` ∈ hard；无标签表达式形态 | ✓ |
 | 2 | OperatorExpr 12 级分层 | ExprKind::Binary | lhs, rhs | 十 AssignOp + 逻辑 + 比较 + 范围 | ✓ |
 | 3 | CastExpr (as/as?/as!) | ExprKind::Cast | expr, ty | as/as?/as! ∈ 规则表 | ✓ |
 | 4 | UnaryExpr (含 await) | ExprKind::Unary | operand | !/-/~/&/*/await | ✓ |
@@ -57,6 +58,8 @@
 | v0.4 宏调用 `name!(...)` | ExprKind::MacroCall + TokenTree 流 |
 | v0.4 数组 `[T; N]` / `[v; N]` | TypeKind::Array / ExprKind::ArrayRepeat |
 | v0.4 module 声明移除 | SourceFile 仅 package；`by` 降为 slot word |
+| v0.4 LoopExpr / LoopStatement 分立 | ExprKind::Loop（表达式）/ StmtKind::Loop（带标签语句） |
+| 元组下标常量槽 | ExprKind::Index.const_index（parser 解码整数字面量） |
 
 ## v0.4 gap closures（本轮补全）
 

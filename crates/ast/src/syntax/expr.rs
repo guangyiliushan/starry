@@ -83,6 +83,8 @@ pub enum ExprKind {
     Index {
         base: Box<ExprWrap>,
         index: Box<ExprWrap>,
+        /// Tuple subscripts must be integer literals; parser records the slot here.
+        const_index: Option<usize>,
     },
     Member {
         base: Box<ExprWrap>,
@@ -94,6 +96,10 @@ pub enum ExprKind {
     },
     Lambda {
         params: LambdaParams,
+        body: Box<Block>,
+    },
+    /// 无标签 loop 表达式：值来自带值 break（EBNF LoopExpr）。
+    Loop {
         body: Box<Block>,
     },
     StringInterp {

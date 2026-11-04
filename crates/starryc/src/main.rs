@@ -1,6 +1,6 @@
 //! starryc — Starry 编译器入口
 //!
-//! 当前提供五个子命令：
+//! 当前提供这些子命令：
 //! - `starryc match <regex> <input>`：打印最长匹配长度
 //!   （exit 0 匹配 / exit 1 无匹配 / exit 2 用法错误）
 //! - `starryc dump-nfa <regex>`：打印 NFA 状态与边
@@ -11,7 +11,10 @@
 //! - `starryc opt <file>`：irc → opt，优化后 TAC 文本 stdout
 //! - `starryc llvme <file>`：parse → sem → irc → opt → llvme，.ll 文本 stdout
 //!   （exit 0 干净 / exit 1 有诊断，格式同 check）
+//! - `starryc build <file> [output]`：编译并调用 clang 链接 runtime，
+//!   生成可直接执行的本机程序（机器层失败 exit 1；用法错误 exit 2）
 
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use lex::TokenKind;
@@ -42,13 +45,15 @@ fn main() -> ExitCode {
         [cmd, path] if cmd == "irc" => cmd_irc(path),
         [cmd, path] if cmd == "opt" => cmd_opt(path),
         [cmd, path] if cmd == "llvme" => cmd_llvme(path),
+        [cmd, path] if cmd == "build" => cmd_build(path, None),
+        [cmd, path, output] if cmd == "build" => cmd_build(path, Some(output)),
         _ => usage(),
     }
 }
 
 fn usage() -> ExitCode {
     eprintln!(
-        "用法: starryc match <regex> <input> | starryc dump-nfa <regex> | starryc tokenize <source> | starryc check <file> | starryc irc <file> | starryc opt <file> | starryc llvme <file>"
+        "用法: starryc match <regex> <input> | starryc dump-nfa <regex> | starryc tokenize <source> | starryc check <file> | starryc irc <file> | starryc opt <file> | starryc llvme <file> | starryc build <file> [output]"
     );
     ExitCode::from(2)
 }
@@ -240,25 +245,25 @@ fn cmd_opt(path: &str) -> ExitCode {
         }
         return ExitCode::FAILURE;
     }
-    opt::optimize(&mut tac);
+    opt::optimize(&mut tac, &output.tys);
     print!("{}", tac.dump(&output.tys, &output.defs, &output.interner));
     ExitCode::SUCCESS
 }
 
-/// parse → sem → irc → opt → llvme：.ll 文本走 stdout；诊断同 irc 子命令
-fn cmd_llvme(path: &str) -> ExitCode {
+/// parse → sem → irc → opt → llvme 的共用编译链；诊断已打印，失败只返回 exit code。
+fn compile_ll(path: &str) -> Result<String, ExitCode> {
     let source = match std::fs::read_to_string(path) {
         Ok(source) => source,
         Err(e) => {
             eprintln!("starryc: 无法读取 {path}: {e}");
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     };
     let parsed = match parser::parse_source(&source) {
         Ok(parsed) => parsed,
         Err(e) => {
             eprintln!("starryc: {path}: 解析失败（机器层）: {e}");
-            return ExitCode::FAILURE;
+            return Err(ExitCode::FAILURE);
         }
     };
     let mut output = sem::analyze(parsed);
@@ -269,7 +274,7 @@ fn cmd_llvme(path: &str) -> ExitCode {
                 d.span.start, d.span.end, d.code, d.message
             );
         }
-        return ExitCode::FAILURE;
+        return Err(ExitCode::FAILURE);
     }
     let mut tac = irc::lower(&mut output, &source);
     if !tac.diags.is_empty() {
@@ -279,10 +284,76 @@ fn cmd_llvme(path: &str) -> ExitCode {
                 d.span.start, d.span.end, d.code, d.message
             );
         }
+        return Err(ExitCode::FAILURE);
+    }
+    opt::optimize(&mut tac, &output.tys);
+    Ok(llvme::emit(
+        &tac,
+        &output.tys,
+        &output.defs,
+        &output.interner,
+    ))
+}
+
+/// parse → sem → irc → opt → llvme：.ll 文本走 stdout；诊断同 irc 子命令
+fn cmd_llvme(path: &str) -> ExitCode {
+    match compile_ll(path) {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(code) => code,
+    }
+}
+
+/// starryc build：.ll + 内嵌 C runtime → clang → 可执行文件。
+/// runtime 不是 Cargo 依赖；源码在编译 starryc 时经 include_str! 固定。
+const RUNTIME_C: &str = include_str!("../../../runtime/starry_runtime.c");
+
+fn cmd_build(path: &str, output: Option<&str>) -> ExitCode {
+    let text = match compile_ll(path) {
+        Ok(text) => text,
+        Err(code) => return code,
+    };
+    let exe = output.map(PathBuf::from).unwrap_or_else(|| {
+        let source = Path::new(path);
+        if cfg!(windows) {
+            source.with_extension("exe")
+        } else {
+            source.with_extension("")
+        }
+    });
+    let pid = std::process::id();
+    let dir = std::env::temp_dir();
+    let ll_path = dir.join(format!("starry_build_{pid}.ll"));
+    let c_path = dir.join(format!("starry_runtime_{pid}.c"));
+    if let Err(e) = std::fs::write(&ll_path, text.as_bytes())
+        .and_then(|_| std::fs::write(&c_path, RUNTIME_C.as_bytes()))
+    {
+        eprintln!("starryc: 无法写临时构建文件: {e}");
         return ExitCode::FAILURE;
     }
-    opt::optimize(&mut tac);
-    let text = llvme::emit(&tac, &output.tys, &output.defs, &output.interner);
-    print!("{text}");
-    ExitCode::SUCCESS
+    let mut clang = std::process::Command::new("clang");
+    clang.arg(&ll_path).arg(&c_path);
+    if cfg!(windows) {
+        // The bundled runtime is freestanding and provides mainCRTStartup.
+        clang.arg("-nostdlib").arg("-lkernel32");
+    }
+    let status = clang.arg("-o").arg(&exe).status();
+    let _ = std::fs::remove_file(&ll_path);
+    let _ = std::fs::remove_file(&c_path);
+    match status {
+        Ok(status) if status.success() => {
+            println!("{}", exe.display());
+            ExitCode::SUCCESS
+        }
+        Ok(status) => {
+            eprintln!("starryc: clang 链接失败（exit {status}）");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("starryc: 无法启动 clang（请确认 LLVM/clang 在 PATH 中）: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }

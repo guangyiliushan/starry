@@ -52,6 +52,9 @@ pub(crate) struct LoopCtx {
     pub break_b: BlockId,
     pub cont_b: BlockId,
     pub defer_depth: usize,
+    /// loop 表达式的共享结果槽（带值 break 写入；语句循环为 None）
+    pub value_slot: Option<TempId>,
+    pub value_ty: TyId,
 }
 
 impl<'r, 'a> crate::layout::LayoutView for Ctx<'r, 'a> {
@@ -362,12 +365,11 @@ impl<'r, 'a> Ctx<'r, 'a> {
             StmtKind::While { cond, body, .. } => self.lower_while(s.id, s.span, cond, body),
             StmtKind::Loop { body, .. } => self.lower_loop(s.id, s.span, body),
             StmtKind::Break { value, .. } => {
-                if value.is_some() {
-                    self.diag(s.span, "带值 break 的 lowering 在 M2（循环值定型解冻）");
-                }
-                self.lower_jump(s.id, expr::FlowTarget::Break, s.span);
+                self.lower_jump(s.id, expr::FlowTarget::Break, s.span, value.as_deref());
             }
-            StmtKind::Continue { .. } => self.lower_jump(s.id, expr::FlowTarget::Continue, s.span),
+            StmtKind::Continue { .. } => {
+                self.lower_jump(s.id, expr::FlowTarget::Continue, s.span, None)
+            }
             StmtKind::Return { value } => {
                 let op = value.as_ref().map(|v| {
                     let op = expr::lower_expr(self, v);
@@ -400,12 +402,30 @@ impl<'r, 'a> Ctx<'r, 'a> {
     }
 
     fn lower_binding(&mut self, b: &BindingDecl) {
-        let PatKind::Binding { name, .. } = &b.pattern.kind else {
-            self.diag(
-                b.pattern.span,
-                "非简单绑定模式的 lowering 在 M2（模式解构）",
-            );
+        if !matches!(b.pattern.kind, PatKind::Binding { .. }) {
+            let Some(init) = &b.init else {
+                self.diag(b.pattern.span, "无初始化解构绑定的 lowering 未排期");
+                return;
+            };
+            let op = expr::lower_expr(self, init);
+            let from = self.expr_ty(init);
+            let to = self
+                .sem
+                .pat_binding_def
+                .get(b.pattern.id)
+                .map(|d| self.sem.defs.get(*d).sig.ty)
+                .filter(|ty| !matches!(self.sem.tys.kind(*ty), TyKind::Unknown))
+                .unwrap_or(from);
+            let op = expr::coerce(self, op, from, to);
+            // sem 已限 Binding/Wildcard/Tuple/Array；条件必为 true
+            expr::lower_pattern(self, &b.pattern, op, to, b.pattern.span);
+            if !b.immutable {
+                expr::make_pattern_bindings_mutable(self, &b.pattern);
+            }
             return;
+        }
+        let PatKind::Binding { name, .. } = &b.pattern.kind else {
+            unreachable!("上方已处理非简单模式");
         };
         let target = match self.sem.pat_binding_def.get(b.pattern.id) {
             Some(d) => Some(self.sem.defs.get(*d).sig.ty),
@@ -415,7 +435,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             }
         };
         let Some(init) = &b.init else {
-            // 无初始化（sem v1 不做明确赋值核查）：slot，读取 = 未定义值
+            // 无初始化：slot；sem definite pass 已拒绝未初始化读取到达这里
             let slot = self.temp();
             let ty = target.unwrap_or(self.sem.tys.unit);
             self.env_top().insert(*name, (Place::Slot(slot), ty));
@@ -527,6 +547,8 @@ impl<'r, 'a> Ctx<'r, 'a> {
             break_b: merge_b,
             cont_b: cond_b,
             defer_depth: self.defers.len(),
+            value_slot: None,
+            value_ty: self.sem.tys.unit,
         });
         self.lower_block(body);
         self.loops.pop();
@@ -549,6 +571,8 @@ impl<'r, 'a> Ctx<'r, 'a> {
             break_b: merge_b,
             cont_b: body_b,
             defer_depth: self.defers.len(),
+            value_slot: None,
+            value_ty: self.sem.tys.unit,
         });
         self.lower_block(body);
         self.loops.pop();
@@ -557,7 +581,13 @@ impl<'r, 'a> Ctx<'r, 'a> {
         self.switch_to(merge_b);
     }
 
-    fn lower_jump(&mut self, stmt: NodeId, kind: expr::FlowTarget, span: Span) {
+    fn lower_jump(
+        &mut self,
+        stmt: NodeId,
+        kind: expr::FlowTarget,
+        span: Span,
+        value: Option<&ast::syntax::expr::ExprWrap>,
+    ) {
         let Some(flow) = self.sem.flow_res.get(stmt) else {
             self.diag(span, "flow_res 缺失（sem 契约破缺）");
             return;
@@ -574,15 +604,75 @@ impl<'r, 'a> Ctx<'r, 'a> {
                         expr::FlowTarget::Continue => l.cont_b,
                     },
                     l.defer_depth,
+                    l.value_slot,
+                    l.value_ty,
                 )
             });
         match target {
-            Some((b, depth)) => {
+            Some((b, depth, value_slot, value_ty)) => {
+                // break 值与 return 值同纪律：先求值并写入循环结果槽，再跑 defer。
+                if let Some(v) = value {
+                    let op = expr::lower_expr(self, v);
+                    let op = expr::coerce(self, op, self.expr_ty(v), value_ty);
+                    if let Some(slot) = value_slot {
+                        if crate::layout::scalar_slots(self, value_ty) > 1 {
+                            expr::copy_slots(self, (slot, 0), (op, 0), value_ty, value_ty, span);
+                        } else {
+                            self.emit(Instr::Store {
+                                base: slot,
+                                idx: Operand::Const(crate::tac::Const::Int(0)),
+                                src: op,
+                                ty: value_ty,
+                            });
+                        }
+                    }
+                }
                 // 循环出口：只发射循环内注册的 defer（内→外），外层归各自出口
                 self.emit_defers_above(depth);
                 self.terminate(Term::Jmp(b));
             }
             None => self.diag(span, "break/continue 目标不在循环栈（sem 契约破缺）"),
+        }
+    }
+
+    /// 无标签 loop 表达式：带值 break 写共享结果槽，merge 后读回。
+    /// 无 break 的无限循环结果型是 unit，merge 不读槽（后续仍接不可达块）。
+    pub(crate) fn lower_loop_expr(
+        &mut self,
+        e: &ast::syntax::expr::ExprWrap,
+        body: &Block,
+    ) -> Operand {
+        let result_ty = self.expr_ty(e);
+        let body_b = self.reserve_block();
+        let merge_b = self.reserve_block();
+        self.terminate(Term::Jmp(body_b));
+        self.switch_to(body_b);
+        let result_slot = self.temp();
+        self.loops.push(LoopCtx {
+            node: e.id,
+            break_b: merge_b,
+            cont_b: body_b,
+            defer_depth: self.defers.len(),
+            value_slot: Some(result_slot),
+            value_ty: result_ty,
+        });
+        self.lower_block(body);
+        self.loops.pop();
+        self.terminate(Term::Jmp(body_b));
+        self.switch_to(merge_b);
+        if self.is_unit(result_ty) {
+            Operand::Const(crate::tac::Const::Unit)
+        } else if crate::layout::scalar_slots(self, result_ty) > 1 {
+            Operand::Temp(result_slot)
+        } else {
+            let dst = self.temp();
+            self.emit(Instr::Load {
+                dst,
+                base: result_slot,
+                idx: Operand::Const(crate::tac::Const::Int(0)),
+                ty: result_ty,
+            });
+            Operand::Temp(dst)
         }
     }
 
@@ -620,10 +710,6 @@ impl<'r, 'a> Ctx<'r, 'a> {
             }
         };
         let es = crate::layout::scalar_slots(self, elem_ty);
-        if es > 1 {
-            self.diag(iterable.span, "聚合元素的 for 迭代在 M-later");
-            return;
-        }
         // iterable 入口块一次求值（副作用只执行一次；基址 temp 穿入循环）
         let arr_op = expr::lower_expr(self, iterable);
         let arr = match arr_op {
@@ -674,6 +760,8 @@ impl<'r, 'a> Ctx<'r, 'a> {
             // continue → step（先自增再判条件；直跳 cond 会跳过自增死循环）
             cont_b: step_b,
             defer_depth: self.defers.len(),
+            value_slot: None,
+            value_ty: self.sem.tys.unit,
         });
         self.env_push();
         let elem = self.temp();
@@ -684,12 +772,52 @@ impl<'r, 'a> Ctx<'r, 'a> {
             idx: Operand::Const(crate::tac::Const::Int(0)),
             ty: cty,
         });
-        self.emit(Instr::Load {
-            dst: elem,
-            base: arr,
-            idx: Operand::Temp(i),
-            ty: elem_ty,
-        });
+        if es <= 1 {
+            self.emit(Instr::Load {
+                dst: elem,
+                base: arr,
+                idx: Operand::Temp(i),
+                ty: elem_ty,
+            });
+        } else {
+            let base_idx = self.temp();
+            self.emit(Instr::Bin {
+                dst: base_idx,
+                op: crate::tac::BinOp::Mul,
+                l: Operand::Temp(i),
+                r: Operand::Const(crate::tac::Const::Int(es as i128)),
+                ty: cty,
+            });
+            for sld in 0..es {
+                let sty = crate::layout::slot_ty(self, elem_ty, sld);
+                let t = self.temp();
+                let off = if sld == 0 {
+                    Operand::Temp(base_idx)
+                } else {
+                    let o = self.temp();
+                    self.emit(Instr::Bin {
+                        dst: o,
+                        op: crate::tac::BinOp::Add,
+                        l: Operand::Temp(base_idx),
+                        r: Operand::Const(crate::tac::Const::Int(sld as i128)),
+                        ty: cty,
+                    });
+                    Operand::Temp(o)
+                };
+                self.emit(Instr::Load {
+                    dst: t,
+                    base: arr,
+                    idx: off,
+                    ty: sty,
+                });
+                self.emit(Instr::Store {
+                    base: elem,
+                    idx: Operand::Const(crate::tac::Const::Int(sld as i128)),
+                    src: Operand::Temp(t),
+                    ty: sty,
+                });
+            }
+        }
         expr::lower_pattern(self, pattern, Operand::Temp(elem), elem_ty, pattern.span);
         self.lower_block(body);
         self.env_pop();
@@ -780,6 +908,8 @@ impl<'r, 'a> Ctx<'r, 'a> {
             break_b: merge_b,
             cont_b: step_b,
             defer_depth: self.defers.len(),
+            value_slot: None,
+            value_ty: self.sem.tys.unit,
         });
         self.env_push();
         let v = self.temp();
@@ -897,6 +1027,8 @@ impl<'r, 'a> Ctx<'r, 'a> {
             break_b: merge_b,
             cont_b: step_b,
             defer_depth: self.defers.len(),
+            value_slot: None,
+            value_ty: self.sem.tys.unit,
         });
         self.env_push();
         let v = self.temp();

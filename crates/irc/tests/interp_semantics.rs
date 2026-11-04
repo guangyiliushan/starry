@@ -1,7 +1,7 @@
 //! 语义级回归（TAC 解释器执行，断言「跑出来的结果」）：对应审查报告的
 //! 六个 P0 形态——快照测试抓不到的语义错编，在这里全部变成结果断言。
 
-use irc::interp::{Value, run_named};
+use irc::interp::{InterpError, Value, run_named};
 use irc::tac::TacOutput;
 
 fn build(source: &str) -> (TacOutput, sem::SemanticOutput, String) {
@@ -26,6 +26,19 @@ fn run(source: &str, name: &str, args: &[Value]) -> Value {
         args,
     )
     .expect("interp")
+}
+
+/// 同 `run`，但保留 Result（trap 用例断言用）
+fn run_res(source: &str, name: &str, args: &[Value]) -> Result<Value, InterpError> {
+    let (tac, sem_out, _) = build(source);
+    run_named(
+        &tac,
+        &sem_out.tys,
+        &sem_out.defs,
+        &sem_out.interner,
+        name,
+        args,
+    )
 }
 
 // P0-1：?? 曾恒取右值
@@ -78,16 +91,20 @@ fn aggregate_if_and_when_values() {
 // 缺点5：opt/llvme 的 API 级诊断门禁
 #[test]
 fn downstream_gates_on_diags() {
-    let src = "fun f(): int {\n    val (x, y) = (1, 2)\n    return x\n}";
-    let (mut tac, sem_out, _) = {
-        let parsed = parser::parse_source(src).expect("machine parse");
-        let mut sem_out = sem::analyze(parsed);
-        let tac = irc::lower(&mut sem_out, src);
-        (tac, sem_out, ())
-    };
-    assert!(!tac.diags.is_empty());
+    let src = "fun f(): int {
+    return 1
+}";
+    let parsed = parser::parse_source(src).expect("machine parse");
+    let mut sem_out = sem::analyze(parsed);
+    let mut tac = irc::lower(&mut sem_out, src);
+    assert!(tac.diags.is_empty(), "{:?}", tac.diags);
+    tac.diags.push(ast::syntax::node::Diagnostic::error(
+        ast::syntax::node::DiagCode::IrcUnsupportedLowering,
+        ast::token::Span { start: 0, end: 0 },
+        "synthetic diagnostic for gate test",
+    ));
     let before = format!("{:?}", tac.funs);
-    opt::optimize(&mut tac);
+    opt::optimize(&mut tac, &sem_out.tys);
     assert_eq!(
         format!("{:?}", tac.funs),
         before,
@@ -95,4 +112,98 @@ fn downstream_gates_on_diags() {
     );
     let text = llvme::emit(&tac, &sem_out.tys, &sem_out.defs, &sem_out.interner);
     assert_eq!(text, "", "llvme 须在有诊断时不发射");
+}
+
+// mutable destructuring writes through the original slots
+#[test]
+fn mutable_destructuring_assignment_updates_value() {
+    let src = "fun f(): int {
+    var (x, y) = (1, 2)
+    x = 3
+    return x + y
+}";
+    assert_eq!(run(src, "f", &[]), Value::I(5));
+}
+
+// loop expression: value exits through a shared result slot
+#[test]
+fn loop_expression_returns_break_value() {
+    let src = "fun f(c: bool): int {
+    val x = loop {
+        if c {
+            break 1
+        } else {
+            break 2
+        }
+    }
+    return x
+}";
+    assert_eq!(run(src, "f", &[Value::B(true)]), Value::I(1));
+    assert_eq!(run(src, "f", &[Value::B(false)]), Value::I(2));
+}
+
+// ── 位宽模型（2026-10-31）────────────────────────────────
+// 整型按 `ty` 位宽回绕/规约，与 llvme 发出的 N 位 LLVM 指令一致。
+// 旧扁平模型（一律按 i64）会算出真实代码给不出的值，也就抓不到
+// 折叠位宽那类错编。
+
+#[test]
+fn int_arith_wraps_at_type_width() {
+    let src = "fun f(): i32 {\n    return 2000000000 + 2000000000\n}";
+    assert_eq!(run(src, "f", &[]), Value::I(-294_967_296));
+}
+
+#[test]
+fn int_div_sees_wrapped_operand() {
+    let src = "fun f(): i32 {\n    return (2000000000 + 2000000000) / 2\n}";
+    assert_eq!(run(src, "f", &[]), Value::I(-147_483_648));
+}
+
+#[test]
+fn int_compare_sees_wrapped_operand() {
+    let src = "fun f(): bool {\n    return (2000000000 + 2000000000) < 0\n}";
+    assert_eq!(run(src, "f", &[]), Value::B(true));
+}
+
+#[test]
+fn arg_narrowed_to_param_width_then_sext_back() {
+    // 200 进 i8 形参规约成 -56，as i32 符号扩展仍是 -56
+    let src = "fun f(a: i8): i32 {\n    return a as i32\n}";
+    assert_eq!(run(src, "f", &[Value::I(200)]), Value::I(-56));
+}
+
+#[test]
+fn conv_narrows_to_target_width() {
+    let src = "fun f(a: i64): i8 {\n    return a as i8\n}";
+    assert_eq!(run(src, "f", &[Value::I(300)]), Value::I(44));
+}
+
+#[test]
+fn float_conv_rounds_to_single_precision() {
+    // f64 → f32 舍入：1 + 2^-24 在 f32 里是 1.0
+    let src = "fun f(a: f64): f32 {\n    return a as f32\n}";
+    assert_eq!(
+        run(src, "f", &[Value::F(1.0 + 2f64.powi(-24))]),
+        Value::F(1.0)
+    );
+}
+
+#[test]
+fn shift_out_of_type_width_traps() {
+    // 移位量判据是目标位宽；越界是 LLVM poison，解释器以 trap 表示
+    let src = "fun f(): i32 {\n    return 1 << 40\n}";
+    assert_eq!(
+        run_res(src, "f", &[]),
+        Err(InterpError::Trap("shift out of range"))
+    );
+}
+
+#[test]
+fn fptosi_out_of_range_traps() {
+    // 1e30 落不进 i32：LLVM 是 poison，解释器不发明值
+    let src = "fun f(a: f64): i32 {\n    return a as i32\n}";
+    assert_eq!(
+        run_res(src, "f", &[Value::F(1e30)]),
+        Err(InterpError::Trap("fptosi out of range"))
+    );
 }

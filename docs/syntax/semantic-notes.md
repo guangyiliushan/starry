@@ -1,7 +1,7 @@
 # Semantic notes（sem crate 实现契约）
 
 语义分析的实现门禁与决策记录，与 `parser-notes.md` 同位。三遍 pass +
-最小线性 move 检查，纯 std、全确定性（`BTreeMap`/`BTreeSet`，不依赖
+结构化明确赋值 + 最小线性 move 检查，纯 std、全确定性
 迭代序之外的任何顺序保证）。
 
 ## Pass 顺序与理由
@@ -10,6 +10,7 @@
 ParseOutput ─→ declare（作用域树 + defs + 顶层签名 lower）
             ─→ resolve（名字 → DefId；label/flow；pattern 构造器）
             ─→ check（自底向上定型 → expr_ty；Error 投毒抑制级联）
+            ─→ definite（结构化明确赋值；分支交集、循环零次保守）
             ─→ moveck（Own 值线性移动检查，join 点保守并集）
             ─→ SemanticOutput（AST 原样 + arena + 侧表）
 ```
@@ -17,7 +18,7 @@ ParseOutput ─→ declare（作用域树 + defs + 顶层签名 lower）
 顺序被依赖锁死：前向引用要求名字全量注册先于一切解析（Starry 允许
 文件内先用后声明）；签名 lower 在名字注册完成后统一做（别名循环守卫
 `Def.resolving`）；resolve 只绑定不定型；check 定型时读 resolve 的侧表；
-moveck 最后跑（需要完整 expr_def）。
+definite 在 check 后跑（读完整 expr_def/pat_binding_def），moveck 最后跑。
 
 ## 侧表契约（核心设计）
 
@@ -90,6 +91,7 @@ Error 恒真，出错子树不再级联诊断。parser 诊断原样保留在前�
   枚举类型对象的成员访问是命名空间访问（`E.A`），在 member_field_ty
   解包为枚举值型；结构体静态访问（`P.x`）仍不支持。
 - 未知命名实参报 `SemUnknownParam` 且不级联「missing argument」。
+- **`print` 内建**：根作用域注册 `DefKind::BuiltinPrint`；一个位置标量实参（int/float/bool/char/string）定型为 unit，irc 走 `RuntimeFn::Print` 并按实参类型实例化 runtime 入口。
 
 ## when 穷尽性（v1 保守规则）
 
@@ -142,6 +144,15 @@ when 分支顶层（`arrow_types == false`）把裸名解析为单段 Constructo
   的 then 块经父链可见 v；两个兄弟 is 表达式绑定同名则按块内重名
   纪律报 SemDuplicateDef（有意松弛，见跳过清单的遮蔽项）。
 - when/is 的元组/数组模式对聚合主语**按元素类型解构精化**。
+- rest 模式不绑定变量，只参与元组/数组槽位映射；含绑定 Or 保持同名同变量纪律。
+
+## definite assignment（结构化保守版）
+
+只追踪 LocalBinding：声明后置未初始化，简单赋值置已初始化；if/when 取分支
+交集，循环按零次执行保守（循环内赋值不外溢到出口）。诊断码
+`SemUninitializedBinding`；目标是拒绝确定的未初始化读取，不把本 pass
+扩成完整数据流求解器。
+
 ## moveck（M3.5 近似）
 
 逐 fun 体 / 顶层绑定初始化 walk。`Own` 绑定与 **Own 形参**（类型
@@ -155,7 +166,10 @@ LocalBinding/Param）；`=` 赋值重置；分支/循环取两态**并集**
 泛型（fun 类型形参/调用实例化；签名不 lower，单一
 `SemUnsupportedConstruct` 不级联）、方法调用（成员 callee）、impl、
 actor、provide、union/dyn/Self 类型、lambda 定型、spawn 内部、
-宏展开（独立前置 pass，规格待定；调用点报 `SemMacroExpansion`）。`nclass 声明（无构造路径/方法调用；声明点报一条即注册，避免级联）、`ngrow 语句、concurrent/async 块与 await（lowering 未排期，`nrest 模式 `..`（解构 lowering 未排期）——均由 sem 先行诊断，irc 不重复报。
+宏展开（独立前置 pass，规格待定；调用点报 `SemMacroExpansion`）。
+class 声明（无构造路径/方法调用；声明点报一条即注册，避免级联）、
+grow 语句、concurrent/async 块与 await（lowering 未排期）——均由 sem
+先行诊断，irc 不重复报。rest 模式与含绑定 Or 已在 sem/irc 解冻。
 lambda/spawn 内部整体不解析不定型。
 
 `StringInterp` 不在跳过清单：sem 已完整定型（结果 `string`，parts
@@ -166,17 +180,16 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
 
 以下「声称支持但 v1 不核查」的松弛项也已记录在案：
 
-- 明确赋值分析（`val x: int; return x` 不报未初始化）
 - 结构体字段可变性（`p.x = 1` 不核查 mutable；class 字段规则待定）
 - `Own<T>` 的构造入口（moveck 测试以标注绑定近似，自带一条
   `SemTypeMismatch`，断言完整诊断序列钉住这一点）
-- `loop` 的 break 值定型（break_values 收集后未汇入循环型；
-  For/While 的 break 值同样不接）
 - import 存在性核查（`import a.b.*` 空转不查目标）
 - 间接类型别名循环（`A→B→A` 惰性 lower，仅使用时报告；
   直接循环已报 `SemTypeCycle`）
 - 直接自引用 struct（`struct N { next: N }` 接受，无限大小留给 codegen）
-- `as`/`as?`/`as!` 不核查可转换性（`"s" as int` 亦 clean——显式转换的`n  合法对集合未定义，留给类型设计；v1 全部接受、照目标类型定型）。`n- 内建类型名大小写敏感（`String` ≠ `string`，样例需随语法修订）
+- `as`/`as?`/`as!` 不核查可转换性（`"s" as int` 亦 clean——显式转换的
+  合法对集合未定义，留给类型设计；v1 全部接受、照目标类型定型）。
+- 内建类型名大小写敏感（`String` ≠ `string`，样例需随语法修订）
 - 整数字面量的值域与默认 `i32` 型不核查（`return 0xFFFFFFFFFF` 型标
   i32、值超界；值解码与 i128 值域诊断在 irc 层，超大值发
   `IntegerOutOfRange`）——字面量值的类型化核查归 sem 的未来条款
@@ -184,5 +197,5 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
 ## 诊断码
 
 全部 `Sem*` 前缀，定义在 `crates/ast/src/syntax/node.rs::DiagCode`，
-19 个（SemUndefinedName … SemUnknownMember）；另有 `Irc*` 2 个属 irc
+20 个（SemUndefinedName … SemUnknownMember）；另有 `Irc*` 2 个属 irc
 阶段（码表同址，见 opt-notes）。解析器码不受影响。

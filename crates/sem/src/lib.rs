@@ -1,9 +1,10 @@
-//! Starry 语义分析：三遍 pass + 最小线性 move 检查（M3.5）
+//! Starry 语义分析：三遍 pass + 明确赋值 + 最小线性 move 检查
 //!
 //! ```text
 //! ParseOutput ──→ declare（作用域树 + defs + 顶层签名 lower）
 //!             ──→ resolve（名字 → DefId；label/flow；pattern 构造器）
 //!             ──→ check（自底向上定型 → expr_ty；Error 投毒抑制级联）
+//!             ─→ definite（结构化明确赋值）
 //!             ──→ moveck（Own 值线性移动检查，join 点保守并集）
 //!             ──→ SemanticOutput（AST 原样 + arena + 侧表）
 //! ```
@@ -15,6 +16,7 @@
 
 mod check;
 mod declare;
+mod definite;
 mod moveck;
 mod resolve;
 
@@ -23,7 +25,7 @@ pub mod ty;
 
 use ast::interner::Interner;
 use ast::syntax::ParseOutput;
-use ast::syntax::node::{DiagCollector, Diagnostic, NodeId, SourceFile};
+use ast::syntax::node::{DiagCollector, Diagnostic, NodeId, SourceFile, Span};
 
 pub use def::{Def, DefArena, DefId, DefKind, DefSig, ScopeArena, ScopeId};
 pub use ty::{FloatKind, IntKind, TyArena, TyId, TyKind};
@@ -100,6 +102,7 @@ pub fn analyze(parse: ParseOutput) -> SemanticOutput {
         declare::run(ast, st);
         resolve::run(ast, st);
         check::run(ast, st);
+        definite::run(ast, st);
         moveck::run(ast, st);
     }
     sem.finish()
@@ -141,6 +144,8 @@ pub(crate) struct FunFrame {
 #[derive(Debug)]
 pub(crate) struct LoopFrame {
     pub break_values: Vec<TyId>,
+    pub break_total: usize,
+    pub break_with_value: usize,
 }
 
 pub(crate) struct Sem {
@@ -155,27 +160,40 @@ impl Sem {
             diags.emit(diag);
         }
         let node_count = parse.node_count;
-        Self {
-            ast: parse.ast,
-            st: SemState {
-                interner: parse.interner,
-                diags,
-                tys: TyArena::new(),
-                defs: DefArena::new(),
-                scopes: ScopeArena::new(),
-                expr_ty: SideTable::new(node_count),
-                expr_def: SideTable::new(node_count),
-                pat_res: SideTable::new(node_count),
-                flow_res: SideTable::new(node_count),
-                node_scope: SideTable::new(node_count),
-                ty_of_node: SideTable::new(node_count),
-                pat_binding_def: SideTable::new(node_count),
-                labels: Vec::new(),
-                funs: Vec::new(),
-                loops: Vec::new(),
-                own_def: None,
-            },
-        }
+        let mut st = SemState {
+            interner: parse.interner,
+            diags,
+            tys: TyArena::new(),
+            defs: DefArena::new(),
+            scopes: ScopeArena::new(),
+            expr_ty: SideTable::new(node_count),
+            expr_def: SideTable::new(node_count),
+            pat_res: SideTable::new(node_count),
+            flow_res: SideTable::new(node_count),
+            node_scope: SideTable::new(node_count),
+            ty_of_node: SideTable::new(node_count),
+            pat_binding_def: SideTable::new(node_count),
+            labels: Vec::new(),
+            funs: Vec::new(),
+            loops: Vec::new(),
+            own_def: None,
+        };
+        // v1 I/O builtin：注册到根作用域；调用点按实参类型实例化 runtime 入口。
+        let root = st.scopes.root();
+        let print = st.interner.intern("print");
+        let def = st.defs.push(Def {
+            kind: DefKind::BuiltinPrint,
+            name: print,
+            scope: root,
+            span: Span { start: 0, end: 0 },
+            sig: DefSig::new(st.tys.unit, st.tys.unknown),
+            resolving: false,
+            alias_of: None,
+            alias_resolved: None,
+            member_scope: None,
+        });
+        st.scopes.insert(root, print, def);
+        Self { ast: parse.ast, st }
     }
 
     fn finish(self) -> SemanticOutput {

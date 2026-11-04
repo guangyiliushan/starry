@@ -1,6 +1,7 @@
 //! opt 集成测试：parser → sem → irc → opt 全链，钉住优化后 TAC 文本。
 //! 每 pass 一正一负（契约：fold/copy/dce/cse 钉板 + 副作用不可删）。
 
+use irc::interp::{InterpError, Value};
 use irc::tac::TacOutput;
 
 fn dump(source: &str) -> String {
@@ -21,7 +22,7 @@ fn dump(source: &str) -> String {
         "unexpected irc diags: {:?}",
         tac.diags.iter().map(|d| d.code).collect::<Vec<_>>()
     );
-    opt::optimize(&mut tac);
+    opt::optimize(&mut tac, &sem_out.tys);
     tac.dump(&sem_out.tys, &sem_out.defs, &sem_out.interner)
 }
 
@@ -144,5 +145,141 @@ fn div_by_zero_not_folded() {
     assert_opt(
         "fun f(a: int): int {\n    return a / 0\n}",
         "fun f(%t0: i64) -> i64:\n  b0:\n    %t1 = div i64 %t0, 0\n    ret %t1 : i64\n",
+    );
+}
+
+// ── 折叠位宽（2026-10-31 修正案）─────────────────────────
+
+#[test]
+fn fold_wraps_add_at_operand_width() {
+    // i32 域回绕成 -294967296，不是 i128 的 4000000000（后者是超位宽字面量）
+    assert_opt(
+        "fun f(): int {\n    return 2000000000 + 2000000000\n}",
+        "fun f() -> i64:\n  b0:\n    %t1 = conv -294967296 : i32 -> i64\n    ret %t1 : i64\n",
+    );
+}
+
+#[test]
+fn fold_div_sees_wrapped_operand() {
+    // 回绕后再除：-294967296 / 2 = -147483648。旧的 i128 折叠给出
+    // 2000000000，与未优化代码（LLVM `div i32`）不同值——静默错编
+    assert_opt(
+        "fun f(): int {\n    return (2000000000 + 2000000000) / 2\n}",
+        "fun f() -> i64:\n  b0:\n    %t2 = conv -147483648 : i32 -> i64\n    ret %t2 : i64\n",
+    );
+}
+
+#[test]
+fn fold_compares_wrapped_operands() {
+    // 比较的是规约后的 N 位值：回绕成负数，故 < 0 为真
+    assert_opt(
+        "fun f(): bool {\n    return (2000000000 + 2000000000) < 0\n}",
+        "fun f() -> i1:\n  b0:\n    ret true : i1\n",
+    );
+}
+
+#[test]
+fn shift_out_of_type_width_not_folded() {
+    // 移位量判据是目标位宽（i32 → 0..32），不是 i128 的 0..128
+    assert_opt(
+        "fun f(): int {\n    return 1 << 40\n}",
+        "fun f() -> i64:\n  b0:\n    %t0 = shl i32 1, 40\n    %t1 = conv %t0 : i32 -> i64\n    ret %t1 : i64\n",
+    );
+}
+
+#[test]
+fn fold_still_works_in_i64_domain() {
+    // 位宽规约不得让 64 位域的正常折叠失效
+    assert_opt(
+        "fun f(): int {\n    val x: int = 3\n    return x + 1\n}",
+        "fun f() -> i64:\n  b0:\n    ret 4 : i64\n",
+    );
+}
+
+// ── 语义保持性（解释器对拍，2026-10-31）──────────────────
+// 快照只看 TAC 文本形状，错编在里面是「合法文本」——折叠位宽那次
+// 就是这么活下来的。这里优化前后各跑一遍解释器，结果必须逐值相等。
+
+fn interp_result(
+    source: &str,
+    name: &str,
+    args: &[Value],
+    optimized: bool,
+) -> Result<Value, InterpError> {
+    let parsed = parser::parse_source(source).expect("machine parse");
+    let mut sem_out = sem::analyze(parsed);
+    assert!(sem_out.diagnostics.is_empty());
+    let mut tac: TacOutput = irc::lower(&mut sem_out, source);
+    assert!(tac.diags.is_empty());
+    if optimized {
+        opt::optimize(&mut tac, &sem_out.tys);
+    }
+    irc::interp::run_named(
+        &tac,
+        &sem_out.tys,
+        &sem_out.defs,
+        &sem_out.interner,
+        name,
+        args,
+    )
+}
+
+fn assert_semantics_preserved(source: &str, name: &str, args: &[Value]) {
+    let before = interp_result(source, name, args, false);
+    let after = interp_result(source, name, args, true);
+    assert_eq!(before, after, "优化改变了可观察行为: {source}");
+}
+
+#[test]
+fn opt_preserves_semantics_fold_wrap() {
+    // 回归钉板：折叠位宽错编（曾折成 2000000000，未优化算 -147483648）
+    assert_semantics_preserved(
+        "fun f(): i32 {\n    return (2000000000 + 2000000000) / 2\n}",
+        "f",
+        &[],
+    );
+}
+
+#[test]
+fn opt_preserves_semantics_fold_compare() {
+    assert_semantics_preserved(
+        "fun f(): bool {\n    return (2000000000 + 2000000000) < 0\n}",
+        "f",
+        &[],
+    );
+}
+
+#[test]
+fn opt_preserves_semantics_shift() {
+    // 越界移位两侧同为 trap：不折叠、不发明值
+    assert_semantics_preserved("fun f(): i32 {\n    return 1 << 40\n}", "f", &[]);
+}
+
+#[test]
+fn opt_preserves_semantics_fold_chain() {
+    // 折叠 + 复制传播 + CSE + DCE 一起动（死代码不得改变语义）
+    assert_semantics_preserved(
+        "fun f(): i32 {\n    val a = 3 * 4\n    val b = 3 * 4\n    val dead = 9 / 3\n    return (a + b) - 2\n}",
+        "f",
+        &[],
+    );
+}
+
+#[test]
+fn opt_preserves_semantics_licm_loop() {
+    assert_semantics_preserved(
+        "fun f(n: int): int {\n    var i = 0\n    var s: int = 0\n    while i < n {\n        s = s + n * 2\n        i = i + 1\n    }\n    return s\n}",
+        "f",
+        &[Value::I(5)],
+    );
+}
+
+#[test]
+fn opt_preserves_semantics_narrow_params() {
+    // 窄位宽实参 + conv 链（sext/trunc）在优化下不得变值
+    assert_semantics_preserved(
+        "fun f(a: i8, b: i8): i32 {\n    return (a as i32) + (b as i32)\n}",
+        "f",
+        &[Value::I(200), Value::I(3)],
     );
 }

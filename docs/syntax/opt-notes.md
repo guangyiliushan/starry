@@ -1,4 +1,4 @@
-﻿# Optimization notes（中间代码优化阶段实现契约）
+# Optimization notes（中间代码优化阶段实现契约）
 
 优化阶段的门禁与决策记录，与 `parser-notes.md`、`semantic-notes.md` 同位。
 教科书写法（龙书 ch6/8/9）：中间代码生成产出**三地址码（TAC）**，
@@ -64,7 +64,7 @@ pub enum Instr {
     Call { dst: Option<TempId>, callee: Callee,         ty: TyId },
 }
 pub enum Callee { Def(DefId), Runtime(RuntimeFn) }  // 2026-10-27 修正案
-pub enum RuntimeFn { StrConv /*标量→string，源类型在 Param.ty*/, StrConcat }
+pub enum RuntimeFn { StrConv /*标量→string，源类型在 Param.ty*/, StrConcat, Print /*标量→stdout*/ }
 pub enum Term { Jmp(BlockId), Br { cond, then_, else_ }, Ret { value, ty }, Unreachable }
 pub struct Block { pub id: BlockId, pub instrs: Vec<Instr>, pub term: Term }
 pub struct TacOutput { pub funs: Vec<FunBody>, pub diags: Vec<Diagnostic> } // 有 Error 则 opt 不启动
@@ -154,8 +154,9 @@ unreachable 兜底）、聚合 var 赋值与读取的逐槽快照拷贝、聚合
 
 **M2b（2026-10-26）控制流与模式**：模式匹配 lowering（`lower_pattern`，
 is/when/for/val 条件共用：字面量/布尔/Null/Wildcard/Binding/Constructor
-（pat_res 变体序号 + payload 槽绑定）/Struct/元组/数组（无 rest）/
-Range；Or 仅无绑定形态，含绑定 Or 与 rest 模式在循环值定型解冻后）；
+（pat_res 变体序号 + payload 槽绑定）/Struct/元组/数组（含
+rest 槽位映射，rest 不产生绑定）/Range；Or 支持共享绑定（每替代
+一个分支，命中后写共享绑定槽，汇合再读出）；
 `is`（绑定限 then 分支作用域，negated 取反）；`when`（主语单求值 →
 源序 Br 链，模式/guard 内嵌，值语境结果槽，链尾 unreachable）；`in`
 （区间 → 双比较短路，`..` 不含/`..=` 含上界；数组 → 线性扫描循环）；
@@ -168,23 +169,22 @@ and/or 操作数常量短路在发射期折叠。
 
 **M3（2026-10-27）运行时契约与赋值补全**：`Callee` 枚举修正案——
 调用目标分 `Def(DefId)`（用户函数）与 `Runtime(RuntimeFn)`（运行时
-extern 入口：v1 = StrConv/StrConcat，名字由 llvme 映射
-`starry_str_conv`/`starry_str_concat` 并 declare；std-only 红线下
+extern 入口：v1 = StrConv/StrConcat/Print，名字由 llvme 映射
+`starry_str_conv_*`/`starry_str_concat`/`starry_print_*` 并 declare；std-only 红线下
 运行时以符号存在不进 crate。opt 侧影响：五个 pass 对 Call 均按
 "有副作用"处理，callee 形状不可见，零改动成立）。StringInterp
 lowering：逐 part StrConv（源类型由前置 Param 的 ty 携带）+ 左结合
 StrConcat 折叠；插值裸 chunk 的 span 形态（parser string_chunk 无
 引号）在字面量层兼容。赋值补全：复合赋值读-改-写 desugar（十个
-复合算子全族）；赋值目标扩展到成员字段（字段槽写入）与数组索引
-（slot 寻址）；`literal()` 兼容插值 chunk span。
+复合算子全族）；赋值目标扩展到成员字段（字段槽写入）、数组动态索引与
+常量元组下标（parser 记录 const_index；动态数组下标按 i × 元素槽数）；`literal()`
+兼容插值 chunk span。
 
-**仍发 `IrcUnsupportedLowering`**：grow、带值 break（sem 循环值定型
-松弛项）、多段路径、元组下标、非简单绑定模式（元组/解构 val）、
-含绑定 Or/rest 模式、聚合元素的 for/in/索引/字段赋值、`?.`
-与复合基座（成员/索引链）及 nullable 基座的赋值（写穿透的
-lvalue 基座解算限 Ident）、nullable/聚合 part 的字符串化、顶层
-声明（需全局存储语义——TAC 存储类扩展，归 llvme/runtime 协同的
-独立里程碑）。成员/索引赋值的基座经 lvalue_base 直通 Slot/Temp
+**仍发 `IrcUnsupportedLowering`**：grow、复合基座（成员/索引链）及
+nullable/`?.` 基座的赋值（写穿透的 lvalue 基座解算限 Ident）、
+nullable/聚合 part 的字符串化、顶层声明（需全局存储语义——TAC
+存储类扩展，归 llvme/runtime 协同的独立里程碑）。
+成员/索引赋值的基座经 lvalue_base 直通 Slot/Temp
 原存储（var 的 read_place 是快照拷贝，经它写入会丢失——2026-10-27
 审查修复，金样断言赋值后读取见新值）。
 
@@ -193,7 +193,9 @@ lvalue 基座解算限 Ident）、nullable/聚合 part 的字符串化、顶层
 教科书局部/全局基础集，全部纯函数 `&mut FunBody`：
 
 1. **常量折叠**：Bin/Un 双常数操作数 → 单 Const（含跳转条件定值 →
-   无条件化 Br→Jmp）。
+   无条件化 Br→Jmp）。**折叠在指令 `ty` 的位宽上算**（2026-10-31
+   修正案，见下「常量折叠位宽修正案」）：整型按 N 位补码规约后运算，
+   移位量判据 `0..N`、除零判规约后的除数；f32 逐次舍入到单精度。
 2. **复制传播**：`x = y` 后凡 x 的使用点可用 y（局部，同一基本块内）。
 3. **死代码消除**：结果不再被使用的纯计算指令删除（无副作用谓词：
    Load/Call/Store 永不删；活性 = 全函数使用集——val temp 跨块引用合法（前驱支配后继），块内扫描会误删只在后继块使用的定义；级联由不动点消化）。
@@ -211,6 +213,50 @@ v1 跳过（记入扩展位，不归本阶段）：全局数据流（到达定�
 `&mut FunBody` 接口加。扩展位另记：跳表 switch、Conv 常量折叠、
 值编号/DAG。
 
+### 常量折叠位宽修正案（2026-10-31）
+
+折叠早期在 i128 上做、忽略指令 `ty` 的位宽；未优化代码由 llvme 发成
+`ty` 位宽的 LLVM 指令、按 N 位回绕，两者对**非模运算**给出不同值——
+`(2000000000 + 2000000000) / 2 : i32` 曾折成 2000000000，未优化算
+-147483648（静默错编）。加/减/乘是模运算，末位截断后位正确；比较则
+必须比较**规约后**的操作数。
+
+- 折叠语义域 `Domain` 由 `TyArena::kind` 推：`Int(N)`/`F32`/`F64`/
+  `Bool`；聚合/字符串/unit 无算术域不折叠；char 按 llvme 的 i32 同位宽。
+- 整型先按 N 位补码规约操作数（`sx`），结果再规约回 N 位 → 折叠产物
+  必落在 `ty` 值域内，发射端不再出现超位宽字面量。
+- 移位量判据 `0..N`（原为 i128 的 `0..128`）；除零判据用规约后的除数
+  （i8 域 `x / 256` 的除数规约后是 0，未优化代码同样除零）。
+- `optimize(tac: &mut TacOutput, tys: &TyArena)`：`tys` 只服务折叠取
+  位宽，其余 pass 不看类型。
+- 测试：`opt` 单元钉板 9 条（窄位宽整型与 f32 在 surface 语法里做不出
+  来——字面量默认 i32/f64 且提升格只加宽不收窄，故直接钉
+  `fold_bin`/`fold_un`/`sx`/`domain_of`）+ 全链快照 5 条（位宽回绕、
+  回绕后除法、回绕后比较、越界移位不折叠、i64 域正常折叠不退化）
+  + 解释器差分对拍 6 条（见下）。
+- **遗留**：字面量本身的值域与默认 i32 型在 sem 不核查（semantic-notes
+  未来条款），超域字面量仍以 i128 值进 TAC；折叠已按位宽规约，但
+  llvme 整型常量发射（直接印 i128）与之独立，未在本次改动内统一。
+
+### 解释器位宽模型（2026-10-31，与折叠修正同批）
+
+参考解释器早先「int 一律按 i64」的扁平模型（模块注释曾记为「验控制流
+与数据流，不验位宽」）已反转：整型值在槽里存 **N 位补码符号扩展**形式，
+算术在 N 位上回绕、移位量判据 `0..N`、conv 按源/目标位宽 sext/trunc、
+浮点按 `ty` 精度逐次舍入——与 llvme 发出的 N 位 LLVM 指令逐位一致。
+扁平模型会让解释器对窄位宽断言出真实代码给不出的值，也就当不了位宽类
+错编的语义基准。
+
+- LLVM poison 一律表现为 trap（越界移位、fptosi 越界/NaN），不发明值，
+  与 opt「不折叠越界移位/除零」同一立场。
+- 已知局限：槽是 u64，`i128` 按 64 位建模。
+- **差分验证层就此可用**：`opt` 侧 `opt_preserves_semantics_*`（6 条）
+  优化前后各跑一遍解释器、断言逐值相等。回归验证过：把折叠改回 i128
+  语义，`fold_wrap`/`fold_compare` 两条立刻红（快照测试看不出异常）。
+- 注意：解释器会在使用点对常量再规约一次，所以「单个超域常量」在对拍
+  里看不出来，必须是折叠链算错才露——这层自愈本身是好事，但意味着
+  对拍要覆盖链式折叠才有效。
+
 ## llvme 落地（2026-10-27）
 
 存储模型定案：每个 temp = 入口块恰好一个 alloca（Cell = i64 槽；
@@ -221,10 +267,17 @@ i8（写时就地 store i8，免 bitcast——不透明指针风格，LLVM 15+�
 升 SSA 全交外部 `opt -mem2reg`。temp 存储分类两遍法：常量槽访问 /
 Slot 声明 / 聚合返回值推断槽数。浮点一律十六进制字面量（f32/f64
 各按位模式）；字符串常量 @.str.N private constant + gep 操作数；
-运行时入口按调用点参数类型实例化声明（starry_str_conv.i64 等）；
+运行时入口按调用点参数类型实例化声明（starry_str_conv_i64、starry_print_i32 等）；
 main 包装 = 无参 main 存在时 `define i32 @main` 调它返 0。
 `irc::layout` 公开为 LayoutView trait（irc/llvme 共享槽布局的
-跨 crate 契约）。可选验收层：llvm-as 在测试侧调用，无工具链即跳过。
+跨 crate 契约）。
+
+2026-10-31 正确性修正：Cell/Block 槽仍恒为 i64；LLVM 15+ 不透明指针
+允许按值类型直接 load/store，标量读写统一走 `op_val`/`store_val`，不再
+让 Copy 特例恒按 i64 搬运，也不发无效的指针 bitcast。Conv 按 `from`
+加载源值；GEP 下标与 `default_int` 类型一致（i32 是合法 GEP 下标，无需
+强转 i64）；入口 prologue 以 `br` 终结后进入首个 TAC 块。可选验收层
+优先调用 llvm-as，缺失时回落 `clang -x ir -c`，两者都没有才跳过。
 
 ## LLVM IR 发射契约（llvme）
 

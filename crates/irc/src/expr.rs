@@ -24,11 +24,20 @@ pub(crate) fn lower_expr(ctx: &mut Ctx, e: &ExprWrap) -> Operand {
         ExprKind::Null => nullable_null(ctx, e),
         ExprKind::Ident(name) => ident(ctx, *name, e.span),
         ExprKind::Path(path) => {
-            if path.segments.len() == 1 {
-                ident(ctx, path.segments[0].name, e.span)
-            } else {
-                ctx.diag(e.span, "多段路径的 lowering 在 M2（import 命名空间）");
-                Operand::Const(Const::Unit)
+            let Some(last) = path.segments.last() else {
+                ctx.diag(e.span, "空路径穿透 parser 门禁（内部不变量破缺）");
+                return Operand::Const(Const::Unit);
+            };
+            match ctx
+                .sem
+                .expr_def
+                .get(e.id)
+                .copied()
+                .map(|d| &ctx.sem.defs.get(d).kind)
+            {
+                Some(DefKind::EnumVariant { index, .. }) => variant_value(ctx, e, *index),
+                _ if path.segments.len() == 1 => ident(ctx, last.name, e.span),
+                _ => ident(ctx, last.name, e.span),
             }
         }
         ExprKind::Binary { op, lhs, rhs } => binary(ctx, e, *op, lhs, rhs),
@@ -51,6 +60,7 @@ pub(crate) fn lower_expr(ctx: &mut Ctx, e: &ExprWrap) -> Operand {
                 None => Operand::Const(Const::Unit),
             }
         }
+        ExprKind::Loop { body } => ctx.lower_loop_expr(e, body),
         ExprKind::Is {
             lhs,
             pattern,
@@ -58,7 +68,11 @@ pub(crate) fn lower_expr(ctx: &mut Ctx, e: &ExprWrap) -> Operand {
         } => lower_is(ctx, e, lhs, pattern, *negated),
         ExprKind::In { lhs, rhs, .. } => lower_in(ctx, e, lhs, rhs),
         ExprKind::When { subject, branches } => lower_when(ctx, e, subject.as_deref(), branches),
-        ExprKind::Index { base, index } => lower_index(ctx, e, base, index),
+        ExprKind::Index {
+            base,
+            index,
+            const_index,
+        } => lower_index(ctx, e, base, index, *const_index),
         ExprKind::Member { base, safe, .. } => lower_member(ctx, e, base, *safe),
         ExprKind::Tuple(elems) => tuple_literal(ctx, e, elems),
         ExprKind::Array(elems) => array_literal(ctx, e, elems),
@@ -594,6 +608,7 @@ fn call(
         };
     }
     match ctx.sem.defs.get(def).kind {
+        DefKind::BuiltinPrint => return runtime_print(ctx, e, args),
         DefKind::Struct => return struct_ctor(ctx, e, def, args),
         DefKind::EnumVariant { parent, index } => {
             return variant_ctor(ctx, e, parent, index, args);
@@ -675,6 +690,31 @@ fn call(
         Some(t) => Operand::Temp(t),
         None => Operand::Const(Const::Unit),
     }
+}
+
+fn runtime_print(ctx: &mut Ctx, e: &ExprWrap, args: &[ast::syntax::expr::CallArg]) -> Operand {
+    if args.len() != 1 {
+        ctx.diag(e.span, "print 实参数不匹配（SemArityMismatch 漏报）");
+        return Operand::Const(Const::Unit);
+    }
+    let ty = ctx.expr_ty(&args[0].value);
+    if crate::layout::scalar_slots(ctx, ty) != 1
+        || matches!(ctx.sem.tys.kind(ty), TyKind::Nullable(_))
+    {
+        ctx.diag(
+            args[0].value.span,
+            "print 参数类型无 runtime 入口（sem 契约破缺）",
+        );
+        return Operand::Const(Const::Unit);
+    }
+    let v = lower_expr(ctx, &args[0].value);
+    ctx.emit(Instr::Param { a: v, ty });
+    ctx.emit(Instr::Call {
+        dst: None,
+        callee: Callee::Runtime(RuntimeFn::Print),
+        ty: ctx.sem.tys.unit,
+    });
+    Operand::Const(Const::Unit)
 }
 
 fn lower_if(
@@ -923,12 +963,8 @@ fn lower_member(ctx: &mut Ctx, e: &ExprWrap, base: &ExprWrap, safe: bool) -> Ope
                     index: usize::MAX,
                 },
             });
-    let resolved = resolved.or_else(|| match &base.kind {
-        ExprKind::Ident(_) | ExprKind::Path(_) | ExprKind::Member { .. } => {
-            crate::layout::resolve_member(ctx, ctx.expr_ty(base), member_name(e))
-        }
-        _ => None,
-    });
+    let resolved =
+        resolved.or_else(|| crate::layout::resolve_member(ctx, ctx.expr_ty(base), member_name(e)));
     let Some(res) = resolved else {
         ctx.diag(e.span, "成员访问无法解析（sem 契约破缺）");
         return Operand::Const(Const::Unit);
@@ -945,18 +981,50 @@ fn lower_member(ctx: &mut Ctx, e: &ExprWrap, base: &ExprWrap, safe: bool) -> Ope
     }
 }
 
-/// 索引访问 a[i]：slot 寻址 = i × 元素槽数（元素槽数 >1 时插 Mul）
-fn lower_index(ctx: &mut Ctx, e: &ExprWrap, base: &ExprWrap, index: &ExprWrap) -> Operand {
-    let bty = ctx.expr_ty(base);
-    let elem = match ctx.sem.tys.kind(bty) {
-        TyKind::Array(el, _) => *el,
-        _ => {
-            ctx.diag(e.span, "非数组索引的 lowering 未支持（元组下标等）");
-            return Operand::Const(Const::Unit);
-        }
+/// 常量元组下标 → (元素类型, 值内部槽偏移)。越界/非字面量均为契约破缺。
+fn tuple_index_slot(
+    ctx: &mut Ctx,
+    bty: TyId,
+    const_index: Option<usize>,
+    span: Span,
+) -> Option<(TyId, usize)> {
+    let TyKind::Tuple(ts) = ctx.sem.tys.kind(bty) else {
+        return None;
     };
+    let Some(i) = const_index else {
+        ctx.diag(span, "元组下标非整数字面量（sem 契约破缺）");
+        return None;
+    };
+    let Some(ety) = ts.get(i).copied() else {
+        ctx.diag(span, "元组下标越界（sem 契约破缺）");
+        return None;
+    };
+    let off = ts[..i]
+        .iter()
+        .map(|t| crate::layout::scalar_slots(ctx, *t))
+        .sum();
+    Some((ety, off))
+}
+
+/// 索引访问：数组下标动态寻址（i × 元素槽数）；元组下标是常量槽偏移。
+fn lower_index(
+    ctx: &mut Ctx,
+    e: &ExprWrap,
+    base: &ExprWrap,
+    index: &ExprWrap,
+    const_index: Option<usize>,
+) -> Operand {
+    let bty = ctx.expr_ty(base);
     let bop = lower_expr(ctx, base);
     let b = as_base(ctx, bop, e.span);
+    if let Some((elem, off)) = tuple_index_slot(ctx, bty, const_index, e.span) {
+        return read_slots(ctx, b, off, elem, e.span);
+    }
+    let TyKind::Array(elem, _) = ctx.sem.tys.kind(bty) else {
+        ctx.diag(e.span, "非数组/元组索引的 lowering 未支持（sem 契约破缺）");
+        return Operand::Const(Const::Unit);
+    };
+    let elem = *elem;
     let mut idx = lower_expr(ctx, index);
     let es = crate::layout::scalar_slots(ctx, elem);
     if es > 1 {
@@ -1309,24 +1377,138 @@ fn unwrap(ctx: &mut Ctx, e: &ExprWrap, inner: &ExprWrap, to: TyId) -> Operand {
 
 // ---- 模式匹配 lowering（M2b：is / when / for / val 条件共用）----
 
-/// 判定模式是否含绑定（Or 替代含绑定时走诊断路径——共享槽绑定的 phi
-/// 问题留待循环值定型解冻，见 semantic-notes 松弛项）
-fn pat_contains_binding(pat: &ast::syntax::pat::PatWrap) -> bool {
+/// 收集 Or 各替代共享绑定的名字（sem 已保证同名同变量）。
+fn collect_pattern_bindings(
+    pat: &ast::syntax::pat::PatWrap,
+    names: &mut Vec<ast::interner::Symbol>,
+) {
     match &pat.kind {
-        ast::syntax::pat::PatKind::Binding { .. } => true,
-        ast::syntax::pat::PatKind::Or(ps) => ps.iter().any(pat_contains_binding),
+        ast::syntax::pat::PatKind::Binding { name, .. } => {
+            if !names.contains(name) {
+                names.push(*name);
+            }
+        }
+        ast::syntax::pat::PatKind::Or(ps) => {
+            for p in ps {
+                collect_pattern_bindings(p, names);
+            }
+        }
         ast::syntax::pat::PatKind::Tuple { elements, .. }
         | ast::syntax::pat::PatKind::Array { elements, .. } => {
-            elements.iter().any(pat_contains_binding)
+            for p in elements {
+                collect_pattern_bindings(p, names);
+            }
         }
         ast::syntax::pat::PatKind::Constructor { args, .. } => {
-            args.iter().any(pat_contains_binding)
+            for p in args {
+                collect_pattern_bindings(p, names);
+            }
         }
         ast::syntax::pat::PatKind::Struct { fields, .. } => {
-            fields.iter().any(|(_, p)| pat_contains_binding(p))
+            for (_, p) in fields {
+                collect_pattern_bindings(p, names);
+            }
         }
-        _ => false,
+        _ => {}
     }
+}
+
+/// 解构声明是 `var` 时，把模式刚写入 env 的 Temp 绑定迁到 Slot，
+/// 使后续赋值写穿透到原存储（sem 已给这些 Def 标 mutable）。
+pub(crate) fn make_pattern_bindings_mutable(ctx: &mut Ctx, pat: &ast::syntax::pat::PatWrap) {
+    let mut names = Vec::new();
+    collect_pattern_bindings(pat, &mut names);
+    for name in names {
+        let Some((Place::Temp(t), ty)) = ctx.lookup(name) else {
+            continue;
+        };
+        let slot = ctx.temp();
+        copy_slots(ctx, (slot, 0), (Operand::Temp(t), 0), ty, ty, pat.span);
+        ctx.env_top().insert(name, (Place::Slot(slot), ty));
+    }
+}
+
+/// 含绑定的 Or：每替代独立条件块；命中后把该替代产生的绑定写入
+/// 共享槽，汇合后再读出为普通 Temp——避免 phi，绑定值跨替代一致。
+fn lower_or_pattern(
+    ctx: &mut Ctx,
+    ps: &[ast::syntax::pat::PatWrap],
+    subject: Operand,
+    subject_ty: TyId,
+    span: Span,
+) -> Operand {
+    let mut names = Vec::new();
+    for p in ps {
+        collect_pattern_bindings(p, &mut names);
+    }
+    if names.is_empty() {
+        let mut cond = lower_pattern(ctx, &ps[0], subject.clone(), subject_ty, span);
+        for p in &ps[1..] {
+            let c = lower_pattern(ctx, p, subject.clone(), subject_ty, span);
+            cond = or_operands(ctx, cond, c);
+        }
+        return cond;
+    }
+
+    let bool_ty = ctx.sem.tys.bool_;
+    let result = ctx.temp();
+    ctx.emit(Instr::Copy {
+        dst: result,
+        src: Operand::Const(Const::Bool(false)),
+        ty: bool_ty,
+    });
+    let merge = ctx.reserve_block();
+    let mut shared: Vec<(ast::interner::Symbol, TempId, Option<TyId>)> = names
+        .into_iter()
+        .map(|name| (name, ctx.temp(), None))
+        .collect();
+
+    for p in ps {
+        let bind_b = ctx.reserve_block();
+        let fail_b = ctx.reserve_block();
+        let c = lower_pattern(ctx, p, subject.clone(), subject_ty, p.span);
+        ctx.terminate(Term::Br {
+            cond: c,
+            then_: bind_b,
+            else_: fail_b,
+        });
+        ctx.switch_to(bind_b);
+        for (name, slot, ty) in &mut shared {
+            let Some((place, pty)) = ctx.lookup(*name) else {
+                ctx.diag(p.span, "Or 替代绑定名不一致（sem 契约破缺）");
+                continue;
+            };
+            if let Some(prev) = ty
+                && *prev != pty
+            {
+                ctx.diag(p.span, "Or 替代绑定类型不一致（sem 契约破缺）");
+            }
+            *ty = Some(pty);
+            let v = read_place(ctx, place, pty, p.span);
+            copy_slots(ctx, (*slot, 0), (v, 0), pty, pty, p.span);
+        }
+        ctx.emit(Instr::Copy {
+            dst: result,
+            src: Operand::Const(Const::Bool(true)),
+            ty: bool_ty,
+        });
+        ctx.terminate(Term::Jmp(merge));
+        ctx.switch_to(fail_b);
+    }
+    ctx.emit(Instr::Copy {
+        dst: result,
+        src: Operand::Const(Const::Bool(false)),
+        ty: bool_ty,
+    });
+    ctx.terminate(Term::Jmp(merge));
+    ctx.switch_to(merge);
+    for (name, slot, ty) in shared {
+        let ty = ty.unwrap_or(ctx.sem.tys.unit);
+        let v = read_place(ctx, Place::Slot(slot), ty, span);
+        let t = as_base(ctx, v, span);
+        ctx.env_top().insert(name, (Place::Temp(t), ty));
+    }
+    Operand::Temp(result)
 }
 
 /// 模式匹配 lowering：返回 bool 条件操作数；绑定写入当前 env 作用域
@@ -1481,23 +1663,25 @@ pub(crate) fn lower_pattern(
             cond
         }
         PatKind::Tuple { elements, rest } | PatKind::Array { elements, rest } => {
-            if rest.is_some() {
-                ctx.diag(pat.span, "带 .. 的元组/数组模式在 M-later");
-                return Operand::Const(Const::Bool(false));
-            }
             let elem_tys: Vec<TyId> = match ctx.sem.tys.kind(subject_ty) {
                 TyKind::Tuple(es) => es.clone(),
-                TyKind::Array(el, _) => vec![*el; elements.len()],
+                TyKind::Array(el, n) => vec![*el; *n as usize],
                 _ => {
                     ctx.diag(pat.span, "元组/数组模式主语类型不匹配（sem 契约破缺）");
                     return Operand::Const(Const::Bool(false));
                 }
             };
             let b = as_base(ctx, subject, span);
-            let mut off = 0;
             let mut cond = Operand::Const(Const::Bool(true));
             for (i, el) in elements.iter().enumerate() {
-                let ety = elem_tys.get(i).copied().unwrap_or(subject_ty);
+                let pos = match rest {
+                    Some(r) if i >= *r => elem_tys.len().saturating_sub(elements.len() - i),
+                    _ => i,
+                };
+                let Some(ety) = elem_tys.get(pos).copied() else {
+                    ctx.diag(el.span, "模式元素越界（sem 契约破缺）");
+                    return Operand::Const(Const::Bool(false));
+                };
                 let es = crate::layout::scalar_slots(ctx, ety);
                 if es > 1 {
                     ctx.diag(el.span, "聚合元素的元组/数组模式在 M-later");
@@ -1507,27 +1691,15 @@ pub(crate) fn lower_pattern(
                 ctx.emit(Instr::Load {
                     dst: v,
                     base: b,
-                    idx: Operand::Const(Const::Int(off as i128)),
+                    idx: Operand::Const(Const::Int(pos as i128)),
                     ty: ety,
                 });
                 let c = lower_pattern(ctx, el, Operand::Temp(v), ety, el.span);
                 cond = and_operands(ctx, cond, c);
-                off += es;
             }
             cond
         }
-        PatKind::Or(ps) => {
-            if ps.iter().any(pat_contains_binding) {
-                ctx.diag(pat.span, "含绑定的 Or 模式在循环值定型解冻后（共享槽绑定）");
-                return Operand::Const(Const::Bool(false));
-            }
-            let mut cond = lower_pattern(ctx, &ps[0], subject.clone(), subject_ty, span);
-            for p in &ps[1..] {
-                let c = lower_pattern(ctx, p, subject.clone(), subject_ty, span);
-                cond = or_operands(ctx, cond, c);
-            }
-            cond
-        }
+        PatKind::Or(ps) => lower_or_pattern(ctx, ps, subject, subject_ty, span),
         PatKind::Range { lo, hi, inclusive } => {
             // 区间模式：lo <= subject <= hi（..= 含上界，.. 不含）
             let ity = subject_ty;
@@ -1751,10 +1923,6 @@ fn lower_in(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> Oper
         }
         TyKind::Array(elem, len) => {
             let es = crate::layout::scalar_slots(ctx, elem);
-            if es > 1 {
-                ctx.diag(e.span, "聚合元素的 in 线性扫描在 M-later");
-                return Operand::Const(Const::Bool(false));
-            }
             let rhs_op = lower_expr(ctx, rhs);
             let arr = as_base(ctx, rhs_op, e.span);
             let cty = ctx.sem.tys.default_int;
@@ -1799,24 +1967,78 @@ fn lower_in(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> Oper
                 else_: done_b,
             });
             ctx.switch_to(body_b);
-            let el = ctx.temp();
-            ctx.emit(Instr::Load {
-                dst: el,
-                base: arr,
-                idx: Operand::Temp(c),
-                ty: elem,
-            });
-            let eq = ctx.temp();
-            let s2 = coerce(ctx, s.clone(), lty, elem);
-            ctx.emit(Instr::Bin {
-                dst: eq,
-                op: BinOp::Eq,
-                l: s2,
-                r: Operand::Temp(el),
-                ty: elem,
-            });
+            let eq = if es <= 1 {
+                let el = ctx.temp();
+                ctx.emit(Instr::Load {
+                    dst: el,
+                    base: arr,
+                    idx: Operand::Temp(c),
+                    ty: elem,
+                });
+                let eq = ctx.temp();
+                let s2 = coerce(ctx, s.clone(), lty, elem);
+                ctx.emit(Instr::Bin {
+                    dst: eq,
+                    op: BinOp::Eq,
+                    l: s2,
+                    r: Operand::Temp(el),
+                    ty: elem,
+                });
+                Operand::Temp(eq)
+            } else {
+                let sb = as_base(ctx, s.clone(), e.span);
+                let base_idx = ctx.temp();
+                ctx.emit(Instr::Bin {
+                    dst: base_idx,
+                    op: BinOp::Mul,
+                    l: Operand::Temp(c),
+                    r: Operand::Const(Const::Int(es as i128)),
+                    ty: cty,
+                });
+                let mut cond = Operand::Const(Const::Bool(true));
+                for sld in 0..es {
+                    let sty = crate::layout::slot_ty(ctx, elem, sld);
+                    let l = ctx.temp();
+                    ctx.emit(Instr::Load {
+                        dst: l,
+                        base: sb,
+                        idx: Operand::Const(Const::Int(sld as i128)),
+                        ty: sty,
+                    });
+                    let off = if sld == 0 {
+                        Operand::Temp(base_idx)
+                    } else {
+                        let o = ctx.temp();
+                        ctx.emit(Instr::Bin {
+                            dst: o,
+                            op: BinOp::Add,
+                            l: Operand::Temp(base_idx),
+                            r: Operand::Const(Const::Int(sld as i128)),
+                            ty: cty,
+                        });
+                        Operand::Temp(o)
+                    };
+                    let r = ctx.temp();
+                    ctx.emit(Instr::Load {
+                        dst: r,
+                        base: arr,
+                        idx: off,
+                        ty: sty,
+                    });
+                    let eq = ctx.temp();
+                    ctx.emit(Instr::Bin {
+                        dst: eq,
+                        op: BinOp::Eq,
+                        l: Operand::Temp(l),
+                        r: Operand::Temp(r),
+                        ty: sty,
+                    });
+                    cond = and_operands(ctx, cond, Operand::Temp(eq));
+                }
+                cond
+            };
             ctx.terminate(Term::Br {
-                cond: Operand::Temp(eq),
+                cond: eq,
                 then_: found_b,
                 else_: step_b,
             });
@@ -2354,27 +2576,83 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
         ExprKind::Member { safe: true, .. } => {
             ctx.diag(span, "?. 赋值目标的 lowering 未支持（sem 契约破缺）");
         }
-        ExprKind::Index { base, index } => {
+        ExprKind::Index {
+            base,
+            index,
+            const_index,
+        } => {
             let bty = ctx.expr_ty(base);
-            let TyKind::Array(elem, _) = ctx.sem.tys.kind(bty) else {
-                ctx.diag(span, "索引赋值目标非数组（sem 契约破缺）");
-                return;
-            };
-            let elem = *elem;
-            if crate::layout::scalar_slots(ctx, elem) > 1 {
-                ctx.diag(span, "聚合元素的索引赋值在 M-later");
-                return;
-            }
             let Some(b) = lvalue_base(ctx, base, span) else {
                 return;
             };
+            if let Some((elem, off)) = tuple_index_slot(ctx, bty, *const_index, span) {
+                if crate::layout::scalar_slots(ctx, elem) > 1 {
+                    copy_slots(ctx, (b, off), (v, 0), elem, elem, span);
+                } else {
+                    ctx.emit(Instr::Store {
+                        base: b,
+                        idx: Operand::Const(Const::Int(off as i128)),
+                        src: v,
+                        ty: elem,
+                    });
+                }
+                return;
+            }
+            let TyKind::Array(elem, _) = ctx.sem.tys.kind(bty) else {
+                ctx.diag(span, "索引赋值目标非数组/元组（sem 契约破缺）");
+                return;
+            };
+            let elem = *elem;
+            let es = crate::layout::scalar_slots(ctx, elem);
             let iop = lower_expr(ctx, index);
-            ctx.emit(Instr::Store {
-                base: b,
-                idx: iop,
-                src: v,
-                ty: elem,
-            });
+            if es <= 1 {
+                ctx.emit(Instr::Store {
+                    base: b,
+                    idx: iop,
+                    src: v,
+                    ty: elem,
+                });
+            } else {
+                let sb = as_base(ctx, v, span);
+                let ity = ctx.expr_ty(index);
+                let base_idx = ctx.temp();
+                ctx.emit(Instr::Bin {
+                    dst: base_idx,
+                    op: BinOp::Mul,
+                    l: iop,
+                    r: Operand::Const(Const::Int(es as i128)),
+                    ty: ity,
+                });
+                for sld in 0..es {
+                    let sty = crate::layout::slot_ty(ctx, elem, sld);
+                    let t = ctx.temp();
+                    ctx.emit(Instr::Load {
+                        dst: t,
+                        base: sb,
+                        idx: Operand::Const(Const::Int(sld as i128)),
+                        ty: sty,
+                    });
+                    let off = if sld == 0 {
+                        Operand::Temp(base_idx)
+                    } else {
+                        let o = ctx.temp();
+                        ctx.emit(Instr::Bin {
+                            dst: o,
+                            op: BinOp::Add,
+                            l: Operand::Temp(base_idx),
+                            r: Operand::Const(Const::Int(sld as i128)),
+                            ty: ity,
+                        });
+                        Operand::Temp(o)
+                    };
+                    ctx.emit(Instr::Store {
+                        base: b,
+                        idx: off,
+                        src: Operand::Temp(t),
+                        ty: sty,
+                    });
+                }
+            }
         }
         _ => ctx.diag(span, "该赋值目标无 lowering 路径（sem 契约破缺）"),
     }

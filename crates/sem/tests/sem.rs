@@ -127,6 +127,19 @@ fn condition_must_be_bool() {
 // ---- when ----
 
 #[test]
+fn print_builtin_accepts_scalars_and_rejects_aggregates() {
+    assert_clean("fun main() {\n    print(42)\n}");
+    assert_clean("fun main() {\n    print(1.5)\n}");
+    assert_clean("fun main() {\n    print(true)\n}");
+    assert_clean("fun main() {\n    print(\"hello\")\n}");
+    assert_has("fun main() {\n    print()\n}", DiagCode::SemArityMismatch);
+    assert_has(
+        "fun main() {\n    print([1, 2])\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
 fn when_enum_partial_coverage_reports() {
     let src = "enum E {\n    A,\n    B\n}\nfun f(e: E) : int {\n    return when e {\n        E.A -> 1\n    }\n}";
     assert_has(src, DiagCode::SemNonExhaustiveWhen);
@@ -608,11 +621,137 @@ fn when_tuple_subject_destructures_elements() {
 }
 
 #[test]
-fn rest_pattern_reports_unsupported() {
-    let src = "fun f(a: [int; 3]) {\n    val [x, .., y] = a\n}";
-    assert_has(src, DiagCode::SemUnsupportedConstruct);
-    let src2 = "fun f(t: (int, int, int)) : int {\n    return when t {\n        (a, .., c) -> a + c\n        else -> 0\n    }\n}";
-    assert_has(src2, DiagCode::SemUnsupportedConstruct);
+fn rest_pattern_destructuring_is_clean_and_checked() {
+    assert_clean(
+        "fun f(a: [int; 3]) {
+    val [x, .., y] = a
+}",
+    );
+    assert_clean(
+        "fun f(t: (int, int, int)) : int {
+    return when t {
+        (a, .., c) -> a + c
+        else -> 0
+    }
+}",
+    );
+    assert_has(
+        "fun f(a: [int; 2]) {
+    val [x, .., y, z] = a
+}",
+        DiagCode::SemArityMismatch,
+    );
+}
+
+#[test]
+fn loop_expression_typed_from_break_values() {
+    assert_clean(
+        "fun f() : int {
+    val x = loop {
+        break 7
+    }
+    return x
+}",
+    );
+    assert_clean(
+        "fun f(c: bool) : int {
+    val x = loop {
+        if c {
+            break 1
+        } else {
+            break 2
+        }
+    }
+    return x
+}",
+    );
+    assert_has(
+        "fun f(c: bool) : int {
+    val x = loop {
+        if c {
+            break
+        } else {
+            break 1
+        }
+    }
+    return x
+}",
+        DiagCode::SemTypeMismatch,
+    );
+}
+
+#[test]
+fn tuple_subscript_requires_constant_in_bounds_index() {
+    assert_clean(
+        "fun f() : int {
+    val t = (1, 2)
+    return t[1]
+}",
+    );
+    assert_clean(
+        "fun f() : int {
+    val t = (1, 2)
+    t[1] = 9
+    return t[1]
+}",
+    );
+    assert_has(
+        "fun f() : int {
+    val t = (1, 2)
+    return t[2]
+}",
+        DiagCode::SemTypeMismatch,
+    );
+    assert_has(
+        "fun f(i: int) : int {
+    val t = (1, 2)
+    return t[i]
+}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn uninitialized_local_read_reports() {
+    assert_has(
+        "fun f() : int {
+    var x: int
+    return x
+}",
+        DiagCode::SemUninitializedBinding,
+    );
+}
+
+#[test]
+fn definite_assignment_paths_are_checked() {
+    assert_clean(
+        "fun f(c: bool) : int {
+    var x: int
+    if c {
+        x = 1
+    } else {
+        x = 2
+    }
+    return x
+}",
+    );
+    assert_has(
+        "fun f(c: bool) : int {
+    var x: int
+    if c {
+        x = 1
+    }
+    return x
+}",
+        DiagCode::SemUninitializedBinding,
+    );
+    assert_clean(
+        "fun f() : int {
+    var x: int
+    x = 1
+    return x
+}",
+    );
 }
 
 #[test]

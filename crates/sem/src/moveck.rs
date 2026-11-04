@@ -162,13 +162,18 @@ fn expr(e: &ExprWrap, st: &mut SemState, moved: &mut BTreeSet<DefId>) {
         | ExprKind::Cast { expr: operand, .. }
         | ExprKind::ArrayRepeat { value: operand, .. } => expr(operand, st, moved),
         ExprKind::Async { block: b } | ExprKind::Concurrent { block: b } => block(b, st, moved),
+        ExprKind::Loop { body } => {
+            let mut inner = moved.clone();
+            block(body, st, &mut inner);
+            moved.extend(inner);
+        }
         ExprKind::Call { callee, args, .. } => {
             expr(callee, st, moved);
             for a in args {
                 expr(&a.value, st, moved);
             }
         }
-        ExprKind::Index { base, index } => {
+        ExprKind::Index { base, index, .. } => {
             expr(base, st, moved);
             expr(index, st, moved);
         }

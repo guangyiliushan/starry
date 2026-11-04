@@ -4,15 +4,68 @@
 //! 编抓不到；本解释器直接「跑」TAC 并断言结果。存储即 llvme 的槽
 //! 模型：每 temp = u64 槽单元（惰性增长），字符串进侧表（cell 存
 //! id+1，0 = null）；标量/聚合在解释器里都只是「若干槽」，与 TAC
-//! 表示语义一致，无需存储分类。int 位宽折叠为 i64（位宽语义归
-//! llvme/LLVM 层——ponytail：解释器验控制流与数据流，不验位宽）。
+//! 表示语义一致，无需存储分类。
+//!
+//! **位宽模型（2026-10-31，取代早先「int 一律按 i64」的扁平模型）**：
+//! 整型值在槽里存 **N 位补码的符号扩展形式**（N = 指令 `ty` 的位宽），
+//! 算术在 N 位上回绕、移位量判据 `0..N`、conv 按源/目标位宽规约——与
+//! llvme 发出的 N 位 LLVM 指令逐位一致。扁平模型会让解释器对窄位宽
+//! 断言出真实代码给不出的值（`(2000000000 + 2000000000) / 2 : i32`
+//! 算成 2000000000，LLVM 算 -147483648），也就抓不到折叠位宽那类错编。
+//! 浮点按 `ty` 的精度算（f32 逐次舍入到单精度）。LLVM 的 poison 在
+//! 解释器里一律表现为 trap（越界移位、fptosi 越界/NaN），不发明值。
+//! 已知局限：槽是 u64，`i128` 按 64 位建模。
 
 use ast::interner::Interner;
-use sem::{DefArena, DefId, FloatKind, TyArena, TyKind};
+use sem::{DefArena, DefId, FloatKind, IntKind, TyArena, TyKind};
 
 use crate::tac::{
     BinOp, Callee, Const, FunBody, Instr, Operand, RuntimeFn, TacOutput, TempId, Term, UnOp,
 };
+
+/// N 位补码规约（低位截断 + 符号扩展回 u64）——与 opt 的 `sx` 同模型
+fn narrow(v: u64, w: u32) -> u64 {
+    debug_assert!((1..=64).contains(&w));
+    let s = 64 - w;
+    ((v << s) as i64 >> s) as u64
+}
+
+/// 整型位宽；非整型返回 None。i128 按 64 建模（槽是 u64）
+fn int_width(kind: &TyKind) -> Option<u32> {
+    Some(match kind {
+        TyKind::Int(IntKind::I4) => 4,
+        TyKind::Int(IntKind::I8) => 8,
+        TyKind::Int(IntKind::I16) => 16,
+        TyKind::Int(IntKind::I32) => 32,
+        TyKind::Int(IntKind::I64) | TyKind::Int(IntKind::I128) => 64,
+        TyKind::Char => 32,
+        _ => return None,
+    })
+}
+
+/// 槽里的浮点位模式 → f64 值（f32 值以「已加宽的 f64」存放）
+fn f64_of(bits: u64, fk: FloatKind) -> f64 {
+    let f = f64::from_bits(bits);
+    match fk {
+        FloatKind::F32 => f as f32 as f64,
+        FloatKind::F64 => f,
+    }
+}
+
+/// 浮点值 → 槽位模式（目标精度逐次舍入）
+fn bits_of_f(f: f64, fk: FloatKind) -> u64 {
+    match fk {
+        FloatKind::F32 => (f as f32 as f64).to_bits(),
+        FloatKind::F64 => f.to_bits(),
+    }
+}
+
+/// `fptosi` 目标位宽的可表示域 `[lo, hi)`——上界开：`2^(w-1)` 越界。
+/// 越界/NaN 是 LLVM poison，解释器以 trap 表示。
+fn int_range(w: u32) -> (f64, f64) {
+    let half = 2f64.powi(w.min(64) as i32 - 1);
+    (-half, half)
+}
 
 const STEP_CAP: u64 = 10_000_000;
 
@@ -137,12 +190,17 @@ impl<'a> Machine<'a> {
             }
             (_, Value::I(v)) => {
                 cell.resize(1.max(cell.len()), 0);
-                cell[0] = *v as u64;
+                // 入参按形参位宽规约：调用点传进来的值要与体内同域
+                cell[0] = narrow(*v as u64, int_width(self.tys.kind(ty)).unwrap_or(64));
                 Ok(())
             }
             (_, Value::F(v)) => {
                 cell.resize(1.max(cell.len()), 0);
-                cell[0] = v.to_bits();
+                let fk = match self.tys.kind(ty) {
+                    TyKind::Float(fk) => *fk,
+                    _ => FloatKind::F64,
+                };
+                cell[0] = bits_of_f(*v, fk);
                 Ok(())
             }
             (_, Value::B(v)) => {
@@ -183,9 +241,10 @@ impl<'a> Machine<'a> {
     }
 
     fn decode(&self, v: u64, ty: sem::TyId) -> Value {
-        match self.tys.kind(ty) {
-            TyKind::Int(_) => Value::I(v as i64),
-            TyKind::Float(_) => Value::F(f64::from_bits(v)),
+        let kind = self.tys.kind(ty);
+        match kind {
+            TyKind::Int(_) => Value::I(narrow(v, int_width(kind).unwrap_or(64)) as i64),
+            TyKind::Float(fk) => Value::F(f64_of(v, *fk)),
             TyKind::Bool => Value::B(v != 0),
             TyKind::String => {
                 if v == 0 {
@@ -202,7 +261,8 @@ impl<'a> Machine<'a> {
                 }
             }
             TyKind::Unit => Value::Unit,
-            _ => Value::I(v as i64),
+            // char/聚合兜底：整型按位宽规约，其余原样
+            _ => Value::I(narrow(v, int_width(kind).unwrap_or(64)) as i64),
         }
     }
 
@@ -275,9 +335,10 @@ impl<'a> Machine<'a> {
             Instr::Bin { dst, op, l, r, ty } => {
                 let a = self.op(cells, l);
                 let b = self.op(cells, r);
-                let is_float = matches!(self.tys.kind(*ty), TyKind::Float(_));
-                let v = if is_float {
-                    let (x, y) = (f64::from_bits(a), f64::from_bits(b));
+                let kind = self.tys.kind(*ty);
+                let v = if let TyKind::Float(fk) = kind {
+                    let fk = *fk;
+                    let (x, y) = (f64_of(a, fk), f64_of(b, fk));
                     let f = match op {
                         BinOp::Add => x + y,
                         BinOp::Sub => x - y,
@@ -292,10 +353,12 @@ impl<'a> Machine<'a> {
                         BinOp::Ge => return self.set_bool(cells, dst, x >= y),
                         _ => return Err(InterpError::Trap("float bitop")),
                     };
-                    f.to_bits()
+                    bits_of_f(f, fk)
                 } else {
-                    let (x, y) = (a as i64, b as i64);
-                    match op {
+                    // 整型在 `ty` 位宽上算：操作数先规约、结果再规约
+                    let w = int_width(kind).unwrap_or(64);
+                    let (x, y) = (narrow(a, w) as i64, narrow(b, w) as i64);
+                    let raw = match op {
                         BinOp::Add => x.wrapping_add(y) as u64,
                         BinOp::Sub => x.wrapping_sub(y) as u64,
                         BinOp::Mul => x.wrapping_mul(y) as u64,
@@ -314,50 +377,65 @@ impl<'a> Machine<'a> {
                         BinOp::BitAnd => (x & y) as u64,
                         BinOp::BitOr => (x | y) as u64,
                         BinOp::BitXor => (x ^ y) as u64,
-                        BinOp::Shl => (x << (y & 63)) as u64,
-                        BinOp::Shr => (x >> (y & 63)) as u64,
+                        // 移位量判据是目标位宽（LLVM 对越界移位是 poison，
+                        // 解释器以 trap 表示——不发明值，与 opt 不折叠一致）
+                        BinOp::Shl | BinOp::Shr => {
+                            if !(0..w as i64).contains(&y) {
+                                return Err(InterpError::Trap("shift out of range"));
+                            }
+                            if matches!(op, BinOp::Shl) {
+                                x.wrapping_shl(y as u32) as u64
+                            } else {
+                                (x >> y) as u64
+                            }
+                        }
                         BinOp::Eq => return self.set_bool(cells, dst, x == y),
                         BinOp::Ne => return self.set_bool(cells, dst, x != y),
                         BinOp::Lt => return self.set_bool(cells, dst, x < y),
                         BinOp::Le => return self.set_bool(cells, dst, x <= y),
                         BinOp::Gt => return self.set_bool(cells, dst, x > y),
                         BinOp::Ge => return self.set_bool(cells, dst, x >= y),
-                    }
+                    };
+                    narrow(raw, w)
                 };
                 Self::put(cells, *dst, v);
                 Ok(())
             }
             Instr::Un { dst, op, a, ty } => {
-                let v = self.op(cells, a);
+                let v0 = self.op(cells, a);
+                let kind = self.tys.kind(*ty);
                 let out = match op {
-                    UnOp::Neg => {
-                        if matches!(self.tys.kind(*ty), TyKind::Float(_)) {
-                            (-f64::from_bits(v)).to_bits()
-                        } else {
-                            (v as i64).wrapping_neg() as u64
+                    UnOp::Neg => match kind {
+                        TyKind::Float(fk) => bits_of_f(-f64_of(v0, *fk), *fk),
+                        _ => {
+                            let w = int_width(kind).unwrap_or(64);
+                            narrow((narrow(v0, w) as i64).wrapping_neg() as u64, w)
                         }
+                    },
+                    UnOp::Not => u64::from(v0 == 0),
+                    UnOp::BitNot => {
+                        let w = int_width(kind).unwrap_or(64);
+                        narrow(!narrow(v0, w), w)
                     }
-                    UnOp::Not => u64::from(v == 0),
-                    UnOp::BitNot => !(v as i64) as u64,
-                    UnOp::Conv(from) => self.conv(*from, *ty, v),
+                    UnOp::Conv(from) => self.conv(*from, *ty, v0)?,
                 };
                 Self::put(cells, *dst, out);
                 Ok(())
             }
-            Instr::Copy { dst, src, .. } => {
-                let v = self.op(cells, src);
+            Instr::Copy { dst, src, ty } => {
+                let v = self.norm(self.op(cells, src), *ty);
                 Self::put(cells, *dst, v);
                 Ok(())
             }
-            Instr::Load { dst, base, idx, .. } => {
+            Instr::Load { dst, base, idx, ty } => {
                 let i = self.op(cells, idx) as usize;
                 let v = cells[base.0 as usize].get(i).copied().unwrap_or(0);
-                Self::put(cells, *dst, v);
+                Self::put(cells, *dst, self.norm(v, *ty));
                 Ok(())
             }
-            Instr::Store { base, idx, src, .. } => {
+            Instr::Store { base, idx, src, ty } => {
                 let i = self.op(cells, idx) as usize;
-                let v = self.op(cells, src);
+                let v = self.norm(self.op(cells, src), *ty);
                 let slot = &mut cells[base.0 as usize];
                 if slot.len() <= i {
                     slot.resize(i + 1, 0);
@@ -381,7 +459,7 @@ impl<'a> Machine<'a> {
                     }
                     _ => self.op(cells, a),
                 };
-                pending.push((v, *ty));
+                pending.push((self.norm(v, *ty), *ty));
                 Ok(())
             }
             Instr::Call { dst, callee, ty } => {
@@ -403,6 +481,10 @@ impl<'a> Machine<'a> {
                             _ => return Err(InterpError::Trap("strconv ty")),
                         };
                         self.str_id(&s)
+                    }
+                    Callee::Runtime(RuntimeFn::Print) => {
+                        // 参考解释器验证值语义；进程 stdout 由 native build 验证。
+                        0
                     }
                     Callee::Runtime(RuntimeFn::StrConcat) => {
                         let a = args.first().map(|(v, _)| *v).unwrap_or(0);
@@ -482,15 +564,39 @@ impl<'a> Machine<'a> {
         }
     }
 
-    fn conv(&self, from: sem::TyId, to: sem::TyId, v: u64) -> u64 {
-        use TyKind::*;
-        match (self.tys.kind(from), self.tys.kind(to)) {
-            (Float(_), Int(_)) => (f64::from_bits(v) as i64) as u64,
-            (Int(_), Float(_)) => ((v as i64) as f64).to_bits(),
-            (Float(FloatKind::F64), Float(FloatKind::F32))
-            | (Float(FloatKind::F32), Float(FloatKind::F64)) => v,
+    /// 按 `ty` 位宽规约一个槽值/常量（非整型原样）
+    fn norm(&self, v: u64, ty: sem::TyId) -> u64 {
+        narrow(v, int_width(self.tys.kind(ty)).unwrap_or(64))
+    }
+
+    /// 数值转换（`UnOp::Conv`）：按源/目标位宽与精度规约。
+    /// LLVM 的 fptosi 对 NaN/越界是 poison，此处以 trap 表示。
+    fn conv(&self, from: sem::TyId, to: sem::TyId, v: u64) -> Result<u64, InterpError> {
+        let (fk, tk) = (self.tys.kind(from), self.tys.kind(to));
+        let (fw, tw) = (int_width(fk), int_width(tk));
+        Ok(match (fk, tk) {
+            // fptosi：向零截断后必须落在目标域
+            (TyKind::Float(ff), _) if tw.is_some() => {
+                let f = f64_of(v, *ff);
+                let (lo, hi) = int_range(tw.unwrap_or(64));
+                let t = f.trunc();
+                if !f.is_finite() || t < lo || t >= hi {
+                    return Err(InterpError::Trap("fptosi out of range"));
+                }
+                narrow(t as i64 as u64, tw.unwrap_or(64))
+            }
+            // sitofp：先按源位宽规约，再舍入到目标精度
+            (_, TyKind::Float(tf)) if fw.is_some() => {
+                bits_of_f(narrow(v, fw.unwrap_or(64)) as i64 as f64, *tf)
+            }
+            // fpext / fptrunc：按目标精度舍入
+            (TyKind::Float(ff), TyKind::Float(tf)) => bits_of_f(f64_of(v, *ff), *tf),
+            // sext / trunc：窄→宽符号扩展，宽→窄截断
+            _ if fw.is_some() && tw.is_some() => {
+                narrow(narrow(v, fw.unwrap_or(64)), tw.unwrap_or(64))
+            }
             _ => v,
-        }
+        })
     }
 }
 

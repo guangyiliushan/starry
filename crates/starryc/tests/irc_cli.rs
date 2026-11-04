@@ -38,10 +38,17 @@ fn irc_sem_errors_gate_lowering() {
 
 #[test]
 fn irc_unsupported_construct_reports_and_stops() {
-    // 元组解构绑定（非简单绑定模式）在 M-later
+    // 复合基座写穿透（arr[i].x = ...）仍是 irc 边界
     let (code, stdout, stderr) = irc_file(
-        "destructure",
-        "fun f(): int {\n    val (x, y) = (1, 2)\n    return x\n}",
+        "compound_base",
+        "struct P {
+    x: int
+}
+fun f(): int {
+    var a = [P(1), P(2)]
+    a[0].x = 9
+    return a[0].x
+}",
     );
     assert_eq!(code, Some(1));
     assert!(stderr.contains("IrcUnsupportedLowering"), "{stderr}");

@@ -6,8 +6,6 @@
 //! 寻址由此完全统一（slot i = gep [n x i64], p, 0, i），无命名类型
 //! 定义，结构等价的类型在 LLVM 侧天然可互换。
 
-use std::fmt::Write as _;
-
 use ast::interner::Interner;
 use irc::layout::LayoutView;
 use sem::{FloatKind, IntKind, TyArena, TyId, TyKind};
@@ -94,82 +92,15 @@ pub fn sanitize(s: &str) -> String {
     out
 }
 
-/// 浮点字面量：十六进制（位精确往返，llvm-as 层抓违例）。
-/// `is_f32` 时按 f32 位模式格式化（f64 常量落在 float 槽的兼容路径）
+/// 浮点字面量：LLVM 位模式十六进制（f64 = 16 位，f32 = 8 位）。
+/// `is_f32` 时先把值舍入到 f32 再取位模式（f64 常量落在 float 槽的兼容路径）。
 pub fn float_lit(v: f64, is_f32: bool) -> String {
-    if is_f32 {
-        let f = v as f32;
-        if f.is_nan() {
-            return "0x7FC00000".into();
-        }
-        if f.is_infinite() {
-            return if f < 0.0 {
-                "-0x7F800000".into()
-            } else {
-                "0x7F800000".into()
-            };
-        }
-        if f == 0.0 {
-            return if f.is_sign_negative() {
-                "-0.0".into()
-            } else {
-                "0.0".into()
-            };
-        }
-        let bits = f.to_bits();
-        let sign = bits >> 31;
-        let exp = ((bits >> 23) & 0xff) as i64 - 127;
-        let man = bits & 0x7f_ffff;
-        let mut s = String::new();
-        if sign == 1 {
-            s.push('-');
-        }
-        s.push_str("0x1");
-        if man != 0 {
-            let mut hex = format!("{:06X}", man);
-            while hex.ends_with('0') {
-                hex.pop();
-            }
-            s.push('.');
-            s.push_str(&hex);
-        }
-        let _ = write!(s, "p{exp}");
-        return s;
-    }
-    if v.is_nan() {
-        return "0x7FF8000000000000".into();
-    }
-    if v.is_infinite() {
-        return if v < 0.0 {
-            "-0x7FF0000000000000".into()
-        } else {
-            "0x7FF0000000000000".into()
-        };
-    }
-    if v == 0.0 {
-        return if v.is_sign_negative() {
-            "-0.0".into()
-        } else {
-            "0.0".into()
-        };
-    }
-    let bits = v.to_bits();
-    let sign = bits >> 63;
-    let exp = ((bits >> 52) & 0x7ff) as i64 - 1023;
-    let man = bits & 0xf_ffff_ffff_ffff;
-    let mut s = String::new();
-    if sign == 1 {
-        s.push('-');
-    }
-    s.push_str("0x1");
-    if man != 0 {
-        let mut hex = format!("{:013X}", man);
-        while hex.ends_with('0') {
-            hex.pop();
-        }
-        s.push('.');
-        s.push_str(&hex);
-    }
-    let _ = write!(s, "p{exp}");
-    s
+    // LLVM floating hexadecimal constants carry a 64-bit pattern even when
+    // the instruction type is `float`; clang validates this on LLVM 22.
+    let bits = if is_f32 {
+        (v as f32 as f64).to_bits()
+    } else {
+        v.to_bits()
+    };
+    format!("0x{bits:016X}")
 }

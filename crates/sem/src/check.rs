@@ -136,10 +136,10 @@ fn check_binding_pattern(pat: &PatWrap, init_ty: TyId, init_span: Span, st: &mut
             }
         }
         PatKind::Wildcard => {}
-        PatKind::Tuple { elements, .. } | PatKind::Array { elements, .. } => {
+        PatKind::Tuple { elements, rest } | PatKind::Array { elements, rest } => {
             let elem_tys = match st.tys.kind(init_ty).clone() {
                 TyKind::Tuple(ts) => Some(ts),
-                TyKind::Array(t, _) => Some(vec![t; elements.len()]),
+                TyKind::Array(t, n) => Some(vec![t; n as usize]),
                 TyKind::Error | TyKind::Unknown => None,
                 _ => {
                     mismatch(st, init_span);
@@ -147,15 +147,24 @@ fn check_binding_pattern(pat: &PatWrap, init_ty: TyId, init_span: Span, st: &mut
                 }
             };
             if let Some(ts) = elem_tys {
-                if ts.len() != elements.len() {
+                if rest.map_or(ts.len() != elements.len(), |r| {
+                    r > ts.len() || elements.len() > ts.len()
+                }) {
                     st.diags.emit(Diagnostic::error(
                         DiagCode::SemArityMismatch,
                         init_span,
                         "destructuring arity mismatch",
                     ));
                 }
-                for (p, t) in elements.iter().zip(ts.iter()) {
-                    check_binding_pattern(p, *t, init_span, st);
+                for (i, p) in elements.iter().enumerate() {
+                    let ti = match rest {
+                        Some(r) if i >= *r => ts.len() - (elements.len() - i),
+                        _ => i,
+                    };
+                    let Some(t) = ts.get(ti).copied() else {
+                        continue;
+                    };
+                    check_binding_pattern(p, t, init_span, st);
                 }
             }
         }
@@ -247,14 +256,20 @@ fn type_stmt(s: &StmtWrap, st: &mut SemState) {
         StmtKind::Loop { body, .. } => {
             st.loops.push(LoopFrame {
                 break_values: Vec::new(),
+                break_total: 0,
+                break_with_value: 0,
             });
             type_block(body, st, false);
             let _ = st.loops.pop();
         }
         StmtKind::Break { value, .. } => {
+            if let Some(frame) = st.loops.last_mut() {
+                frame.break_total += 1;
+            }
             if let Some(v) = value {
                 let vty = type_expr(v, st, true);
                 if let Some(frame) = st.loops.last_mut() {
+                    frame.break_with_value += 1;
                     frame.break_values.push(vty);
                 }
             }
@@ -610,7 +625,11 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             type_args,
             args,
         } => type_call(callee, type_args, args, e.span, st),
-        ExprKind::Index { base, index } => {
+        ExprKind::Index {
+            base,
+            index,
+            const_index,
+        } => {
             let bty = type_expr(base, st, true);
             let ity = type_expr(index, st, true);
             if !st.tys.is_integral(ity) && !st.tys.is_error(ity) {
@@ -618,6 +637,17 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             }
             match st.tys.kind(bty).clone() {
                 TyKind::Array(t, _) => t,
+                TyKind::Tuple(ts) => match const_index {
+                    Some(i) if *i < ts.len() => ts[*i],
+                    Some(_) => {
+                        mismatch(st, index.span);
+                        st.tys.error
+                    }
+                    None => {
+                        unsupported(st, index.span, "tuple subscript must be an integer literal");
+                        st.tys.error
+                    }
+                },
                 TyKind::Error => st.tys.error,
                 _ => {
                     mismatch(st, base.span);
@@ -701,6 +731,34 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
         }
         ExprKind::When { subject, branches } => {
             type_when(subject.as_deref(), branches, e.span, in_value, st)
+        }
+        ExprKind::Loop { body } => {
+            st.loops.push(LoopFrame {
+                break_values: Vec::new(),
+                break_total: 0,
+                break_with_value: 0,
+            });
+            let _ = type_block(body, st, false);
+            let frame = st.loops.pop().expect("loop frame");
+            if frame.break_total == 0 {
+                // 无 break = 无出口；unit 只是保守结果型（未来 Never 类型可替换）。
+                st.tys.unit
+            } else {
+                if frame.break_with_value != frame.break_total {
+                    mismatch(st, e.span);
+                }
+                let mut result = frame.break_values.first().copied().unwrap_or(st.tys.unit);
+                for ty in &frame.break_values[1..] {
+                    result = match st.tys.join(result, *ty) {
+                        Some(joined) => joined,
+                        None => {
+                            mismatch(st, e.span);
+                            st.tys.error
+                        }
+                    };
+                }
+                result
+            }
         }
         // concurrent 块的 lowering 未排期（irc 拒收）：sem 先行诊断
         ExprKind::Concurrent { block } => {
@@ -840,6 +898,36 @@ fn type_binary(
     }
 }
 
+fn printable_builtin_arg(ty: TyId, st: &SemState) -> bool {
+    matches!(
+        st.tys.kind(ty),
+        TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::String | TyKind::Char
+    )
+}
+
+fn type_print_call(callee: &ExprWrap, args: &[CallArg], span: Span, st: &mut SemState) -> TyId {
+    if args.len() != 1 || args.iter().any(|a| a.name.is_some()) {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemArityMismatch,
+            span,
+            "print expects one positional argument",
+        ));
+        type_all_args(args, st);
+        st.expr_ty.set(callee.id, st.tys.unit);
+        return st.tys.unit;
+    }
+    let arg_ty = type_expr(&args[0].value, st, true);
+    if !st.tys.is_error(arg_ty) && !printable_builtin_arg(arg_ty, st) {
+        unsupported(
+            st,
+            args[0].value.span,
+            "print supports scalar int/float/bool/char/string arguments in semantic v1",
+        );
+    }
+    st.expr_ty.set(callee.id, st.tys.unit);
+    st.tys.unit
+}
+
 /// 调用定型：callee 先定型（coverage 需要）；位置实参按序入槽，
 /// 命名实参按名入槽，默认值补位，最后逐槽 assignable 核查
 fn type_call(
@@ -849,6 +937,11 @@ fn type_call(
     span: Span,
     st: &mut SemState,
 ) -> TyId {
+    if let Some(def) = st.expr_def.get(callee.id).copied()
+        && matches!(st.defs.get(def).kind, DefKind::BuiltinPrint)
+    {
+        return type_print_call(callee, args, span, st);
+    }
     // Member 目标的定型与消歧一次完成：字段（含函数字段）/枚举变体查得到，
     // 查不到即方法调用（由此处报「不支持」，不让 member_field_ty 发 unknown-field 误导）
     let callee_ty = match &callee.kind {
@@ -1260,17 +1353,24 @@ fn refine_pattern_types(pat: &PatWrap, subject_ty: TyId, st: &mut SemState) {
                 refine_pattern_types(p, subject_ty, st);
             }
         }
-        // 元组/数组模式按元素类型解构精化（when 主语为同型聚合时）
-        PatKind::Tuple { elements, .. } | PatKind::Array { elements, .. } => {
+        // 元组/数组模式按元素类型解构精化（when 主语为同型聚合时）；
+        // `..` 不占元素名，其后元素从主语尾部倒序映射
+        PatKind::Tuple { elements, rest } | PatKind::Array { elements, rest } => {
             let elem_tys: Option<Vec<TyId>> = match st.tys.kind(subject_ty).clone() {
                 TyKind::Tuple(ts) => Some(ts),
-                TyKind::Array(t, _) => Some(vec![t; elements.len()]),
+                TyKind::Array(t, n) => Some(vec![t; n as usize]),
                 _ => None,
             };
             match elem_tys {
                 Some(ts) => {
-                    for (p, t) in elements.iter().zip(ts.iter()) {
-                        refine_pattern_types(p, *t, st);
+                    for (i, p) in elements.iter().enumerate() {
+                        let ti = match rest {
+                            Some(r) if i >= *r => ts.len().saturating_sub(elements.len() - i),
+                            _ => i,
+                        };
+                        if let Some(t) = ts.get(ti).copied() {
+                            refine_pattern_types(p, t, st);
+                        }
                     }
                 }
                 None => {
@@ -1395,7 +1495,9 @@ fn def_value_ty(def: DefId, st: &mut SemState) -> TyId {
             let target = st.defs.get(def).alias_resolved.unwrap_or(def);
             st.tys.intern(TyKind::TypeObject(target))
         }
-        DefKind::StructField { .. } | DefKind::ImportNs { .. } => st.tys.error,
+        DefKind::StructField { .. } | DefKind::ImportNs { .. } | DefKind::BuiltinPrint => {
+            st.tys.error
+        }
     }
 }
 // ==================== debug 覆盖断言 ====================
@@ -1520,7 +1622,7 @@ mod verify {
                     expr(&a.value, st);
                 }
             }
-            ExprKind::Index { base, index } => {
+            ExprKind::Index { base, index, .. } => {
                 expr(base, st);
                 expr(index, st);
             }

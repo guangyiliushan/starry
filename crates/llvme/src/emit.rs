@@ -235,11 +235,12 @@ impl<'e, 'l> FnEmit<'e, 'l> {
                     format!("%t{}.slot", t.0)
                 };
                 let i = self.op_val(idx, self.lc.tys.default_int);
+                let ity = scalar_ty(self.lc.tys, self.lc.tys.default_int);
                 let gep = self.fresh();
                 let _ = writeln!(
                     self.out,
-                    "  {} = getelementptr [{} x i64], ptr {}, i64 0, i64 {}",
-                    gep, n, base, i
+                    "  {} = getelementptr [{} x i64], ptr {}, i64 0, {} {}",
+                    gep, n, base, ity, i
                 );
                 gep
             }
@@ -258,7 +259,9 @@ impl<'e, 'l> FnEmit<'e, 'l> {
                             let _ = writeln!(self.out, "  {} = load ptr, ptr %t{}.slot", p, t.0);
                             p
                         }
-                        _ => format!("%t{}", t.0),
+                        // Block/Cell 聚合值的当前槽地址；%tN 只在形参值域存在，
+                        // 本地聚合必须经 %tN.slot（否则未定义 + 丢失 var 更新）。
+                        _ => format!("%t{}.slot", t.0),
                     }
                 } else {
                     let lty = scalar_ty(self.lc.tys, ty);
@@ -365,6 +368,10 @@ fn emit_fun(lc: &Lc, g: &mut Global, fun: &FunBody, body: &mut String) {
             let lty = scalar_ty(lc.tys, *ty);
             let _ = writeln!(e.out, "  store {} %t{}, ptr %t{}.slot", lty, t.0, t.0);
         }
+    }
+
+    if let Some(first) = fun.blocks.first() {
+        let _ = writeln!(e.out, "  br label %{}", block_label(first.id.0));
     }
 
     let mut pending: Vec<(String, String)> = Vec::new();
@@ -490,7 +497,10 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
             e.store_val(*dst, store_ty, v);
         }
         Instr::Un { dst, op, a, ty } => {
-            let av = e.op_val(a, *ty);
+            let av = match op {
+                UnOp::Conv(from) => e.op_val(a, *from),
+                _ => e.op_val(a, *ty),
+            };
             let v = e.fresh();
             match op {
                 UnOp::Neg => {
@@ -548,6 +558,10 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
             }
             e.store_val(*dst, *ty, v);
         }
+        Instr::Copy { dst, src, ty } if class_of(e.lc.tys, *ty) == TyClass::Scalar => {
+            let v = e.op_val(src, *ty);
+            e.store_val(*dst, *ty, v);
+        }
         Instr::Copy { dst, src, ty } => {
             let v = match src {
                 Operand::Const(_) => e.op_val(src, *ty),
@@ -596,7 +610,14 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                 .map(|(v, t)| format!("{} {}", t, v))
                 .collect();
             let (callee_name, ret) = match callee {
-                Callee::Def(d) => (fun_name(e.lc, *d), scalar_ty(e.lc.tys, *ty)),
+                Callee::Def(d) => {
+                    let ret = if class_of(e.lc.tys, *ty) == TyClass::Agg {
+                        "ptr".to_string()
+                    } else {
+                        scalar_ty(e.lc.tys, *ty)
+                    };
+                    (fun_name(e.lc, *d), ret)
+                }
                 Callee::Runtime(RuntimeFn::StrConcat) => {
                     e.g.runtime_decls
                         .entry("starry_str_concat".into())
@@ -604,30 +625,54 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                     ("@starry_str_concat".to_string(), "i8*".to_string())
                 }
                 Callee::Runtime(RuntimeFn::StrConv) => {
-                    let pty = args
-                        .first()
-                        .map(|a| a.split_whitespace().next().unwrap_or("i64").to_string())
-                        .unwrap_or_else(|| "i64".into());
-                    let name = format!("starry_str_conv.{}", sanitize(&pty));
+                    let pty = runtime_param_ty(&args);
+                    let name = format!("starry_str_conv_{}", runtime_suffix(&pty));
                     e.g.runtime_decls
                         .entry(name.clone())
                         .or_insert(("i8*".into(), pty));
                     (format!("@{name}"), "i8*".to_string())
                 }
+                Callee::Runtime(RuntimeFn::Print) => {
+                    let pty = runtime_param_ty(&args);
+                    let name = format!("starry_print_{}", runtime_suffix(&pty));
+                    e.g.runtime_decls
+                        .entry(name.clone())
+                        .or_insert(("void".into(), pty));
+                    (format!("@{name}"), "void".to_string())
+                }
             };
-            let v = e.fresh();
-            let _ = writeln!(
-                e.out,
-                "  {} = call {} {}({})",
-                v,
-                ret,
-                callee_name,
-                args.join(", ")
-            );
-            if let Some(d) = dst {
-                e.store_val(*d, *ty, v);
+            if ret == "void" {
+                let _ = writeln!(e.out, "  call void {}({})", callee_name, args.join(", "));
+            } else {
+                let v = e.fresh();
+                let _ = writeln!(
+                    e.out,
+                    "  {} = call {} {}({})",
+                    v,
+                    ret,
+                    callee_name,
+                    args.join(", ")
+                );
+                if let Some(d) = dst {
+                    e.store_val(*d, *ty, v);
+                }
             }
         }
+    }
+}
+
+fn runtime_param_ty(args: &[String]) -> String {
+    args.first()
+        .map(|a| a.split_whitespace().next().unwrap_or("i64").to_string())
+        .unwrap_or_else(|| "i64".into())
+}
+
+fn runtime_suffix(pty: &str) -> String {
+    match pty {
+        "i8*" | "i8_" | "string" => "string".to_string(),
+        "double" => "f64".to_string(),
+        "float" => "f32".to_string(),
+        _ => sanitize(pty),
     }
 }
 

@@ -322,7 +322,7 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
                 resolve_expr(&arg.value, st, scope);
             }
         }
-        ExprKind::Index { base, index } => {
+        ExprKind::Index { base, index, .. } => {
             resolve_expr(base, st, scope);
             resolve_expr(index, st, scope);
         }
@@ -400,6 +400,15 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
         ExprKind::Comptime { block } | ExprKind::Unsafe { block } => {
             resolve_block(block, st, scope);
         }
+        ExprKind::Loop { body } => {
+            // loop 表达式同样提供 break/continue 目标（无标签帧 = 最近循环）
+            st.labels.push(LabelFrame {
+                label: None,
+                node: e.id,
+            });
+            resolve_block(body, st, scope);
+            st.labels.pop();
+        }
         ExprKind::Proceed | ExprKind::Super { .. } | ExprKind::MacroCall { .. } => {}
         ExprKind::Literal(_) | ExprKind::Bool(_) | ExprKind::Null => {}
         ExprKind::Error(_) | ExprKind::Missing(_) => {}
@@ -445,15 +454,7 @@ pub(crate) fn declare_local_binding(
                     walk(first, immutable, scope, st);
                 }
             }
-            PatKind::Tuple { elements: ps, rest } | PatKind::Array { elements: ps, rest } => {
-                if rest.is_some() {
-                    // rest 解构的 lowering 未排期（irc 拒收）：sem 先行诊断
-                    st.diags.emit(Diagnostic::error(
-                        DiagCode::SemUnsupportedConstruct,
-                        pat.span,
-                        "rest patterns (`..`) are not supported in semantic v1",
-                    ));
-                }
+            PatKind::Tuple { elements: ps, .. } | PatKind::Array { elements: ps, .. } => {
                 for p in ps {
                     walk(p, immutable, scope, st);
                 }
