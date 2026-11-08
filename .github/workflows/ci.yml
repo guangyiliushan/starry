@@ -1,0 +1,47 @@
+# Starry 编译器 CI：五道门禁全量跑，不允许静默 SKIP。
+# 工具链：stable Rust 2024（1.85+）+ LLVM 15+（不透明指针是槽模型硬前提；
+# llvm-as/clang 验证层与 build e2e 依赖它，探测 PATH 与常见安装位）。
+# LLVM pin：Windows = choco llvm 18.1.8；Linux = apt clang/llvm 18
+# （ubuntu-24.04 默认源）。低于 15 的行为不受支持。
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  gates:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install LLVM (Windows)
+        if: runner.os == 'Windows'
+        run: choco install llvm --version=18.1.8 -y --no-progress
+      - name: Install LLVM (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/llvm-as llvm-as /usr/bin/llvm-as-18 100
+      - name: cargo build
+        run: cargo build --workspace --locked
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo test --workspace --no-fail-fast
+        # 显式 SKIP 打印到日志（无工具链时），但 LLVM 已装——
+        # 验证层与 build e2e 必须真跑，不允许静默变绿
+        run: cargo test --workspace --no-fail-fast -- --nocapture
+      - name: syntaxgen --check
+        run: cargo run -p syntaxgen -- --check
+      - name: git diff --check
+        run: git diff --check

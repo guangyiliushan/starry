@@ -70,6 +70,15 @@ pub enum ExprKind {
         op: OperatorKind,
         operand: Box<ExprWrap>,
     },
+    /// 取址 &x / &mut x（D-007 / M2，T1 借用）。sem 做保守借用检查。
+    AddrOf {
+        mutable: bool,
+        expr: Box<ExprWrap>,
+    },
+    /// 解引 *p（pointer/ref → 内层值；赋值目标走 StorePtr）。
+    Deref {
+        expr: Box<ExprWrap>,
+    },
     Cast {
         expr: Box<ExprWrap>,
         ty: Box<TypeWrap>,
@@ -98,8 +107,11 @@ pub enum ExprKind {
         params: LambdaParams,
         body: Box<Block>,
     },
-    /// 无标签 loop 表达式：值来自带值 break（EBNF LoopExpr）。
+    /// loop 表达式：值来自带值 break（EBNF LoopExpr）。label 仅由块尾
+    /// LoopStatement 归一而来（'fun f() { ''outer: loop { break ''outer 1 } }'），
+    /// 值位置直接写 loop 表达式时 parser 不接受标签。
     Loop {
+        label: Option<Symbol>,
         body: Box<Block>,
     },
     StringInterp {

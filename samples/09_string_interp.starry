@@ -3,3 +3,7 @@ package demo.traps
 fun greet(name: int) {
     print("hi ${name}")
 }
+
+fun main() {
+    greet(41)
+}

@@ -117,6 +117,13 @@ pub(crate) fn parse_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, Par
 /// A type with no `->` at its own top level: `FunctionType := UnionType ["->" T]`
 /// and the `( … ) -> …` form are both disallowed there. Used for a `when` branch's
 /// top-level binding annotation, where `a: int -> 1` would otherwise read the
+/// PointerType := "*" ( "const" | "mut" ) PrimaryType（D-007 / M2）。
+/// bare *T 诊断（ExpectedToken：期待 const/mut），恢复为 const 继续。
+/// 可空指针写作 ?*const T（前缀）；`*const T?` 的 ? 归内层（parse_named_type
+/// 的原子后缀环消费），即 *const T? = *const (?T)。
+/// A type with no `->` at its own top level: `FunctionType := UnionType ["->" T]`
+/// and the `( … ) -> …` form are both disallowed there. Used for a `when` branch's
+/// top-level binding annotation, where `a: int -> 1` would otherwise read the
 /// branch arrow as a function-type arrow. Nested types still accept `->`.
 pub(crate) fn parse_no_arrow_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserError> {
     parse_type_with(session, false)
@@ -204,6 +211,13 @@ fn parse_atomic_type(
         }
         TokenKind::Punctuation(PunctuationKind::LBracket) => parse_array_type(session),
         TokenKind::Identifier => parse_named_type(session),
+        // EBNF PointerType := "*" ( "const" | "mut" ) PrimaryType（D-007 / M2：
+        // bare *T 诊断，不再静默当 const）
+        TokenKind::Operator(OperatorKind::Star) => parse_pointer_type(session),
+        // 前缀可空构造子 ?T（D-007 / M2）：复合类型的可空只用前缀（?[T; N]）
+        TokenKind::Operator(OperatorKind::Question) => parse_prefix_nullable(session),
+        // 借用 &T / &mut T（D-007 / M2）
+        TokenKind::Operator(OperatorKind::BitAnd) => parse_ref_type(session),
         TokenKind::Keyword(ast::token::HardKeyword::SelfType) => {
             let token = session.cursor.advance();
             // EBNF: PrimaryType := … | "Self" | … — no type arguments.
@@ -235,7 +249,82 @@ fn parse_atomic_type(
         _ => missing_type(session, token.span),
     }
 }
+fn parse_pointer_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserError> {
+    let star = session.cursor.advance();
+    // const 是 modifier/slot word（词法 IDENT），mut 是硬关键字——分开判
+    let mutable = match session.cursor.peek().kind {
+        TokenKind::Identifier if session.token_text(session.cursor.peek()) == "const" => {
+            session.cursor.advance();
+            false
+        }
+        TokenKind::Keyword(ast::token::HardKeyword::Mut) => {
+            session.cursor.advance();
+            true
+        }
+        _ => {
+            session.emit_unique(DiagCode::ExpectedToken, star.span, || {
+                "expected `const` or `mut` after `*` (bare `*T` is not allowed)".to_string()
+            });
+            false
+        }
+    };
+    let inner = match session.try_with_depth(|s| parse_atomic_type(s, true))? {
+        Some(ty) => ty,
+        None => return missing_type(session, session.cursor.peek().span),
+    };
+    let id = session.next_node()?;
+    Ok(TypeWrap {
+        id,
+        span: join_span(star.span, inner.span),
+        kind: TypeKind::Pointer {
+            mutable,
+            inner: Box::new(inner),
+        },
+    })
+}
 
+/// 前缀可空构造子 `?T`（D-007 / M2）：与 *const/& 同族的前缀链。
+/// 复合类型的可空只走前缀（?[T; N]、?(T, U)），原子后缀 T? 是糖（见
+/// parse_named_suffix 的 desugar）。
+fn parse_prefix_nullable(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserError> {
+    let q = session.cursor.advance();
+    let inner = match session.try_with_depth(|s| parse_atomic_type(s, true))? {
+        Some(ty) => ty,
+        None => return missing_type(session, session.cursor.peek().span),
+    };
+    let id = session.next_node()?;
+    Ok(TypeWrap {
+        id,
+        span: join_span(q.span, inner.span),
+        kind: TypeKind::Nullable(Box::new(inner)),
+    })
+}
+
+/// 借用 `&T` / `&mut T`（D-007 / M2）：mut 是硬关键字；正交前缀可组合
+///（?&T、&?T、&&T 按前缀链自然嵌套）。
+fn parse_ref_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserError> {
+    let amp = session.cursor.advance();
+    let mutable = matches!(
+        session.cursor.peek().kind,
+        TokenKind::Keyword(ast::token::HardKeyword::Mut)
+    );
+    if mutable {
+        session.cursor.advance();
+    }
+    let inner = match session.try_with_depth(|s| parse_atomic_type(s, true))? {
+        Some(ty) => ty,
+        None => return missing_type(session, session.cursor.peek().span),
+    };
+    let id = session.next_node()?;
+    Ok(TypeWrap {
+        id,
+        span: join_span(amp.span, inner.span),
+        kind: TypeKind::Ref {
+            mutable,
+            inner: Box::new(inner),
+        },
+    })
+}
 fn parse_named_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserError> {
     let start = session.cursor.peek().span;
     let path = parse_path(session)?;
@@ -362,6 +451,16 @@ fn parse_array_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserEr
     {
         missing_close(session);
     }
+    // D-007 / M2：复合类型可空只走前缀 [T; N]? 拒绝并提示 ?[T; N]
+    if session
+        .cursor
+        .check(&TokenKind::Operator(OperatorKind::Question))
+    {
+        let q = session.cursor.advance();
+        session.emit_unique(DiagCode::UnexpectedToken, q.span, || {
+            "nullable of array types uses the prefix form `?[T; N]`".to_string()
+        });
+    }
     let id = session.next_node()?;
     Ok(TypeWrap {
         id,
@@ -432,6 +531,16 @@ fn parse_paren_or_fn_type(
     if !takes_arrow {
         if params.len() == 1 {
             return Ok(params.pop().expect("checked len"));
+        }
+        // D-007 / M2：(T, U)? 拒绝并提示 ?(T, U)
+        if session
+            .cursor
+            .check(&TokenKind::Operator(OperatorKind::Question))
+        {
+            let q = session.cursor.advance();
+            session.emit_unique(DiagCode::UnexpectedToken, q.span, || {
+                "nullable of tuple types uses the prefix form `?(T, U)`".to_string()
+            });
         }
         let end = params.last().map(|ty| ty.span).unwrap_or_default();
         let id = session.next_node()?;

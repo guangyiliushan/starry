@@ -1,15 +1,16 @@
 //! 模块/函数发射：两遍（temp 存储分类 → 指令发射）。
 //!
 //! 存储分类（每个 temp 恰好一个 entry alloca，外部 mem2reg 可提升）：
-//! - Cell：i64 槽（标量与单槽聚合共用）
-//! - Block(n)：`[n x i64]` 块（多槽聚合基址；n 来自常量槽访问、
-//!   Slot 声明、聚合返回值推断）
-//! - PtrCell(n)：`ptr` 槽装聚合指针（聚合实参/返回值）
+//! - Cell：i64 槽（标量与单槽窄聚合共用）
+//! - WideCell：i128 槽（i128 标量；16 字节）
+//! - Block(n)：`[n x i64]` 块（不含 i128 的聚合基址）
+//! - WideBlock(n)：`[n x i128]` 块（含 i128 成员的聚合；按类型加宽）
+//! - PtrCell(n)/WidePtrCell(n)：`ptr` 槽装聚合指针（聚合实参/返回值）
 //!
 //! 不透明指针风格（LLVM 15+）：无指针 bitcast，load/store/ret 聚合
-//! 经 `ptr`；槽寻址统一 `getelementptr [n x i64], ptr p, i64 0, i64 i`
-//! （Cell 即自身，idx 恒 0；tag/flag 是槽 0 里的 i8，写时就地
-//! `store i8 ..., ptr` —— 天然免 bitcast）。
+//! 经 `ptr`；槽寻址统一 `getelementptr [n x E], ptr p, i64 0, i64 i`
+//! （E = i64 或 i128，Cell 即自身，idx 恒 0；tag/flag 是槽 0 里的 i8，
+//! 写时就地 `store i8 ..., ptr` —— 天然免 bitcast）。
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -37,12 +38,40 @@ pub fn emit_module(tac: &TacOutput, tys: &TyArena, defs: &DefArena, interner: &I
         emit_fun(&lc, &mut g, fun, &mut body);
     }
     emit_main_wrapper(&lc, tac, &mut body);
-    // 外部函数 declare（被调用但无体：native import 等）
+    // 顶层全局存储声明（init 函数可能引用其他全局，先声明存储）
+    let mut globals = String::new();
+    for global in &tac.globals {
+        let name = fun_name(&lc, global.def);
+        let storage_ty = if scalar_ty(lc.tys, global.ty) == "i8*" {
+            "i8*"
+        } else if contains_i128(&lc, global.ty) {
+            "i128"
+        } else {
+            "i64"
+        };
+        let zero = if storage_ty == "i8*" { "null" } else { "0" };
+        let _ = writeln!(globals, "{} = global {} {}", name, storage_ty, zero);
+    }
+    // 全局初始化函数：必须在字符串常量 flush 之前发射——init 表达式里
+    // 新 intern 的字符串只在此时注册，提前 flush 会输出未定义的 @.str.N。
+    for global in &tac.globals {
+        if let Some(init) = &global.init {
+            emit_fun_named(
+                &lc,
+                &mut g,
+                init,
+                &mut body,
+                format!("@__starry_init_global.{}", global.def.0),
+            );
+        }
+    }
+    // 外部函数 / runtime declare
+    let mut decls = String::new();
     for (name, (ret, params)) in std::mem::take(&mut g.extern_decls) {
-        let _ = writeln!(body, "declare {} @{}({})", ret, name, params);
+        let _ = writeln!(decls, "declare {} @{}({})", ret, name, params);
     }
     for (name, (ret, params)) in std::mem::take(&mut g.runtime_decls) {
-        let _ = writeln!(body, "declare {} @{}({})", ret, name, params);
+        let _ = writeln!(decls, "declare {} @{}({})", ret, name, params);
     }
 
     let mut out = String::new();
@@ -56,29 +85,9 @@ pub fn emit_module(tac: &TacOutput, tys: &TyArena, defs: &DefArena, interner: &I
             escape_cstr(text)
         );
     }
-    // 顶层全局存储 + 初始化函数（main 包装先 call init 再写回 @global）。
-    for global in &tac.globals {
-        let name = fun_name(&lc, global.def);
-        let storage_ty = if scalar_ty(lc.tys, global.ty) == "i8*" {
-            "i8*"
-        } else {
-            "i64"
-        };
-        let zero = if storage_ty == "i8*" { "null" } else { "0" };
-        let _ = writeln!(out, "{} = global {} {}", name, storage_ty, zero);
-    }
+    out.push_str(&globals);
+    out.push_str(&decls);
     out.push_str(&body);
-    for global in &tac.globals {
-        if let Some(init) = &global.init {
-            emit_fun_named(
-                &lc,
-                &mut g,
-                init,
-                &mut out,
-                format!("@__starry_init_global.{}", global.def.0),
-            );
-        }
-    }
     let _ = defined;
     out
 }
@@ -118,12 +127,55 @@ fn escape_cstr(s: &str) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Storage {
-    /// i64 槽
+    /// i64 槽（普通标量/单槽窄聚合）
     Cell,
-    /// [n x i64] 块
+    /// i128 槽（i128 标量；16 字节）
+    WideCell,
+    /// [n x i64] 块（不含 i128 的聚合）
     Block(u32),
+    /// [n x i128] 块（含 i128 成员的聚合；按类型加宽，避免所有槽翻倍）
+    WideBlock(u32),
     /// ptr 槽装聚合指针（聚合实参/返回值），n = 指向块的槽数
     PtrCell(u32),
+    /// 同 PtrCell，但指向 [n x i128] 块
+    WidePtrCell(u32),
+}
+
+/// 类型是否含 i128（决定聚合块/槽是否加宽到 16 字节）
+fn contains_i128(lc: &Lc, ty: TyId) -> bool {
+    match lc.tys.kind(ty) {
+        TyKind::Int(IntKind::I128) => true,
+        TyKind::Array(e, _) | TyKind::Nullable(e) | TyKind::Range(e) => contains_i128(lc, *e),
+        TyKind::Tuple(es) => es.iter().any(|e| contains_i128(lc, *e)),
+        TyKind::Named(def, _) => match lc.defs.get(*def).kind {
+            sem::DefKind::Struct | sem::DefKind::Class => lc
+                .defs
+                .get(*def)
+                .sig
+                .fields
+                .iter()
+                .any(|(_, t)| contains_i128(lc, *t)),
+            sem::DefKind::Enum => lc
+                .defs
+                .get(*def)
+                .sig
+                .variants
+                .iter()
+                .any(|(_, ps)| ps.iter().any(|(_, t)| contains_i128(lc, *t))),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+impl Storage {
+    fn slots(&self) -> u32 {
+        match self {
+            Storage::Block(n) | Storage::WideBlock(n) => *n,
+            Storage::PtrCell(n) | Storage::WidePtrCell(n) => *n,
+            _ => 1,
+        }
+    }
 }
 
 fn see_op(op: &Operand, max: &mut u32) {
@@ -148,6 +200,16 @@ fn temp_max(fun: &FunBody) -> u32 {
                 }
                 Instr::Copy { dst, src, .. } => {
                     max = max.max(dst.0);
+                    see_op(src, &mut max);
+                }
+                Instr::AddrOf { dst, base, .. } => {
+                    max = max.max(dst.0).max(base.0);
+                }
+                Instr::LoadPtr { dst, ptr, .. } => {
+                    max = max.max(dst.0).max(ptr.0);
+                }
+                Instr::StorePtr { ptr, src, .. } => {
+                    max = max.max(ptr.0);
                     see_op(src, &mut max);
                 }
                 Instr::Load { dst, base, idx, .. } => {
@@ -184,48 +246,93 @@ fn classify(lc: &Lc, fun: &FunBody) -> Vec<Storage> {
     let n = (temp_max(fun) + 1) as usize;
     let mut req: Vec<usize> = vec![0; n];
     let mut ptr: Vec<Option<u32>> = vec![None; n];
+    let mut wide: Vec<bool> = vec![false; n];
     for (t, ty) in &fun.params {
         if class_of(lc.tys, *ty) == TyClass::Agg {
             ptr[t.0 as usize] = Some(scalar_slots(lc, *ty).max(1) as u32);
         }
+        if contains_i128(lc, *ty) {
+            wide[t.0 as usize] = true;
+        }
     }
+    let mark = |t: TempId, ty: TyId, wide: &mut [bool]| {
+        if contains_i128(lc, ty) {
+            wide[t.0 as usize] = true;
+        }
+    };
     for b in &fun.blocks {
         for i in &b.instrs {
             match i {
+                Instr::Bin { dst, ty, .. } | Instr::Un { dst, ty, .. } => {
+                    mark(*dst, *ty, &mut wide);
+                }
+                Instr::Copy { dst, src, ty } => {
+                    mark(*dst, *ty, &mut wide);
+                    if let Operand::Temp(t) = src {
+                        mark(*t, *ty, &mut wide);
+                    }
+                }
                 Instr::Slot { dst, count } => {
                     req[dst.0 as usize] = req[dst.0 as usize].max(*count as usize)
                 }
-                Instr::Load { base, idx, .. } | Instr::Store { base, idx, .. } => {
+                Instr::Load { dst, base, idx, ty } => {
+                    mark(*dst, *ty, &mut wide);
+                    mark(*base, *ty, &mut wide);
                     if let Operand::Const(Const::Int(k)) = idx {
                         req[base.0 as usize] = req[base.0 as usize].max(*k as usize + 1);
                     }
                 }
-                Instr::Copy { dst, ty, .. } => {
-                    req[dst.0 as usize] = req[dst.0 as usize].max(scalar_slots(lc, *ty).max(1))
+                Instr::Store { base, idx, src, ty } => {
+                    mark(*base, *ty, &mut wide);
+                    if let Operand::Temp(t) = src {
+                        mark(*t, *ty, &mut wide);
+                    }
+                    if let Operand::Const(Const::Int(k)) = idx {
+                        req[base.0 as usize] = req[base.0 as usize].max(*k as usize + 1);
+                    }
+                }
+                Instr::AddrOf { .. } | Instr::LoadPtr { .. } | Instr::StorePtr { .. } => {}
+                Instr::LoadGlobal { dst, ty, .. } => mark(*dst, *ty, &mut wide),
+                Instr::StoreGlobal { src, ty, .. } => {
+                    if let Operand::Temp(t) = src {
+                        mark(*t, *ty, &mut wide);
+                    }
+                }
+                Instr::Param { a, ty } => {
+                    if let Operand::Temp(t) = a {
+                        mark(*t, *ty, &mut wide);
+                    }
                 }
                 Instr::Call { dst, ty, .. } => {
                     if let Some(d) = dst
                         && class_of(lc.tys, *ty) == TyClass::Agg
                     {
-                        ptr[d.0 as usize] = Some(scalar_slots(lc, *ty).max(1) as u32);
+                        // 聚合返回值在调用方分配块并整体拷入：callee 的
+                        // 返回值只是 callee 栈槽地址，直接持有会悬垂。
+                        req[d.0 as usize] = req[d.0 as usize].max(scalar_slots(lc, *ty).max(1));
+                        mark(*d, *ty, &mut wide);
                     }
                 }
-                _ => {}
             }
         }
         if let Term::Ret {
             value: Some(Operand::Temp(t)),
             ty,
         } = &b.term
-            && class_of(lc.tys, *ty) == TyClass::Agg
         {
-            req[t.0 as usize] = req[t.0 as usize].max(scalar_slots(lc, *ty));
+            if class_of(lc.tys, *ty) == TyClass::Agg {
+                req[t.0 as usize] = req[t.0 as usize].max(scalar_slots(lc, *ty));
+            }
+            mark(*t, *ty, &mut wide);
         }
     }
     (0..n)
         .map(|i| match ptr[i] {
+            Some(n) if wide[i] => Storage::WidePtrCell(n),
             Some(n) => Storage::PtrCell(n),
+            None if req[i] > 1 && wide[i] => Storage::WideBlock(req[i] as u32),
             None if req[i] > 1 => Storage::Block(req[i] as u32),
+            _ if wide[i] => Storage::WideCell,
             _ => Storage::Cell,
         })
         .collect()
@@ -246,29 +353,34 @@ impl<'e, 'l> FnEmit<'e, 'l> {
         s
     }
 
-    /// temp 的槽地址（ptr 值，指向 i64 槽）
+    /// temp 的槽地址（ptr 值，指向槽元素）
     fn slot_addr(&mut self, t: TempId, idx: &Operand) -> String {
-        match self.st[t.0 as usize] {
-            Storage::Cell => format!("%t{}.slot", t.0),
-            Storage::Block(n) | Storage::PtrCell(n) => {
-                let base = if matches!(self.st[t.0 as usize], Storage::PtrCell(_)) {
-                    let p = self.fresh();
-                    let _ = writeln!(self.out, "  {} = load ptr, ptr %t{}.slot", p, t.0);
-                    p
-                } else {
-                    format!("%t{}.slot", t.0)
-                };
-                let i = self.op_val(idx, self.lc.tys.default_int);
-                let ity = scalar_ty(self.lc.tys, self.lc.tys.default_int);
-                let gep = self.fresh();
-                let _ = writeln!(
-                    self.out,
-                    "  {} = getelementptr [{} x i64], ptr {}, i64 0, {} {}",
-                    gep, n, base, ity, i
-                );
-                gep
+        let st = self.st[t.0 as usize];
+        let (base, elem) = match st {
+            Storage::Cell | Storage::WideCell => return format!("%t{}.slot", t.0),
+            Storage::Block(_) => (format!("%t{}.slot", t.0), "i64"),
+            Storage::WideBlock(_) => (format!("%t{}.slot", t.0), "i128"),
+            Storage::PtrCell(_) => {
+                let p = self.fresh();
+                let _ = writeln!(self.out, "  {} = load ptr, ptr %t{}.slot", p, t.0);
+                (p, "i64")
             }
-        }
+            Storage::WidePtrCell(_) => {
+                let p = self.fresh();
+                let _ = writeln!(self.out, "  {} = load ptr, ptr %t{}.slot", p, t.0);
+                (p, "i128")
+            }
+        };
+        let n = st.slots();
+        let i = self.op_val(idx, self.lc.tys.default_int);
+        let ity = scalar_ty(self.lc.tys, self.lc.tys.default_int);
+        let gep = self.fresh();
+        let _ = writeln!(
+            self.out,
+            "  {} = getelementptr [{} x {}], ptr {}, i64 0, {} {}",
+            gep, n, elem, base, ity, i
+        );
+        gep
     }
 
     /// 常量/临时量的值文本（标量按 ty 加载；聚合返回指针值）
@@ -278,7 +390,7 @@ impl<'e, 'l> FnEmit<'e, 'l> {
                 if class_of(self.lc.tys, ty) == TyClass::Agg {
                     // 聚合值 = 其块/指针的地址
                     match self.st[t.0 as usize] {
-                        Storage::PtrCell(_) => {
+                        Storage::PtrCell(_) | Storage::WidePtrCell(_) => {
                             let p = self.fresh();
                             let _ = writeln!(self.out, "  {} = load ptr, ptr %t{}.slot", p, t.0);
                             p
@@ -306,6 +418,8 @@ impl<'e, 'l> FnEmit<'e, 'l> {
                 matches!(self.lc.tys.kind(ty), TyKind::Float(FloatKind::F32)),
             ),
             Const::Bool(b) => format!("{b}"),
+            // 裸指针的 null = LLVM null（整数 0 作 ptr 操作数非法）
+            Const::Null if matches!(self.lc.tys.kind(ty), TyKind::Pointer { .. }) => "null".into(),
             Const::Null => "0".into(),
             Const::Unit => "0".into(),
             Const::Str(sym) => {
@@ -319,7 +433,7 @@ impl<'e, 'l> FnEmit<'e, 'l> {
     /// 把值写入 temp 的槽（按 ty；Cell/Block 第一槽）
     fn store_val(&mut self, t: TempId, ty: TyId, val: String) {
         match self.st[t.0 as usize] {
-            Storage::PtrCell(_) => {
+            Storage::PtrCell(_) | Storage::WidePtrCell(_) => {
                 let _ = writeln!(self.out, "  store ptr {}, ptr %t{}.slot", val, t.0);
             }
             _ => {
@@ -380,10 +494,16 @@ fn emit_fun_named(lc: &Lc, g: &mut Global, fun: &FunBody, body: &mut String, nam
             Storage::Cell => {
                 let _ = writeln!(e.out, "  %t{}.slot = alloca i64", i);
             }
+            Storage::WideCell => {
+                let _ = writeln!(e.out, "  %t{}.slot = alloca i128", i);
+            }
             Storage::Block(n) => {
                 let _ = writeln!(e.out, "  %t{}.slot = alloca [{} x i64]", i, n);
             }
-            Storage::PtrCell(_) => {
+            Storage::WideBlock(n) => {
+                let _ = writeln!(e.out, "  %t{}.slot = alloca [{} x i128]", i, n);
+            }
+            Storage::PtrCell(_) | Storage::WidePtrCell(_) => {
                 let _ = writeln!(e.out, "  %t{}.slot = alloca ptr", i);
             }
         }
@@ -591,21 +711,66 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
             e.store_val(*dst, *ty, v);
         }
         Instr::Copy { dst, src, ty } => {
-            let v = match src {
-                Operand::Const(_) => e.op_val(src, *ty),
-                Operand::Temp(t) => {
-                    // 槽位拷贝（i64 位搬运；单槽聚合同形）
-                    let v = e.fresh();
-                    let _ = writeln!(e.out, "  {} = load i64, ptr %t{}.slot", v, t.0);
-                    v
-                }
+            // 聚合拷贝：逐槽搬运；槽元素宽度按类型（含 i128 → [n x i128]）
+            let n = scalar_slots(e.lc, *ty).max(1);
+            let elem = if contains_i128(e.lc, *ty) {
+                "i128"
+            } else {
+                "i64"
             };
-            match e.st[dst.0 as usize] {
-                Storage::PtrCell(_) => e.store_val(*dst, *ty, v),
-                _ => {
-                    let _ = writeln!(e.out, "  store i64 {}, ptr %t{}.slot", v, dst.0);
+            match src {
+                Operand::Temp(_) => {
+                    let src_ptr = e.op_val(src, *ty);
+                    let dst_ptr = e.op_val(&Operand::Temp(*dst), *ty);
+                    for i in 0..n {
+                        let sa = e.fresh();
+                        let _ = writeln!(
+                            e.out,
+                            "  {} = getelementptr [{} x {}], ptr {}, i64 0, i64 {}",
+                            sa, n, elem, src_ptr, i
+                        );
+                        let v = e.fresh();
+                        let _ = writeln!(e.out, "  {} = load {}, ptr {}", v, elem, sa);
+                        let da = e.fresh();
+                        let _ = writeln!(
+                            e.out,
+                            "  {} = getelementptr [{} x {}], ptr {}, i64 0, i64 {}",
+                            da, n, elem, dst_ptr, i
+                        );
+                        let _ = writeln!(e.out, "  store {} {}, ptr {}", elem, v, da);
+                    }
+                }
+                Operand::Const(_) => {
+                    let v = e.op_val(src, *ty);
+                    e.store_val(*dst, *ty, v);
                 }
             }
+        }
+        // M2 取址：base 的 alloca 地址本身就是 ptr 值
+        Instr::AddrOf { dst, base, ty } => {
+            let lty = scalar_ty(e.lc.tys, *ty);
+            let _ = writeln!(
+                e.out,
+                "  store {} %t{}.slot, ptr %t{}.slot",
+                lty, base.0, dst.0
+            );
+        }
+        // M2 经指针读：槽里取地址，再按 ty 读
+        Instr::LoadPtr { dst, ptr, ty } => {
+            let p = e.fresh();
+            let _ = writeln!(e.out, "  {} = load ptr, ptr %t{}.slot", p, ptr.0);
+            let lty = scalar_ty(e.lc.tys, *ty);
+            let v = e.fresh();
+            let _ = writeln!(e.out, "  {} = load {}, ptr {}", v, lty, p);
+            let _ = writeln!(e.out, "  store {} {}, ptr %t{}.slot", lty, v, dst.0);
+        }
+        // M2 经指针写
+        Instr::StorePtr { ptr, src, ty } => {
+            let p = e.fresh();
+            let _ = writeln!(e.out, "  {} = load ptr, ptr %t{}.slot", p, ptr.0);
+            let lty = scalar_ty(e.lc.tys, *ty);
+            let v = e.op_val(src, *ty);
+            let _ = writeln!(e.out, "  store {} {}, ptr {}", lty, v, p);
         }
         Instr::Load { dst, base, idx, ty } => {
             let addr = e.slot_addr(*base, idx);
@@ -656,10 +821,11 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
             pending.push((v, pty));
         }
         Instr::Call { dst, callee, ty } => {
-            let args: Vec<String> = pending
+            let mut args: Vec<String> = pending
                 .drain(..)
                 .map(|(v, t)| format!("{} {}", t, v))
                 .collect();
+            let mut is_str_eq = false;
             let (callee_name, ret) = match callee {
                 Callee::Def(d) => {
                     let ret = if class_of(e.lc.tys, *ty) == TyClass::Agg {
@@ -669,27 +835,111 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                     };
                     (fun_name(e.lc, *d), ret)
                 }
+                Callee::Extern(d) => {
+                    let (name, ret_ty, params) = {
+                        let def = e.lc.defs.get(*d);
+                        let ret_ty = if class_of(e.lc.tys, def.sig.ret) == TyClass::Agg {
+                            "ptr".to_string()
+                        } else {
+                            scalar_ty(e.lc.tys, def.sig.ret)
+                        };
+                        let params: Vec<String> = def
+                            .sig
+                            .params
+                            .iter()
+                            .map(|(_, pty)| {
+                                if class_of(e.lc.tys, *pty) == TyClass::Agg {
+                                    "ptr".to_string()
+                                } else {
+                                    scalar_ty(e.lc.tys, *pty)
+                                }
+                            })
+                            .collect();
+                        (
+                            sanitize(e.lc.interner.resolve(def.name)),
+                            ret_ty,
+                            params.join(", "),
+                        )
+                    };
+                    e.g.extern_decls
+                        .entry(name.clone())
+                        .or_insert((ret_ty.clone(), params));
+                    (format!("@{name}"), ret_ty)
+                }
                 Callee::Runtime(RuntimeFn::StrConcat) => {
                     e.g.runtime_decls
                         .entry("starry_str_concat".into())
                         .or_insert(("i8*".into(), "i8*, i8*".into()));
                     ("@starry_str_concat".to_string(), "i8*".to_string())
                 }
+                Callee::Runtime(RuntimeFn::StrEq) => {
+                    e.g.runtime_decls
+                        .entry("starry_str_eq".into())
+                        .or_insert(("i32".into(), "i8*, i8*".into()));
+                    is_str_eq = true;
+                    ("@starry_str_eq".to_string(), "i32".to_string())
+                }
                 Callee::Runtime(RuntimeFn::StrConv) => {
                     let pty = runtime_param_ty(&args);
-                    let name = format!("starry_str_conv_{}", runtime_suffix(&pty));
+                    if pty == "i128" {
+                        // Windows/MSVC ABI 下 C 的 __int128 与 IR i128 传参
+                        // 不一致（实测段错误）：拆成 hi/lo 两个 i64 传。
+                        args = split_i128(e, &args);
+                        e.g.runtime_decls
+                            .entry("starry_str_conv_i128".into())
+                            .or_insert(("i8*".into(), "i64, i64".into()));
+                        ("@starry_str_conv_i128".to_string(), "i8*".to_string())
+                    } else if pty == "i1" {
+                        widen_bool(e, &mut args);
+                        e.g.runtime_decls
+                            .entry("starry_str_conv_i1".into())
+                            .or_insert(("i8*".into(), "i32".into()));
+                        ("@starry_str_conv_i1".to_string(), "i8*".to_string())
+                    } else {
+                        let pty = narrow_i4(e, &mut args, pty);
+                        let name = format!("starry_str_conv_{}", runtime_suffix(&pty));
+                        e.g.runtime_decls
+                            .entry(name.clone())
+                            .or_insert(("i8*".into(), pty));
+                        (format!("@{name}"), "i8*".to_string())
+                    }
+                }
+                Callee::Runtime(RuntimeFn::StrConvChar) => {
                     e.g.runtime_decls
-                        .entry(name.clone())
-                        .or_insert(("i8*".into(), pty));
-                    (format!("@{name}"), "i8*".to_string())
+                        .entry("starry_str_conv_char".into())
+                        .or_insert(("i8*".into(), "i32".into()));
+                    ("@starry_str_conv_char".to_string(), "i8*".to_string())
                 }
                 Callee::Runtime(RuntimeFn::Print) => {
                     let pty = runtime_param_ty(&args);
-                    let name = format!("starry_print_{}", runtime_suffix(&pty));
+                    if pty == "i128" {
+                        args = split_i128(e, &args);
+                        e.g.runtime_decls
+                            .entry("starry_print_i128".into())
+                            .or_insert(("void".into(), "i64, i64".into()));
+                        ("@starry_print_i128".to_string(), "void".to_string())
+                    } else if pty == "i1" {
+                        // C 入口是 int：i1 必须零扩展，否则高位的垃圾位会让
+                        // `v ?` 把 false 打成 true（MSVC ABI 不保证清洁高位）。
+                        widen_bool(e, &mut args);
+                        e.g.runtime_decls
+                            .entry("starry_print_i1".into())
+                            .or_insert(("void".into(), "i32".into()));
+                        ("@starry_print_i1".to_string(), "void".to_string())
+                    } else {
+                        let pty = narrow_i4(e, &mut args, pty);
+                        let name = format!("starry_print_{}", runtime_suffix(&pty));
+                        e.g.runtime_decls
+                            .entry(name.clone())
+                            .or_insert(("void".into(), pty));
+                        (format!("@{name}"), "void".to_string())
+                    }
+                }
+                Callee::Runtime(RuntimeFn::PrintChar) => {
                     e.g.runtime_decls
-                        .entry(name.clone())
-                        .or_insert(("void".into(), pty));
-                    (format!("@{name}"), "void".to_string())
+                        .entry("starry_print_char".into())
+                        .or_insert(("void".into(), "i32".into()));
+                    ("@starry_print_char".to_string(), "void".to_string())
                 }
             };
             if ret == "void" {
@@ -704,8 +954,42 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                     callee_name,
                     args.join(", ")
                 );
-                if let Some(d) = dst {
-                    e.store_val(*d, *ty, v);
+                if is_str_eq {
+                    let c = e.fresh();
+                    let _ = writeln!(e.out, "  {} = icmp ne i32 {}, 0", c, v);
+                    if let Some(d) = dst {
+                        e.store_val(*d, e.lc.tys.bool_, c);
+                    }
+                } else if let Some(d) = dst {
+                    if class_of(e.lc.tys, *ty) == TyClass::Agg {
+                        // 聚合返回值：callee 栈槽 → 调用方块（逐槽拷贝）
+                        let n = scalar_slots(e.lc, *ty).max(1);
+                        let elem = if contains_i128(e.lc, *ty) {
+                            "i128"
+                        } else {
+                            "i64"
+                        };
+                        let dst_ptr = e.op_val(&Operand::Temp(*d), *ty);
+                        for i in 0..n {
+                            let sa = e.fresh();
+                            let _ = writeln!(
+                                e.out,
+                                "  {} = getelementptr [{} x {}], ptr {}, i64 0, i64 {}",
+                                sa, n, elem, v, i
+                            );
+                            let val = e.fresh();
+                            let _ = writeln!(e.out, "  {} = load {}, ptr {}", val, elem, sa);
+                            let da = e.fresh();
+                            let _ = writeln!(
+                                e.out,
+                                "  {} = getelementptr [{} x {}], ptr {}, i64 0, i64 {}",
+                                da, n, elem, dst_ptr, i
+                            );
+                            let _ = writeln!(e.out, "  store {} {}, ptr {}", elem, val, da);
+                        }
+                    } else {
+                        e.store_val(*d, *ty, v);
+                    }
                 }
             }
         }
@@ -716,6 +1000,46 @@ fn runtime_param_ty(args: &[String]) -> String {
     args.first()
         .map(|a| a.split_whitespace().next().unwrap_or("i64").to_string())
         .unwrap_or_else(|| "i64".into())
+}
+
+/// i4 实参在 C ABI 上没有对应类型：sext 到 i8 后按 i8 runtime 入口调用
+///（print_i8/str_conv_i8 已存在），避免 i4 形参链接失败。
+fn narrow_i4(e: &mut FnEmit, args: &mut [String], pty: String) -> String {
+    if pty != "i4" || args.is_empty() {
+        return pty;
+    }
+    let val = args[0].split_whitespace().nth(1).unwrap_or("0");
+    let v = e.fresh();
+    let _ = writeln!(e.out, "  {} = sext i4 {} to i8", v, val);
+    args[0] = format!("i8 {}", v);
+    "i8".into()
+}
+
+/// bool 实参按 C 的 int 传递（i1 直接传 i32 形参时高位不确定）
+fn widen_bool(e: &mut FnEmit, args: &mut [String]) {
+    if args.is_empty() {
+        return;
+    }
+    let val = args[0].split_whitespace().nth(1).unwrap_or("0");
+    let v = e.fresh();
+    let _ = writeln!(e.out, "  {} = zext i1 {} to i32", v, val);
+    args[0] = format!("i32 {}", v);
+}
+
+/// i128 实参拆成 (hi, lo) 两个 i64：MSVC ABI 的 __int128 与 LLVM i128
+/// 传参不一致，跨 C runtime 边界必须走两个 64 位参数。
+fn split_i128(e: &mut FnEmit, args: &[String]) -> Vec<String> {
+    let v = args
+        .first()
+        .and_then(|a| a.split_whitespace().nth(1))
+        .unwrap_or("0");
+    let hi128 = e.fresh();
+    let _ = writeln!(e.out, "  {} = lshr i128 {}, 64", hi128, v);
+    let hi = e.fresh();
+    let _ = writeln!(e.out, "  {} = trunc i128 {} to i64", hi, hi128);
+    let lo = e.fresh();
+    let _ = writeln!(e.out, "  {} = trunc i128 {} to i64", lo, v);
+    vec![format!("i64 {}", hi), format!("i64 {}", lo)]
 }
 
 fn runtime_suffix(pty: &str) -> String {
@@ -791,6 +1115,8 @@ fn emit_main_wrapper(lc: &Lc, tac: &TacOutput, body: &mut String) {
             if global.init.is_some() {
                 let gty = if scalar_ty(lc.tys, global.ty) == "i8*" {
                     "i8*".to_string()
+                } else if contains_i128(lc, global.ty) {
+                    "i128".to_string()
                 } else {
                     scalar_ty(lc.tys, global.ty)
                 };
@@ -807,8 +1133,44 @@ fn emit_main_wrapper(lc: &Lc, tac: &TacOutput, body: &mut String) {
                 );
             }
         }
-        let _ = writeln!(body, "  call {} {}()", ret, fun_name(lc, fun.def));
-        let _ = writeln!(body, "  ret i32 0");
+        // 入口返回值：int 型经 trunc/sext 收敛到 i32；bool 零扩展；
+        // unit/其余形态按 0 退出（不再无条件丢弃 `fun main(): int` 的值）。
+        match lc.tys.kind(fun.ret) {
+            TyKind::Unit => {
+                let _ = writeln!(body, "  call void {}()", fun_name(lc, fun.def));
+                let _ = writeln!(body, "  ret i32 0");
+            }
+            TyKind::Int(_) => {
+                let sty = scalar_ty(lc.tys, fun.ret);
+                let r = format!("%u{next_global_temp}");
+                next_global_temp += 1;
+                let _ = writeln!(body, "  {} = call {} {}()", r, sty, fun_name(lc, fun.def));
+                if sty == "i32" {
+                    let _ = writeln!(body, "  ret i32 {}", r);
+                } else {
+                    let e = format!("%u{next_global_temp}");
+                    let op = if sty == "i128" || sty == "i64" {
+                        "trunc"
+                    } else {
+                        "sext"
+                    };
+                    let _ = writeln!(body, "  {} = {} {} {} to i32", e, op, sty, r);
+                    let _ = writeln!(body, "  ret i32 {}", e);
+                }
+            }
+            TyKind::Bool => {
+                let r = format!("%u{next_global_temp}");
+                next_global_temp += 1;
+                let _ = writeln!(body, "  {} = call i1 {}()", r, fun_name(lc, fun.def));
+                let e = format!("%u{next_global_temp}");
+                let _ = writeln!(body, "  {} = zext i1 {} to i32", e, r);
+                let _ = writeln!(body, "  ret i32 {}", e);
+            }
+            _ => {
+                let _ = writeln!(body, "  call {} {}()", ret, fun_name(lc, fun.def));
+                let _ = writeln!(body, "  ret i32 0");
+            }
+        }
         let _ = writeln!(body, "}}");
         let _ = writeln!(body);
         return;

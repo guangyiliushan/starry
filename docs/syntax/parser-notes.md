@@ -128,6 +128,44 @@ returns the close-brace span (`Block` stores neither brace), and `parse_if`
 ends at that close brace for a then/else block instead of
 `block_tail_span` — an empty block used to collapse the if-expression span to
 `0..0` via `Span::default`.
+### Pointer types are prefix, `const`/`mut` are token-class split
+
+`PointerType := "*" [ "const" | "mut" ] PrimaryType` lives in
+`parse_atomic_type` (D-007 slice). The qualifier predicate must split by
+token class: `const` is a modifier word (lexically IDENT, matched by
+text) while `mut` is a hard keyword (`HardKeyword::Mut`) — a single
+text predicate misses the latter. Bare `*T` parses as const.
+The `?` suffix loop is duplicated from `parse_named_suffix` so `*T?`
+(nullable pointer, the FFI-common shape) reads as
+`Nullable(Pointer(T))`; `*(T?)` stays available through parens.
+
+### Prefix type constructors chain (`?` / `&` / `*const` / `*mut`)
+
+D-007 / M2 makes type constructors prefix and self-contained:
+`?T` nullable, `&T`/`&mut T` borrow, `*const T`/`*mut T` pointer parse in
+`parse_atomic_type` and recurse into `parse_atomic_type` under `try_with_depth`
+(each star/amp/question spends depth budget — deep chains would otherwise
+overflow). `const` is a modifier word (lexical IDENT, matched by text);
+`mut` is a hard keyword — the predicate must split by token class. Bare `*T`
+recovers as const after an ExpectedToken diagnostic. The atomic suffix
+sugar (`User?` = `?User`) lives only in `parse_named_suffix`; array/tuple
+types reject a trailing `?` with a hint pointing at the prefix form
+(`?[T; N]`, `?(T, U)`). `*const T?` reads as `*const (?T)` because the
+inner named type consumes the `?` — nullable pointer is only `?*const T`.
+
+### Block-tail `loop` normalizes to `LoopExpr`
+
+The same position gate applies to `loop`: a `LoopStatement` whose block
+ends right after it (`}` next, newlines aside) is rewritten in
+`parse_block_after_open` into `Tail(ExprKind::Loop)` — keeping the node id,
+so label/flow resolution (`LabelFrame.node`) is unchanged. A `loop` followed
+by more statements stays a statement (a break-with-value there discards its
+value, Rust discipline). This makes `fun f() : int { 'outer: loop { break
+'outer 42 } }` return 42 instead of silently dropping the value:
+`ExprKind::Loop` carries the label (parser-accepted only via this
+normalization; value-position `loop` remains unlabeled), and `resolve`
+pushes the label frame exactly like `StmtKind::Loop` does.
+
 ### `is` operands never take a struct tail
 
 An `is` operand is always followed by a mandatory statement block (`if e is

@@ -475,13 +475,39 @@ fn parse_top_level_inner(session: &mut ParseSession<'_>) -> Result<DeclNode, Par
             session.cursor.advance();
             let name = parse_identifier(session).0;
             let type_params = parse_type_params(session)?;
-            expect_punctuation(session, PunctuationKind::LBrace, '{');
-            let fields = parse_struct_fields(session)?;
-            expect_punctuation(session, PunctuationKind::RBrace, '}');
+            // M3 主构造：struct Point(val x: int, var y: int)；body 兼容
+            //（两者可共存）；头参数无 val/var = 仅构造参数。
+            let primary_ctor = if session
+                .cursor
+                .check(&TokenKind::Punctuation(PunctuationKind::LParen))
+            {
+                // parse_parameter_list 自吃左右括号
+                parse_parameter_list(session)?
+            } else {
+                Vec::new()
+            };
+            let fields = if session
+                .cursor
+                .check(&TokenKind::Punctuation(PunctuationKind::LBrace))
+            {
+                expect_punctuation(session, PunctuationKind::LBrace, '{');
+                let f = parse_struct_fields(session)?;
+                expect_punctuation(session, PunctuationKind::RBrace, '}');
+                f
+            } else {
+                Vec::new()
+            };
+            if primary_ctor.is_empty() && fields.is_empty() {
+                let span = session.cursor.peek().span;
+                session.emit_unique(DiagCode::ExpectedToken, span, || {
+                    "expected a primary constructor or a field body".to_string()
+                });
+            }
             DeclKind::Struct(StructDecl {
                 modifiers,
                 name,
                 type_params,
+                primary_ctor,
                 fields,
             })
         }),
@@ -900,12 +926,23 @@ fn parse_struct_fields(session: &mut ParseSession<'_>) -> Result<Vec<StructField
         {
             break;
         }
+        // M3：body 字段可带硬关键字 val/var（字段可变性三态）
+        let mutable = if session.cursor.check(&TokenKind::Keyword(HardKeyword::Val)) {
+            session.cursor.advance();
+            Some(false)
+        } else if session.cursor.check(&TokenKind::Keyword(HardKeyword::Var)) {
+            session.cursor.advance();
+            Some(true)
+        } else {
+            None
+        };
         let modifiers = parse_modifier_list(session)?;
         let name = parse_identifier(session).0;
         expect_punctuation(session, PunctuationKind::Colon, ':');
         let ty = parse_type(session)?;
         fields.push(StructField {
             modifiers,
+            mutable,
             name,
             ty,
         });

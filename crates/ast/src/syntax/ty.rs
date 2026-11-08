@@ -38,6 +38,18 @@ pub enum TypeParamName {
 
 #[derive(Debug, Clone)]
 pub enum TypeKind {
+    /// 借用引用（D-007 / M2）：&T 只读 / &mut T 独占可变（T1）。
+    /// v1 只有类型层：取址/解引表达式同 slice 排期。
+    Ref {
+        mutable: bool,
+        inner: Box<TypeWrap>,
+    },
+    /// 裸指针（D-007 / M2）：只允许 *const T / *mut T（bare *T 诊断，
+    /// 不再静默当 const）。当前只有类型+FFI 传参语义。
+    Pointer {
+        mutable: bool,
+        inner: Box<TypeWrap>,
+    },
     Union(Vec<TypeWrap>),
     Named {
         path: Path,

@@ -397,11 +397,12 @@ fn duplicate_parameter_reports() {
 }
 
 #[test]
-fn generic_fun_reports_single_diagnostic() {
+fn generic_fun_decl_without_instantiation_is_clean() {
+    // M7：泛型 fun 声明本身不再拒收；原件不检查（无 bounds 可依），
+    // 检查发生在实例化克隆上——未实例化 = 无诊断（限制见 semantic-notes）
     let parsed = parser::parse_source("fun id<T>(v: T) : T {\n    return v\n}").unwrap();
     let out = analyze(parsed);
-    assert_eq!(out.diagnostics.len(), 1, "{:?}", out.diagnostics);
-    assert_eq!(out.diagnostics[0].code, DiagCode::SemUnsupportedConstruct);
+    assert_eq!(out.diagnostics.len(), 0, "{:?}", out.diagnostics);
 }
 
 // ---- 序比较限定 ----
@@ -704,7 +705,7 @@ fn tuple_subscript_requires_constant_in_bounds_index() {
     );
     assert_clean(
         "fun f() : int {
-    val t = (1, 2)
+    var t = (1, 2)
     t[1] = 9
     return t[1]
 }",
@@ -874,4 +875,474 @@ fn self_reports_dedicated_diagnostic() {
 fn class_use_site_stays_silent() {
     let src = "class C {\n}\nfun main() {\n    C()\n}";
     assert_eq!(codes(src), vec![DiagCode::SemUnsupportedConstruct]);
+}
+
+// ---- 2026-11 审查修复回归 ----
+
+#[test]
+fn default_argument_types_are_checked_and_bound() {
+    assert_clean("fun f(x: int = 1) : int = x\nfun main() { print(f()) }");
+    assert_clean("fun g() : int = 7\nfun f(x: int = g()) : int = x\nfun main() { print(f()) }");
+    assert_has(
+        "fun f(x: int = \"oops\") : int = x",
+        DiagCode::SemTypeMismatch,
+    );
+    // 默认值引用未定义名：resolve 期进入默认表达式后必须报错
+    assert_has(
+        "fun f(x: int = nosuch) : int = x",
+        DiagCode::SemUndefinedName,
+    );
+    // 默认值不能引用形参（v1 无调用点绑定语义）
+    assert_has(
+        "fun f(y: int = 1, x: int = y) : int = x",
+        DiagCode::SemUndefinedName,
+    );
+}
+
+#[test]
+fn if_val_constructor_and_for_tuple_bindings() {
+    assert_clean(
+        "enum Opt { None, Some(int) }\n\
+         fun unwrap(o: Opt) : int {\n\
+             if val Some(v) = o { return v }\n\
+             return 0\n\
+         }\n",
+    );
+    assert_clean(
+        "fun main() {\n\
+             val ps: [(int, int); 2] = [(1, 2), (3, 4)]\n\
+             for (a, b) in ps { print(a + b) }\n\
+         }",
+    );
+}
+
+#[test]
+fn immutable_aggregate_members_are_not_assignable() {
+    assert_has(
+        "struct P { x: int }\n\
+         fun main() {\n\
+             val p = P(1)\n\
+             p.x = 2\n\
+         }",
+        DiagCode::SemAssignToVal,
+    );
+    assert_clean(
+        "struct P { x: int }\n\
+         fun main() {\n\
+             var p = P(1)\n\
+             p.x = 2\n\
+         }",
+    );
+}
+
+#[test]
+fn recursive_types_are_rejected() {
+    assert_has("struct N { next: N }", DiagCode::SemTypeCycle);
+    assert_has(
+        "struct A { b: B }\nstruct B { a: A }",
+        DiagCode::SemTypeCycle,
+    );
+    // 非递归的相互可见结构必须是干净的
+    assert_clean("struct A { x: int }\nstruct B { a: A }");
+}
+
+#[test]
+fn large_integer_literals_widen_instead_of_wrapping() {
+    // 字面量按值取最小可容纳类型：i32 → i64 → i128
+    assert_clean("fun main() { print(3000000000) }");
+}
+
+#[test]
+fn extern_c_i128_scalar_abi_reports() {
+    // i128 标量跨 C ABI 在本目标上与 IR i128 传参不一致：extern 声明点拒收
+    assert_has(
+        "extern \"c\" fun big(x: i128) : i128",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    assert_has(
+        "extern \"c\" fun wide() : i128",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // 别名经 lower 归一为 Int(I128)，同样命中
+    assert_has(
+        "type Big = i128\nextern \"c\" fun f(x: Big) : int",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // i64 形参与含 i128 成员的聚合（按指针传递）不受影响
+    assert_clean("extern \"c\" fun ok(x: i64) : i64");
+    assert_clean("struct W {\n    v: i128\n}\nextern \"c\" fun agg(w: W) : int");
+}
+
+#[test]
+fn deep_type_chain_does_not_overflow() {
+    // 回归：递归类型检测原为递归 DFS，数万级字段链在 2 MiB 测试线程
+    // 栈上爆栈；显式栈迭代应稳过（无环 → 零诊断）
+    let n = 20_000;
+    let mut src = String::new();
+    for i in 0..n {
+        if i + 1 < n {
+            src.push_str(&format!("struct S{i} {{\n    next: S{}\n}}\n", i + 1));
+        } else {
+            src.push_str(&format!("struct S{i} {{\n    next: int\n}}\n"));
+        }
+    }
+    let parsed = parser::parse_source(&src).expect("machine parse");
+    let out = analyze(parsed);
+    assert_eq!(out.diagnostics.len(), 0, "{:?}", out.diagnostics.first());
+}
+#[test]
+fn block_tail_loop_statement_yields_its_break_value() {
+    // 审查 P0-4 run-pass 抓出的 miscompile：`loop { break 7 }` 曾是
+    // LoopStatement（块无尾式），带值 break 被静默丢弃、函数落到
+    // unreachable。现块尾 Loop 归一为 LoopExpr（parser-notes），值即
+    // 块的值；裸 break 的 loop 在值位置按 unit 处理（Rust 同纪律）。
+    assert_clean(
+        "fun pick() : int {
+    loop {
+        break 7
+    }
+}",
+    );
+    assert_clean(
+        "fun find() : int {
+    'outer: loop {
+        break 'outer 42
+    }
+}",
+    );
+    assert_clean(
+        "fun main() {
+    loop {
+        break
+    }
+}",
+    );
+    // 混用（部分带值）仍是类型错误
+    assert_has(
+        "fun f(c: bool) : int {
+    loop {
+        if c {
+            break
+        }
+        break 1
+    }
+}",
+        DiagCode::SemTypeMismatch,
+    );
+}
+#[test]
+fn integer_literal_typing_boundary_table() {
+    // M1 数字语义：未约束整数字面量默认 i64；约束上下文（标注/形参/
+    // 返回）按目标宽度定型，值域按目标宽度诊断（IntegerOutOfRange）。
+    let i32_max = i32::MAX as i64;
+    let i64_max = i64::MAX;
+    // 未约束 → i64（= int）：边界值干净
+    assert_clean(&format!("fun f() : int {{ return {i32_max} }}"));
+    assert_clean(&format!("fun f() : int {{ return {i64_max} }}"));
+    // 超 i64 → i128（需 i128 返回型才接得住）
+    assert_clean(&format!(
+        "fun f() : i128 {{ return {} }}",
+        i64_max as i128 + 1
+    ));
+    // 超 i128 拒收
+    assert_has(
+        "fun f() : int {\n    return 170141183460469231731687303715884105728\n}",
+        DiagCode::IntegerOutOfRange,
+    );
+    // 上下文定型：标注/形参/返回把字面量钉到目标宽度
+    assert_clean("fun f() : int {\n    val x: i32 = 1\n    return x\n}");
+    assert_clean("fun g(x: i32) : int {\n    return x\n}\nfun f() : int {\n    return g(1)\n}");
+    assert_clean("fun f() : i32 {\n    return 5\n}");
+    // 值域按目标宽度诊断
+    assert_has(
+        "fun f() : int {\n    val x: i32 = 3000000000\n    return x\n}",
+        DiagCode::IntegerOutOfRange,
+    );
+    assert_has(
+        "fun f() : i32 {\n    return 2147483648\n}",
+        DiagCode::IntegerOutOfRange,
+    );
+    // radix/下划线同样按值定型
+    assert_clean("fun f() : int {\n    return 0x1_FFFF_FFFF\n}"); // 2^33-1 默认 i64
+    assert_clean("fun f() {\n    val x: i32 = 0b1111111111111111111111111111111\n}"); // 31 个 1，上下文 i32 容纳
+    assert_has(
+        "fun f() {\n    val x: i32 = 0b1_1111_1111_1111_1111_1111_1111_1111_1111\n}",
+        DiagCode::IntegerOutOfRange, // 2^32-1 超 i32 目标宽度
+    );
+}
+
+#[test]
+fn pointer_types_parse_and_type_in_annotations() {
+    // D-007 / M2 类型语法层：前缀构造子链（? *const *mut & &mut）；
+    // bare *T 诊断；复合后缀 ? 拒绝并提示前缀形态。
+    // 引用/指针只做类型+FFI（取址/解引表达式在下一 slice）
+    assert_clean("fun f(p: *const int) : int {\n    return 0\n}");
+    assert_clean("fun f(p: *mut int) : int {\n    return 0\n}");
+    // 可空指针 = 前缀 ?*const T（D-007：?*const T = ?( *const T)）
+    assert_clean("fun f(p: ?*const int) : int {\n    return 0\n}");
+    // 指向可空的指针：*const ?int 与 *const int? 同一 AST（? 归内层原子糖）
+    assert_clean("fun f(p: *const ?int) : int {\n    return 0\n}");
+    assert_clean("fun f(p: *const int?) : int {\n    return 0\n}");
+    // 借用类型（T1）：&T / &mut T / ?&T / &?T
+    assert_clean("fun f(p: &int) : int {\n    return 0\n}");
+    assert_clean("fun f(p: &mut int) : int {\n    return 0\n}");
+    assert_clean("fun f(p: ?&int) : int {\n    return 0\n}");
+    // bare *T 诊断（只允许 *const / *mut）
+    assert_has(
+        "fun f(p: *int) : int {\n    return 0\n}",
+        DiagCode::ExpectedToken,
+    );
+    // 复合类型后缀 ? 拒绝 + 前缀提示
+    assert_has(
+        "fun f(p: [int; 2]?) : int {\n    return 0\n}",
+        DiagCode::UnexpectedToken,
+    );
+    assert_has(
+        "fun f(p: (int, int)?) : int {\n    return 0\n}",
+        DiagCode::UnexpectedToken,
+    );
+    // null 可提升入裸指针；引用非空（null 不可指派）
+    assert_clean("fun f() : *const int {\n    return null\n}");
+    assert_has(
+        "fun f() : &int {\n    return null\n}",
+        DiagCode::SemTypeMismatch,
+    );
+    // mutability 参与格：*const ≠ *mut、& ≠ &mut（v1 不做协变放宽）
+    assert_has(
+        "fun g(p: *mut int) : *const int {\n    return p\n}",
+        DiagCode::SemTypeMismatch,
+    );
+    assert_has(
+        "fun g(p: &mut int) : &int {\n    return p\n}",
+        DiagCode::SemTypeMismatch,
+    );
+    assert_clean("extern \"c\" fun c_log(p: *const int, n: int) : int");
+}
+#[test]
+fn borrow_and_deref_expressions_type_and_diagnose() {
+    // M2 slice 2：&x / &mut x / *p 表达式 + T1 保守借用规则
+    assert_clean("fun f() : int {\n    var x = 1\n    val p = &x\n    return *p\n}");
+    assert_clean("fun f() : int {\n    var x = 1\n    val p = &mut x\n    *p = 2\n    return x\n}");
+    // 借用的格：&mut 不可当 & 用
+    assert_has(
+        "fun g(p: &mut int) : int {\n    return 0\n}\nfun f() : int {\n    var x = 1\n    return g(&x)\n}",
+        DiagCode::SemTypeMismatch,
+    );
+    // 借用目标限局部名：复合表达式目标 v1 拒绝
+    assert_has(
+        "fun f() : int {\n    var x = 1\n    val p = &(x + 1)\n    return 0\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // 顶层全局借用 = 逃逸，v1 拒绝
+    assert_has(
+        "val G: int = 1\nfun f() : int {\n    val p = &G\n    return *p\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // &mut 不可变绑定拒绝
+    assert_has(
+        "fun f() : int {\n    val x = 1\n    val p = &mut x\n    return 0\n}",
+        DiagCode::SemAssignToVal,
+    );
+    // 解引非指针/引用
+    assert_has(
+        "fun f() : int {\n    val x = 1\n    return *x\n}",
+        DiagCode::SemTypeMismatch,
+    );
+    // 经不可变引用/指针赋值拒绝
+    assert_has(
+        "fun f() : int {\n    var x = 1\n    val p = &x\n    *p = 2\n    return x\n}",
+        DiagCode::SemAssignToVal,
+    );
+    // 非逃逸：struct 引用字段 / 返回引用，v1 拒绝
+    assert_has(
+        "struct S {\n    r: &int\n}\nfun f() : int {\n    return 0\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    assert_has(
+        "fun f(x: &int) : &int {\n    return x\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+#[test]
+fn primary_constructor_and_field_mutability() {
+    // M3：struct 主构造（val/var 参数声明字段，无修饰符参数仅构造期）
+    // + 字段可变性三态（Some(true)/Some(false)/None=legacy）
+    assert_clean(
+        "struct Point(val x: int, var y: int)\nfun f() : int {\n    val p = Point(1, 2)\n    p.y = 9\n    return p.x + p.y\n}",
+    );
+    // val 字段恒不可写（哪怕 var 根绑定）
+    assert_has(
+        "struct Point(val x: int, var y: int)\nfun f() : int {\n    var p = Point(1, 2)\n    p.x = 5\n    return 0\n}",
+        DiagCode::SemAssignToVal,
+    );
+    // var 字段可写——val 根绑定也拦不住（深度可变性，Swift 模型）
+    assert_clean(
+        "struct Point(val x: int, var y: int)\nfun f() : int {\n    val p = Point(1, 2)\n    p.y = 9\n    return p.y\n}",
+    );
+    // legacy 无修饰符字段：按根绑定（兼容旧语义）
+    assert_clean(
+        "struct P {\n    x: int\n}\nfun f() : int {\n    var p = P(1)\n    p.x = 50\n    return p.x\n}",
+    );
+    assert_has(
+        "struct P {\n    x: int\n}\nfun f() : int {\n    val p = P(1)\n    p.x = 50\n    return 0\n}",
+        DiagCode::SemAssignToVal,
+    );
+    // body 显式 var 字段：val 根绑定可写
+    assert_clean(
+        "struct P {\n    var x: int\n}\nfun f() : int {\n    val p = P(1)\n    p.x = 50\n    return p.x\n}",
+    );
+    // 命名/默认/仅构造参数
+    assert_clean("struct R(val x: int = 5)\nfun f() : int {\n    return R().x\n}");
+    assert_clean("struct C(val x: int, noisy: int)\nfun f() : int {\n    return C(1, 2).x\n}");
+    // 头字段与 body 字段重名 → 重复定义
+    assert_has(
+        "struct P(val x: int) {\n    x: int\n}\nfun f() : int {\n    return 0\n}",
+        DiagCode::SemDuplicateDef,
+    );
+    // 默认值类型不符
+    assert_has(
+        "struct R(val x: int = \"s\")\nfun f() : int {\n    return R().x\n}",
+        DiagCode::SemTypeMismatch,
+    );
+}
+
+// ---- M6：extern "c" 调用的 unsafe 边界 ----
+
+#[test]
+fn extern_calls_require_unsafe_context() {
+    // FFI 永远 unchecked：unsafe 块外调用 extern 报错
+    assert_has(
+        "extern \"c\" fun c_log(p: *const int) : int\nfun f() : int {\n    return c_log(null)\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // unsafe 块内允许
+    assert_clean(
+        "extern \"c\" fun c_log(p: *const int) : int\nfun f() : int {\n    return unsafe { c_log(null) }\n}",
+    );
+    // unsafe 内的嵌套普通块继承许可（深度计数贯穿块嵌套）
+    assert_clean(
+        "extern \"c\" fun c_log(p: *const int) : int\nfun f() : int {\n    return unsafe {\n        val x = 1\n        c_log(null)\n    }\n}",
+    );
+    // 离开 unsafe 后深度归零，再调用仍报错
+    assert_has(
+        "extern \"c\" fun c_log(p: *const int) : int\nfun f() : int {\n    val a = unsafe { 1 }\n    return c_log(null)\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // 纯声明不调用 → 无诊断
+    assert_clean("extern \"c\" fun c_log(p: *const int) : int\nfun f() : int {\n    return 0\n}");
+}
+
+// ---- M7：泛型单态化 ----
+
+#[test]
+fn generic_fun_instantiation_types_and_repeats() {
+    // 同一泛型多个实例化：id<int> / id<f64> 各自克隆检查，互不串味
+    assert_clean(
+        "fun id<T>(v: T) : T {\n    return v\n}\nfun main() : int {\n    val a = id<int>(1)\n    val b = id<f64>(1.5)\n    return a\n}",
+    );
+    // 实例化实参类型不符：代入后形参是 int，string 拒
+    assert_has(
+        "fun id<T>(v: T) : T {\n    return v\n}\nfun main() : int {\n    return id<int>(\"s\")\n}",
+        DiagCode::SemTypeMismatch,
+    );
+    // 体内错误在实例化点报告（原件不检查）
+    assert_has(
+        "fun bad<T>(v: T) : int {\n    return v + \"s\"\n}\nfun main() : int {\n    return bad<int>(1)\n}",
+        DiagCode::SemTypeMismatch,
+    );
+}
+
+#[test]
+fn generic_fun_type_args_are_required_and_counted() {
+    // 缺类型实参：v1 不做推断，显式必需
+    assert_has(
+        "fun id<T>(v: T) : T {\n    return v\n}\nfun main() : int {\n    return id(1)\n}",
+        DiagCode::SemTypeArgMismatch,
+    );
+    // 个数不符
+    assert_has(
+        "fun id<T>(v: T) : T {\n    return v\n}\nfun main() : int {\n    return id<int, int>(1)\n}",
+        DiagCode::SemTypeArgMismatch,
+    );
+    // 非泛型函数携带类型实参
+    assert_has(
+        "fun f(v: int) : int {\n    return v\n}\nfun main() : int {\n    return f<int>(1)\n}",
+        DiagCode::SemTypeArgMismatch,
+    );
+}
+
+#[test]
+fn generic_fun_recursion_via_explicit_args_is_bounded() {
+    // 自递归 f<T>(x) 命中已注册实例 → 有界；同时覆盖嵌套调用链
+    assert_clean(
+        "fun f<T>(v: T) : T {\n    return f<T>(v)\n}\nfun main() : int {\n    return f<int>(1)\n}",
+    );
+}
+
+#[test]
+fn generic_struct_construction_fields_and_mutability() {
+    assert_clean(
+        "struct Box<T> {\n    v: T\n}\nfun main() : int {\n    val b = Box<int>(1)\n    return b.v\n}",
+    );
+    // 标注 + 构造一致（同一 spec def）
+    assert_clean(
+        "struct Box<T> {\n    v: T\n}\nfun main() : int {\n    val b: Box<int> = Box<int>(2)\n    return b.v\n}",
+    );
+    // 元素类型不同 = 不同类型：Box<int> 不能赋给 Box<f64>
+    assert_has(
+        "struct Box<T> {\n    v: T\n}\nfun main() : int {\n    val b: Box<f64> = Box<int>(2)\n    return 0\n}",
+        DiagCode::SemTypeMismatch,
+    );
+    // 类型实参个数不符
+    assert_has(
+        "struct Box<T> {\n    v: T\n}\nfun main() : int {\n    val b = Box<int, int>(2)\n    return 0\n}",
+        DiagCode::SemTypeArgMismatch,
+    );
+    // M3 可变性三态随 spec 字段走：显式 val 字段恒拒
+    assert_has(
+        "struct B<T>(val v: T)\nfun main() : int {\n    var b = B<int>(1)\n    b.v = 2\n    return 0\n}",
+        DiagCode::SemAssignToVal,
+    );
+}
+
+#[test]
+fn generic_struct_nested_and_generic_fun_mixed() {
+    // A<T> 的字段引用 B<T>：实例化 A<int> 须把 B<int> 也落成 spec def
+    assert_clean(
+        "struct B<T> {\n    v: T\n}\nstruct A<T> {\n    b: B<T>\n}\nfun main() : int {\n    val a = A<int>(B<int>(7))\n    return a.b.v\n}",
+    );
+    // 泛型 fun 形参引用泛型 struct：调用点代入后构造核查
+    assert_clean(
+        "struct Box<T> {\n    v: T\n}\nfun unwrap<T>(b: Box<T>) : T {\n    return b.v\n}\nfun main() : int {\n    return unwrap<int>(Box<int>(3))\n}",
+    );
+}
+
+#[test]
+fn generic_rejections_are_stable() {
+    // 泛型 main：入口无法实例化
+    assert_has(
+        "fun main<T>() : int {\n    return 0\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // 类型形参 bounds（trait bounds 是 M9 地基）
+    assert_has(
+        "fun f<T : Equatable>(v: T) : int {\n    return 0\n}\nfun main() : int {\n    return f<int>(1)\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // 泛型 enum
+    assert_has(
+        "enum E<T> {\n    A\n}\nfun main() : int {\n    return 0\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // 泛型 struct 主构造默认值
+    assert_has(
+        "struct R<T>(val v: T = 1)\nfun main() : int {\n    return 0\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // 泛型 struct 模式（struct 模式只在 val 绑定位置可解析：`is` 后
+    // 的 { 归 then 块——parser 消歧纪律；这里走 refine 的 Struct 臂拒收）
+    assert_has(
+        "struct Box<T> {\n    v: T\n}\nfun main() : int {\n    val b = Box<int>(1)\n    val Box { v } = b\n    return v\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
 }

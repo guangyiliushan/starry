@@ -41,7 +41,7 @@ pub fn scalar_slots(v: &impl LayoutView, ty: TyId) -> usize {
         TyKind::Unit | TyKind::Null => 0,
         TyKind::Array(elem, len) => scalar_slots(v, *elem) * *len as usize,
         TyKind::Tuple(elems) => elems.iter().map(|e| scalar_slots(v, *e)).sum(),
-        TyKind::Range(inner) => scalar_slots(v, *inner) * 2,
+        TyKind::Range(inner) => scalar_slots(v, *inner) * 2 + 1,
         TyKind::Nullable(inner) => 1 + scalar_slots(v, *inner),
         TyKind::Named(def, _) => match v.defs().get(*def).kind {
             DefKind::Struct | DefKind::Class => v
@@ -95,7 +95,11 @@ pub fn slot_ty(v: &impl LayoutView, ty: TyId, slot: usize) -> TyId {
         }
         TyKind::Range(inner) => {
             let n = scalar_slots(v, *inner).max(1);
-            slot_ty(v, *inner, slot % n)
+            if slot >= 2 * n {
+                v.i8_ty()
+            } else {
+                slot_ty(v, *inner, slot % n)
+            }
         }
         TyKind::Nullable(inner) => {
             if slot == 0 {

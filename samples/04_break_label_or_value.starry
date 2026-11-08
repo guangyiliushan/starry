@@ -11,3 +11,8 @@ fun pick(flag: bool) : int {
         break 7
     }
 }
+
+fun main() {
+    print(find(0))
+    print(pick(true))
+}

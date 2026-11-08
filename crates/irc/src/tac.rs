@@ -70,11 +70,13 @@ pub enum UnOp {
     Conv(TyId),
 }
 
-/// 调用目标：用户函数（sem 解析的 DefId）或运行时入口（llvme 侧 extern
-/// declare；std-only 红线下运行时以符号存在，不进 crate）
+/// 调用目标：用户函数（sem 解析的 DefId）、外部符号（extern "c" 声明）
+/// 或运行时入口（llvme 侧 extern declare；std-only 红线下运行时以符号
+/// 存在，不进 crate）
 #[derive(Debug, Clone, Copy)]
 pub enum Callee {
     Def(DefId),
+    Extern(DefId),
     Runtime(RuntimeFn),
 }
 
@@ -84,10 +86,16 @@ pub enum Callee {
 pub enum RuntimeFn {
     /// 标量 → string（源类型由前置 Param 指令的 ty 携带）
     StrConv,
+    /// char → string（按字符编码，而非码点整数）
+    StrConvChar,
     /// (string, string) → string
     StrConcat,
+    /// (string, string) → bool（内容比较；`==`/`!=` 与字符串模式共用）
+    StrEq,
     /// print(标量)：源类型由前置 Param 指令的 ty 携带，返回 unit
     Print,
+    /// print(char)：按字符编码写出
+    PrintChar,
 }
 
 /// 三地址指令（终止符除外）
@@ -133,6 +141,24 @@ pub enum Instr {
     /// 顶层全局标量写入：`@global = src`
     StoreGlobal {
         global: DefId,
+        src: Operand,
+        ty: TyId,
+    },
+    /// M2 取址：`dst = &base`（base 槽的地址；llvme 发 alloca 地址）
+    AddrOf {
+        dst: TempId,
+        base: TempId,
+        ty: TyId,
+    },
+    /// M2 经指针读：`dst = *ptr`（ptr 槽里存的是地址）
+    LoadPtr {
+        dst: TempId,
+        ptr: TempId,
+        ty: TyId,
+    },
+    /// M2 经指针写：`*ptr = src`
+    StorePtr {
+        ptr: TempId,
         src: Operand,
         ty: TyId,
     },
@@ -421,6 +447,17 @@ impl TacOutput {
                     ty_display(tys, defs, interner, *ty)
                 );
             }
+            Instr::AddrOf { dst, base, .. } => {
+                let _ = writeln!(out, "%t{} = addrof %t{}", dst.0, base.0);
+            }
+            Instr::LoadPtr { dst, ptr, .. } => {
+                let _ = writeln!(out, "%t{} = loadptr %t{}", dst.0, ptr.0);
+            }
+            Instr::StorePtr { ptr, src, .. } => {
+                let _ = write!(out, "storeptr %t{} = ", ptr.0);
+                op_text(src, interner, out);
+                let _ = writeln!(out);
+            }
             Instr::Slot { dst, count } => {
                 let _ = write!(out, "%t{} = slot [{}]", dst.0, count);
             }
@@ -435,9 +472,15 @@ impl TacOutput {
                 }
                 let name = match callee {
                     Callee::Def(d) => interner.resolve(defs.get(*d).name).to_string(),
+                    Callee::Extern(d) => {
+                        format!("extern {}", interner.resolve(defs.get(*d).name))
+                    }
                     Callee::Runtime(RuntimeFn::StrConv) => "starry_str_conv".to_string(),
+                    Callee::Runtime(RuntimeFn::StrConvChar) => "starry_str_conv_char".to_string(),
                     Callee::Runtime(RuntimeFn::StrConcat) => "starry_str_concat".to_string(),
+                    Callee::Runtime(RuntimeFn::StrEq) => "starry_str_eq".to_string(),
                     Callee::Runtime(RuntimeFn::Print) => "starry_print".to_string(),
+                    Callee::Runtime(RuntimeFn::PrintChar) => "starry_print_char".to_string(),
                 };
                 let _ = write!(
                     out,

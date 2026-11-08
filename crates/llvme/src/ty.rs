@@ -1,10 +1,11 @@
 //! LLVM 类型映射。
 //!
-//! 槽模型的关键简化（2026-10-27 llvme 落地时钉死）：**一切聚合值的
-//! LLVM 类型都是 `[n x i64]`**（n = scalar_slots）。tag/flag 是槽 0
-//! 里的 i8（写时就地 bitcast），payload 自槽 1——记录型与和型的槽
-//! 寻址由此完全统一（slot i = gep [n x i64], p, 0, i），无命名类型
-//! 定义，结构等价的类型在 LLVM 侧天然可互换。
+//! 槽模型的关键简化（2026-10-27 llvme 落地时钉死）：**聚合值的
+//! LLVM 类型是 `[n x i64]`；只有含 i128 成员的聚合才加宽为
+//! `[n x i128]`**（n = scalar_slots）。tag/flag 是槽 0 里的 i8（写时
+//! 就地 `store i8`），payload 自槽 1——记录型与和型的槽寻址由此完全
+//! 统一（slot i = gep [n x E], p, 0, i），无命名类型定义，结构等价的
+//! 类型在 LLVM 侧天然可互换。
 
 use ast::interner::Interner;
 use irc::layout::LayoutView;
@@ -45,6 +46,9 @@ pub fn scalar_ty(tys: &TyArena, ty: TyId) -> String {
         TyKind::Bool => "i1".into(),
         TyKind::Char => "i32".into(),
         TyKind::String => "i8*".into(),
+        // 引用/裸指针值 = 地址；不透明指针风格（LLVM 15+）
+        TyKind::Ref { .. } => "ptr".into(),
+        TyKind::Pointer { .. } => "ptr".into(),
         TyKind::Unit => "void".into(),
         TyKind::Null => "i64".into(),
         // 聚合出现在标量位 = 契约破缺（irc 已门禁），兜底 i64
@@ -67,7 +71,9 @@ pub fn class_of(tys: &TyArena, ty: TyId) -> TyClass {
         | TyKind::Char
         | TyKind::String
         | TyKind::Unit
-        | TyKind::Null => TyClass::Scalar,
+        | TyKind::Null
+        | TyKind::Ref { .. }
+        | TyKind::Pointer { .. } => TyClass::Scalar,
         _ => TyClass::Agg,
     }
 }

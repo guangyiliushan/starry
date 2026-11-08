@@ -103,7 +103,8 @@ fn struct_slots_and_field_load() {
 #[test]
 fn scalar_copy_dynamic_index_and_conv_are_typed() {
     let (text, codes) = emit(
-        "fun f(i: i32): int {\n    val a = [10, 20, 30]\n    val j = i\n    return a[j] as int\n}",
+        // M1 后数组字面量默认 i64——本测的 sext 意图用 as i32 钉元素宽度
+        "fun f(i: i32): int {\n    val a = [10 as i32, 20 as i32, 30 as i32]\n    val j = i\n    return a[j] as int\n}",
     );
     assert_eq!(codes, Vec::new(), "{codes:?}");
     if !llvm_as_ok(&text) {
@@ -197,8 +198,9 @@ fn print_runtime_declares_and_calls_void() {
         panic!("LLVM validator rejected:\n{text}");
     }
     assert!(
-        text.contains("declare void @starry_print_i32(i32)")
-            && text.contains("call void @starry_print_i32"),
+        // M1：42 未约束 → i64
+        text.contains("declare void @starry_print_i64(i64)")
+            && text.contains("call void @starry_print_i64"),
         "{text}"
     );
 }
@@ -336,7 +338,7 @@ fun f(): int {
 fn tuple_subscript_emits_valid_ir() {
     let (text, codes) = emit(
         "fun f(): int {
-    val t = (1, 2)
+    var t = (1, 2)
     t[1] = 9
     return t[1]
 }",
@@ -367,7 +369,8 @@ fn loop_expression_break_value_emits_valid_ir() {
         panic!("LLVM validator rejected:\n{text}");
     }
     assert!(
-        text.contains("store i32 1") && text.contains("store i32 2"),
+        // M1：break 字面量默认 i64
+        text.contains("store i64 1") && text.contains("store i64 2"),
         "{text}"
     );
 }
@@ -399,4 +402,47 @@ fn float_constants_use_llvm_bit_pattern() {
         panic!("LLVM validator rejected:\n{text}");
     }
     assert!(text.contains("0x400A000000000000"), "{text}");
+}
+
+#[test]
+fn wide_slots_only_for_types_containing_i128() {
+    let (text, codes) = emit("fun f(x: i128) : i128 {\n    return x + 1\n}");
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    if !llvm_as_ok(&text) {
+        panic!("LLVM validator rejected:\n{text}");
+    }
+    assert!(text.contains("%t0.slot = alloca i128"), "{text}");
+
+    let (wide, codes) =
+        emit("struct W { a: i128, b: int }\nfun g(w: W) : int {\n    return w.b\n}");
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    if !llvm_as_ok(&wide) {
+        panic!("LLVM validator rejected:\n{wide}");
+    }
+    assert!(wide.contains("getelementptr [2 x i128]"), "{wide}");
+
+    let (narrow, codes) =
+        emit("struct N { a: int, b: int }\nfun h(n: N) : int {\n    return n.b\n}");
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    if !llvm_as_ok(&narrow) {
+        panic!("LLVM validator rejected:\n{narrow}");
+    }
+    assert!(narrow.contains("getelementptr [2 x i64]"), "{narrow}");
+    assert!(!narrow.contains("x i128"), "{narrow}");
+}
+#[test]
+fn extern_pointer_params_emit_ptr_signature() {
+    // D-007 slice：裸指针类型在 extern 声明的 LLVM 签名是 ptr（不透明指针）
+    // declare 在调用点发射：程序必须真的调用 extern
+    let (text, codes) = emit(
+        "extern \"c\" fun c_log(p: *const int, q: *mut int) : int\nfun f() : int {\n    return unsafe { c_log(null, null) }\n}",
+    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    if !llvm_as_ok(&text) {
+        panic!("LLVM validator rejected:\n{text}");
+    }
+    assert!(
+        text.contains("declare i64 @c_log(ptr, ptr)"), // : int = i64
+        "pointer extern signature missing:\n{text}"
+    );
 }

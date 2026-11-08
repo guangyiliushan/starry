@@ -37,6 +37,18 @@ pub enum TyKind {
     String,
     Unit,
     Null,
+    /// 借用引用（D-007 / M2）：&T / &mut T（T1）。非空（null 不可提升），
+    /// 可空形式是 ?&T。v1 只有类型层。
+    Ref {
+        mutable: bool,
+        inner: TyId,
+    },
+    /// 裸指针（D-007 / M2）：*const T / *mut T（T2）。1 槽，槽值 = 地址
+    ///（null = 0）。只有类型+FFI 传参语义；取址/解引表达式未排期。
+    Pointer {
+        mutable: bool,
+        inner: TyId,
+    },
     /// 命名类型（泛型实参已代入）；DefId 指向 struct/enum/class/alias/builtin
     Named(DefId, Vec<TyId>),
     Nullable(TyId),
@@ -44,6 +56,10 @@ pub enum TyKind {
     Tuple(Vec<TyId>),
     Range(TyId),
     Fn(Vec<TyId>, TyId),
+    /// 类型形参（M7 泛型）：泛型 def 签名 eager lower 的占位；
+    /// 调用点经 subst 代入具体类型。只在泛型原件签名与未检查体里出现，
+    /// 实例化产物（克隆/spec def）永远是具体类型。
+    Param(u32),
     /// 类型对象（类型名在值位置出现）：仅允许作构造器 callee，
     /// 其余使用点一律诊断（见 semantic-notes「类型名与值分立」）
     TypeObject(DefId),
@@ -145,6 +161,47 @@ impl TyArena {
         self.intern(TyKind::Nullable(inner))
     }
 
+    /// M7 泛型代入：把 `ty` 里的 Param(i) 替换为 `args[i]`（结构递归，
+    /// 经 intern 去重回池）。索引越界保留 Param（防御，不 panic）。
+    pub fn subst(&mut self, ty: TyId, args: &[TyId]) -> TyId {
+        match self.kind(ty).clone() {
+            TyKind::Param(i) => args.get(i as usize).copied().unwrap_or(ty),
+            TyKind::Ref { mutable, inner } => {
+                let i = self.subst(inner, args);
+                self.intern(TyKind::Ref { mutable, inner: i })
+            }
+            TyKind::Pointer { mutable, inner } => {
+                let i = self.subst(inner, args);
+                self.intern(TyKind::Pointer { mutable, inner: i })
+            }
+            TyKind::Named(def, targs) => {
+                let ts = targs.iter().map(|t| self.subst(*t, args)).collect();
+                self.intern(TyKind::Named(def, ts))
+            }
+            TyKind::Nullable(inner) => {
+                let i = self.subst(inner, args);
+                self.nullable(i)
+            }
+            TyKind::Array(elem, len) => {
+                let e = self.subst(elem, args);
+                self.intern(TyKind::Array(e, len))
+            }
+            TyKind::Tuple(elems) => {
+                let ts = elems.iter().map(|t| self.subst(*t, args)).collect();
+                self.intern(TyKind::Tuple(ts))
+            }
+            TyKind::Range(inner) => {
+                let i = self.subst(inner, args);
+                self.intern(TyKind::Range(i))
+            }
+            TyKind::Fn(ps, ret) => {
+                let params = ps.iter().map(|t| self.subst(*t, args)).collect();
+                let r = self.subst(ret, args);
+                self.intern(TyKind::Fn(params, r))
+            }
+            _ => ty,
+        }
+    }
     pub fn is_error(&self, id: TyId) -> bool {
         matches!(self.kind(id), TyKind::Error)
     }
@@ -193,6 +250,30 @@ impl TyArena {
             (TyKind::Int(f), TyKind::Int(t)) => int_rank(*f) <= int_rank(*t),
             (TyKind::Int(_), TyKind::Float(_)) => true,
             (TyKind::Float(f), TyKind::Float(t)) => f <= t,
+            // null 提升入裸指针（null = 地址 0；表示层单槽容得下）
+            (TyKind::Null, TyKind::Pointer { .. }) => true,
+            // 引用/指针同 mutability + 内层可指派（v1 不做协变放宽）
+            (
+                TyKind::Ref {
+                    mutable: fm,
+                    inner: fi,
+                },
+                TyKind::Ref {
+                    mutable: tm,
+                    inner: ti,
+                },
+            ) => fm == tm && self.assignable(*fi, *ti),
+            (
+                TyKind::Pointer {
+                    mutable: fm,
+                    inner: fi,
+                },
+                TyKind::Pointer {
+                    mutable: tm,
+                    inner: ti,
+                },
+            ) => fm == tm && self.assignable(*fi, *ti),
+            (TyKind::Param(f), TyKind::Param(t)) => f == t,
             (TyKind::Named(fd, fa), TyKind::Named(td, ta)) => fd == td && fa == ta,
             // 聚合逐元素走格（对齐 Tuple 臂）：`[int; 3] = [1, 2, 3]` 经 i32→int 加宽成立
             (TyKind::Array(fe, fl), TyKind::Array(te, tl)) => fl == tl && self.assignable(*fe, *te),
@@ -225,6 +306,8 @@ impl TyArena {
             (TyKind::Null, TyKind::Nullable(_)) => Some(b),
             (TyKind::Nullable(_), TyKind::Null) => Some(a),
             // null ∨ T = T?；Nullable(S) ∨ T = Nullable(S ∨ T)
+            (TyKind::Null, TyKind::Pointer { .. }) => Some(b),
+            (TyKind::Pointer { .. }, TyKind::Null) => Some(a),
             (TyKind::Null, _) => Some(self.nullable(b)),
             (_, TyKind::Null) => Some(self.nullable(a)),
             (TyKind::Nullable(x), _) => self.join(*x, b).map(|j| self.nullable(j)),
@@ -246,6 +329,39 @@ impl TyArena {
             }
             (TyKind::Int(_), TyKind::Float(t)) => Some(self.intern(TyKind::Float(*t))),
             (TyKind::Float(f), TyKind::Int(_)) => Some(self.intern(TyKind::Float(*f))),
+            (
+                TyKind::Pointer {
+                    mutable: fm,
+                    inner: fi,
+                },
+                TyKind::Pointer {
+                    mutable: tm,
+                    inner: ti,
+                },
+            ) if fm == tm => {
+                let j = self.join(*fi, *ti)?;
+                Some(self.intern(TyKind::Ref {
+                    mutable: *fm,
+                    inner: j,
+                }))
+            }
+            (
+                TyKind::Pointer {
+                    mutable: fm,
+                    inner: fi,
+                },
+                TyKind::Pointer {
+                    mutable: tm,
+                    inner: ti,
+                },
+            ) if fm == tm => {
+                let j = self.join(*fi, *ti)?;
+                Some(self.intern(TyKind::Pointer {
+                    mutable: *fm,
+                    inner: j,
+                }))
+            }
+            (TyKind::Param(f), TyKind::Param(t)) if f == t => Some(a),
             (TyKind::Named(fd, fa), TyKind::Named(td, ta)) if fd == td && fa == ta => Some(a),
             // 数组/区间逐元素汇合（长度不变）
             (TyKind::Array(fe, fl), TyKind::Array(te, tl)) if fl == tl => {
@@ -267,6 +383,24 @@ impl TyArena {
         }
     }
 
+    /// M7：类型是否提及类型形参（深度）。泛型签名 lower 期
+    /// （`B<T>` 字段）不实例化——实例化发生在调用点代入后
+    pub fn mentions_param(&self, ty: TyId) -> bool {
+        match self.kind(ty) {
+            TyKind::Param(_) => true,
+            TyKind::Ref { inner, .. } | TyKind::Pointer { inner, .. } => {
+                self.mentions_param(*inner)
+            }
+            TyKind::Named(_, args) => args.iter().any(|a| self.mentions_param(*a)),
+            TyKind::Nullable(inner) | TyKind::Range(inner) => self.mentions_param(*inner),
+            TyKind::Array(elem, _) => self.mentions_param(*elem),
+            TyKind::Tuple(elems) => elems.iter().any(|e| self.mentions_param(*e)),
+            TyKind::Fn(ps, ret) => {
+                ps.iter().any(|p| self.mentions_param(*p)) || self.mentions_param(*ret)
+            }
+            _ => false,
+        }
+    }
     /// 便捷：整型字面量默认类型核查（测试用）
     pub fn is_integral(&self, id: TyId) -> bool {
         self.is_integral_kind(id)

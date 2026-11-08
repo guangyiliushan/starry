@@ -185,8 +185,42 @@ fn parse_unary_inner(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserE
         TokenKind::Operator(OperatorKind::Bang) => Some(OperatorKind::Bang),
         TokenKind::Operator(OperatorKind::Minus) => Some(OperatorKind::Minus),
         TokenKind::Operator(OperatorKind::BitNot) => Some(OperatorKind::BitNot),
-        TokenKind::Operator(OperatorKind::BitAnd) => Some(OperatorKind::BitAnd),
-        TokenKind::Operator(OperatorKind::Star) => Some(OperatorKind::Star),
+        // M2：&x / &mut x 取址（T1）；*p 解引。不复用 Unary——借用/解引
+        // 有独立语义（sem 借用检查 / irc 地址与指针读写）
+        TokenKind::Operator(OperatorKind::BitAnd) => {
+            session.cursor.advance();
+            let mutable = matches!(
+                session.cursor.peek().kind,
+                TokenKind::Keyword(HardKeyword::Mut)
+            );
+            if mutable {
+                session.cursor.advance();
+            }
+            let operand = parse_unary(session)?;
+            let span = join_span(token.span, operand.span);
+            let id = session.next_node()?;
+            return Ok(ExprWrap {
+                id,
+                span,
+                kind: ExprKind::AddrOf {
+                    mutable,
+                    expr: Box::new(operand),
+                },
+            });
+        }
+        TokenKind::Operator(OperatorKind::Star) => {
+            session.cursor.advance();
+            let operand = parse_unary(session)?;
+            let span = join_span(token.span, operand.span);
+            let id = session.next_node()?;
+            return Ok(ExprWrap {
+                id,
+                span,
+                kind: ExprKind::Deref {
+                    expr: Box::new(operand),
+                },
+            });
+        }
         TokenKind::Keyword(HardKeyword::Await) => {
             session.cursor.advance();
             let operand = parse_unary(session)?;
@@ -488,6 +522,7 @@ fn parse_primary(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError
                 id,
                 join_span(span, end),
                 ExprKind::Loop {
+                    label: None,
                     body: Box::new(body),
                 },
             ))
@@ -770,7 +805,35 @@ fn parse_block_after_open(session: &mut ParseSession<'_>) -> Result<(Block, Span
             continue;
         }
         match crate::stmt::parse_statement(session)? {
-            crate::stmt::ParsedStatement::Statement(statement) => stmts.push(statement),
+            crate::stmt::ParsedStatement::Statement(statement) => {
+                // EBNF Block := "{" { Statement } [ NL ] [ Expr ] "}"：块尾（直达
+                // `}`）的 Loop 语句按 LoopExpr 语义归一为尾表达式——带值 break
+                // 即块的值（`fun f() : int { 'outer: loop { break 'outer 42 } }`）。
+                // 节点 id 保持：label→flow 解析（LabelFrame.node）不受影响。
+                // 后随语句时保持语句形态（带值 break 的值丢弃，Rust 同纪律）。
+                if let StmtKind::Loop { label, body } = statement.kind {
+                    session.cursor.skip_nl();
+                    if session
+                        .cursor
+                        .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
+                    {
+                        tail = Some(Box::new(ExprWrap::new(
+                            statement.id,
+                            statement.span,
+                            ExprKind::Loop { label, body },
+                        )));
+                        continue;
+                    }
+                    stmts.push(StmtWrap::new(
+                        statement.id,
+                        statement.span,
+                        StmtKind::Loop { label, body },
+                    ));
+                    session.cursor.skip_nl();
+                    continue;
+                }
+                stmts.push(statement);
+            }
             crate::stmt::ParsedStatement::Tail(expr) => {
                 // EBNF Block := "{" { Statement } [Expr] "}"：裸表达式仅当
                 // 其后直达块尾才是尾表达式，否则降级为表达式语句保持源序。

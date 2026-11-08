@@ -14,18 +14,12 @@ use ast::token::{LiteralKind, OperatorKind, Span};
 
 use crate::declare::member_lookup;
 use crate::def::{DefId, DefKind};
-use crate::ty::{TyId, TyKind};
+use crate::ty::{IntKind, TyId, TyKind};
 use crate::{LoopFrame, PatRes, SemState};
 
 pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
+    run_from(ast, st, 0);
     let root = st.scopes.root();
-    for item in &ast.items {
-        match &item.kind {
-            DeclKind::Fun(f) => check_fun(item.id, f, st),
-            DeclKind::Binding(b) => check_top_binding(b, st),
-            _ => {}
-        }
-    }
     // 依赖序单遍推断的收尾：仍为 Unknown 的顶层绑定 = 无法推定，
     // 钉一条诊断（Unknown 不投毒，使用点也会各自诊断）
     for item in &ast.items {
@@ -45,19 +39,194 @@ pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
             ));
         }
     }
+    check_recursive_types(ast, st);
     #[cfg(debug_assertions)]
     verify::run(ast, st);
 }
 
-fn check_fun(decl_id: NodeId, f: &ast::syntax::decl::FunDecl, st: &mut SemState) {
+/// M7 增量入口：只处理克隆追加的 items[start..]。
+/// 收尾推断/递归类型检测/verify 只服务原件（克隆是 fun，不引入绑定/struct）。
+pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
+    for (i, item) in ast.items.iter().enumerate().skip(start) {
+        match &item.kind {
+            DeclKind::Fun(f) => {
+                let Some(fdef) = st.decl_def.get(i).copied().flatten() else {
+                    continue;
+                };
+                check_fun(item.id, f, fdef, st)
+            }
+            DeclKind::Struct(s) => {
+                // M3：主构造默认值逐参数定型（上下文=参数类型，含字面量重定型）。
+                // M7：泛型 struct 默认值在 declare 期已拒收，这里跳过（无逐实例化检查）
+                if !s.type_params.is_empty() {
+                    continue;
+                }
+                for p in &s.primary_ctor {
+                    let Some(d) = &p.default else { continue };
+                    let dty = type_expr(d, st, true);
+                    if let Some(t) = &p.ty {
+                        let target = st.ty_of_node.get(t.id).copied().unwrap_or(st.tys.error);
+                        retype_integer_literal(d, target, st);
+                        let dty = st.expr_ty.get(d.id).copied().unwrap_or(dty);
+                        if !st.tys.assignable(dty, target) {
+                            mismatch(st, d.span);
+                        }
+                    }
+                }
+            }
+            DeclKind::Binding(b) => check_top_binding(b, st),
+            _ => {}
+        }
+    }
+}
+
+/// 递归类型检测：按值容纳自身的 struct/enum 是无限大小（codegen 会
+/// 在 scalar_slots 上栈溢出）。别名循环已由 lower 期 SemTypeCycle 覆盖，
+/// 这里补聚合递归：字段/变体 payload/元组/数组/nullable 都按值展开。
+fn check_recursive_types(ast: &SourceFile, st: &mut SemState) {
+    use std::collections::HashMap;
     let root = st.scopes.root();
-    let Some(fdef) = st.scopes.lookup_local(root, f.name) else {
+    // 声明序 → DefId（struct/enum 只在根作用域，v1 无嵌套声明）
+    let mut decl_of: HashMap<usize, usize> = HashMap::new();
+    for item in &ast.items {
+        let (name, span) = match &item.kind {
+            DeclKind::Struct(s) => (s.name, item.span),
+            DeclKind::Enum(e) => (e.name, item.span),
+            _ => continue,
+        };
+        if let Some(def) = st.scopes.lookup_local(root, name) {
+            decl_of.insert(def.0 as usize, span.start as usize);
+        }
+    }
+    if decl_of.is_empty() {
         return;
-    };
-    if !matches!(st.defs.get(fdef).kind, DefKind::Fun) {
+    }
+    let n = st.defs.len();
+    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for &def_idx in decl_of.keys() {
+        let def = DefId(def_idx as u32);
+        let mut refs = Vec::new();
+        match st.defs.get(def).kind {
+            DefKind::Struct | DefKind::Class => {
+                let fields = st.defs.get(def).sig.fields.clone();
+                for (_, ty) in fields {
+                    collect_named_refs(st, ty, &mut refs);
+                }
+            }
+            DefKind::Enum => {
+                let variants = st.defs.get(def).sig.variants.clone();
+                for (_, params) in variants {
+                    for (_, ty) in params {
+                        collect_named_refs(st, ty, &mut refs);
+                    }
+                }
+            }
+            _ => {}
+        }
+        edges[def_idx] = refs
+            .into_iter()
+            .filter(|d| decl_of.contains_key(&(d.0 as usize)))
+            .map(|d| d.0 as usize)
+            .collect();
+    }
+    // 按声明源序迭代（HashMap key 序随进程随机，诊断序必须确定）
+    let mut decls: Vec<usize> = decl_of.keys().copied().collect();
+    decls.sort_unstable();
+    let mut state = vec![0u8; n];
+    let mut reported = vec![false; n];
+    for start in decls {
+        if state[start] != 0 {
+            continue;
+        }
+        // 显式栈迭代 DFS：声明数不受 parser 深度限制，深链递归会爆栈
+        state[start] = 1;
+        let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
+        while let Some(top) = stack.last_mut() {
+            let node = top.0;
+            if top.1 < edges[node].len() {
+                let next = edges[node][top.1];
+                top.1 += 1;
+                match state[next] {
+                    0 => {
+                        state[next] = 1;
+                        stack.push((next, 0));
+                    }
+                    1 if !reported[next] => {
+                        reported[next] = true;
+                        if let Some(&s) = decl_of.get(&next) {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemTypeCycle,
+                                Span {
+                                    start: s as u32,
+                                    end: s as u32,
+                                },
+                                "recursive type has infinite size (store it behind a nullable/indirection boundary is not yet supported)",
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                state[node] = 2;
+                stack.pop();
+            }
+        }
+    }
+}
+
+fn collect_named_refs(st: &SemState, ty: TyId, out: &mut Vec<DefId>) {
+    match st.tys.kind(ty).clone() {
+        TyKind::Named(def, args) => {
+            out.push(def);
+            for a in args {
+                collect_named_refs(st, a, out);
+            }
+        }
+        TyKind::Nullable(inner) | TyKind::Array(inner, _) | TyKind::Range(inner) => {
+            collect_named_refs(st, inner, out)
+        }
+        TyKind::Tuple(es) => {
+            for e in es {
+                collect_named_refs(st, e, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn check_fun(decl_id: NodeId, f: &ast::syntax::decl::FunDecl, fdef: DefId, st: &mut SemState) {
+    // M7：泛型原件不检查（无 bounds 可依；检查发生在实例化克隆上，
+    // 见 semantic-notes「泛型单态化」）。克隆 AST 仍带 type_params，
+    // 区分靠 def：spec def 的 ty_params = 0。拒收面诊断在 declare 期已钉。
+    if st.defs.get(fdef).ty_params > 0 {
         return;
     }
     let ret = st.defs.get(fdef).sig.ret;
+    // M2 非逃逸：返回借用 = 悬垂，v1 拒绝
+    if matches!(st.tys.kind(ret), TyKind::Ref { .. }) {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemUnsupportedConstruct,
+            f.ret
+                .as_ref()
+                .map(|t| t.span)
+                .unwrap_or(Span { start: 0, end: 0 }),
+            "returning a reference would dangle; not supported in semantic v1",
+        ));
+    }
+    // 默认实参：逐参数型核查（irc 在调用点重放 AST，必须已有 expr_ty）。
+    // 默认值表达式在 resolve 期已绑定；此处恰好定型一次。
+    let param_tys = st.defs.get(fdef).sig.params.clone();
+    for (i, p) in f.params.iter().enumerate() {
+        let Some(default) = &p.default else {
+            continue;
+        };
+        let dty = type_expr(default, st, true);
+        if let Some((_, pty)) = param_tys.get(i)
+            && !st.tys.assignable(dty, *pty)
+        {
+            mismatch(st, default.span);
+        }
+    }
     st.funs.push(crate::FunFrame {
         node: decl_id,
         def: fdef,
@@ -65,9 +234,21 @@ fn check_fun(decl_id: NodeId, f: &ast::syntax::decl::FunDecl, st: &mut SemState)
     let tail_ty = match &f.body {
         Some(FunctionBody::Block(b)) => {
             let ty = type_block(b, st, true);
+            // M1：尾式字面量按声明返回型重定型（值域按目标宽度诊断）
+            if f.ret.is_some()
+                && let Some(t) = &b.tail
+            {
+                retype_integer_literal(t, ret, st);
+            }
             b.tail.as_ref().map(|_| ty)
         }
-        Some(FunctionBody::Expr(e)) => Some(type_expr(e, st, true)),
+        Some(FunctionBody::Expr(e)) => {
+            let ty = type_expr(e, st, true);
+            if f.ret.is_some() {
+                retype_integer_literal(e, ret, st);
+            }
+            Some(st.expr_ty.get(e.id).copied().unwrap_or(ty))
+        }
         None => None,
     };
     // 返回经由 return 语句逐点核查；块体无尾表达式时不比较。
@@ -103,7 +284,7 @@ fn check_top_binding(b: &BindingDecl, st: &mut SemState) {
         return;
     };
     let init_ty = type_expr(init, st, true);
-    check_binding_pattern(&b.pattern, init_ty, init.span, st);
+    check_binding_pattern(init, &b.pattern, init_ty, st);
 }
 
 fn check_local_binding(b: &BindingDecl, st: &mut SemState) {
@@ -118,20 +299,25 @@ fn check_local_binding(b: &BindingDecl, st: &mut SemState) {
         return;
     };
     let init_ty = type_expr(init, st, true);
-    check_binding_pattern(&b.pattern, init_ty, init.span, st);
+    check_binding_pattern(init, &b.pattern, init_ty, st);
 }
 
 /// 绑定模式定型核心：Binding 核对注解/写入推断，Tuple/Array 按元素递归精化；
 /// 顶层与局部共用（顶层 defs 的 pat_binding_def 由 declare 期写入）
-fn check_binding_pattern(pat: &PatWrap, init_ty: TyId, init_span: Span, st: &mut SemState) {
+fn check_binding_pattern(init: &ExprWrap, pat: &PatWrap, init_ty: TyId, st: &mut SemState) {
     match &pat.kind {
         PatKind::Binding { .. } => {
             if let Some(&def) = st.pat_binding_def.get(pat.id) {
                 let ann = st.defs.get(def).sig.ty;
                 if st.tys.needs_infer(ann) {
                     st.defs.get_mut(def).sig.ty = init_ty;
-                } else if !st.tys.assignable(init_ty, ann) {
-                    mismatch(st, init_span);
+                } else {
+                    // M1：标注是具体整型且 init 是整数字面量 → 按标注宽度重定型
+                    retype_integer_literal(init, ann, st);
+                    let init_ty = st.expr_ty.get(init.id).copied().unwrap_or(init_ty);
+                    if !st.tys.assignable(init_ty, ann) {
+                        mismatch(st, init.span);
+                    }
                 }
             }
         }
@@ -142,7 +328,7 @@ fn check_binding_pattern(pat: &PatWrap, init_ty: TyId, init_span: Span, st: &mut
                 TyKind::Array(t, n) => Some(vec![t; n as usize]),
                 TyKind::Error | TyKind::Unknown => None,
                 _ => {
-                    mismatch(st, init_span);
+                    mismatch(st, init.span);
                     None
                 }
             };
@@ -152,7 +338,7 @@ fn check_binding_pattern(pat: &PatWrap, init_ty: TyId, init_span: Span, st: &mut
                 }) {
                     st.diags.emit(Diagnostic::error(
                         DiagCode::SemArityMismatch,
-                        init_span,
+                        init.span,
                         "destructuring arity mismatch",
                     ));
                 }
@@ -164,7 +350,7 @@ fn check_binding_pattern(pat: &PatWrap, init_ty: TyId, init_span: Span, st: &mut
                     let Some(t) = ts.get(ti).copied() else {
                         continue;
                     };
-                    check_binding_pattern(p, t, init_span, st);
+                    check_binding_pattern(init, p, t, st);
                 }
             }
         }
@@ -245,7 +431,7 @@ fn type_stmt(s: &StmtWrap, st: &mut SemState) {
                 }
             };
             if let Some(t) = elem {
-                refine_bindings(pattern, t, st);
+                refine_pattern_types(pattern, t, st);
             }
             type_block(body, st, false);
         }
@@ -290,6 +476,9 @@ fn type_stmt(s: &StmtWrap, st: &mut SemState) {
             let ret = st.defs.get(fun.def).sig.ret;
             if let Some(v) = value {
                 let vty = type_expr(v, st, true);
+                // M1：return 字面量按返回型重定型
+                retype_integer_literal(v, ret, st);
+                let vty = st.expr_ty.get(v.id).copied().unwrap_or(vty);
                 if !st.tys.assignable(vty, ret) {
                     mismatch(st, v.span);
                 }
@@ -378,7 +567,52 @@ fn assign_target_ty(target: &ExprWrap, target_ty: TyId, st: &mut SemState) -> Ty
             },
             None => st.tys.error,
         },
-        ExprKind::Member { .. } | ExprKind::Index { .. } => target_ty,
+        ExprKind::Deref { expr } => {
+            // M2 经解引赋值：要求可变形（*mut / &mut），否则按不可写拒绝
+            let pty = st.expr_ty.get(expr.id).copied().unwrap_or(st.tys.error);
+            match st.tys.kind(pty).clone() {
+                TyKind::Ref { mutable, .. } | TyKind::Pointer { mutable, .. } if !mutable => {
+                    st.diags.emit(Diagnostic::error(
+                        DiagCode::SemAssignToVal,
+                        target.span,
+                        "cannot assign through an immutable reference/pointer",
+                    ));
+                }
+                _ => {}
+            }
+            target_ty
+        }
+        ExprKind::Member { base, name, .. } => {
+            // M3 字段三态：Some(true)=var 恒可写；Some(false)=val 恒拒；
+            // None=legacy 按根绑定穿透检查（兼容无修饰符 body 字段）。
+            let bty = st.expr_ty.get(base.id).copied().unwrap_or(st.tys.error);
+            let mut checked = false;
+            if let TyKind::Named(d, _) = st.tys.kind(bty)
+                && let Some(fdef) = member_lookup(st, *d, *name)
+                && let DefKind::StructField { mutable, .. } = &st.defs.get(fdef).kind
+            {
+                checked = true;
+                match mutable {
+                    Some(true) => {}
+                    Some(false) => {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemAssignToVal,
+                            target.span,
+                            "cannot assign to a `val` field",
+                        ));
+                    }
+                    None => check_root_mutability(target, st),
+                }
+            }
+            if !checked {
+                check_root_mutability(target, st);
+            }
+            target_ty
+        }
+        ExprKind::Index { .. } => {
+            check_root_mutability(target, st);
+            target_ty
+        }
         _ => {
             st.diags.emit(Diagnostic::error(
                 DiagCode::SemAssignToVal,
@@ -387,6 +621,40 @@ fn assign_target_ty(target: &ExprWrap, target_ty: TyId, st: &mut SemState) -> Ty
             ));
             st.tys.error
         }
+    }
+}
+
+/// legacy 根穿透检查：val 绑定与参数的字段/元素赋值不可写（None 态字段用）
+fn check_root_mutability(target: &ExprWrap, st: &mut SemState) {
+    if let Some(root) = root_ident(target)
+        && let Some(def) = st.expr_def.get(root.id).copied()
+    {
+        match &st.defs.get(def).kind {
+            DefKind::LocalBinding { mutable: false } => {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemAssignToVal,
+                    target.span,
+                    "cannot assign to a field/element of an immutable binding",
+                ));
+            }
+            DefKind::Param => {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemAssignToVal,
+                    target.span,
+                    "parameters are immutable in semantic v1",
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 赋值目标的最内层基座标识符（`p.x` / `a[i]` / `p.xs[0]` → 根 Ident）
+fn root_ident(e: &ExprWrap) -> Option<&ExprWrap> {
+    match &e.kind {
+        ExprKind::Member { base, .. } | ExprKind::Index { base, .. } => root_ident(base),
+        ExprKind::Ident(_) => Some(e),
+        _ => None,
     }
 }
 /// 成员类型查询。`diagnose` 为 false 时不发诊断、找不到返回 None
@@ -492,7 +760,9 @@ fn check_condition(cond: &Condition, st: &mut SemState) {
         }
         Condition::Val { pattern, expr } => {
             let ty = type_expr(expr, st, true);
-            refine_bindings(pattern, ty, st);
+            // 与 when/is 共用同一套主语下推：构造器模式补 pat_res，
+            // 元组/数组按元素类型递归精化（旧 refine_bindings 只覆盖裸绑定）。
+            refine_pattern_types(pattern, ty, st);
         }
     }
 }
@@ -536,11 +806,129 @@ pub(crate) fn type_expr(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId
     ty
 }
 
+/// 整数字面量定型（M1）：未约束默认 i64（超出取 i128，再超报
+/// IntegerOutOfRange）；约束上下文（标注/形参/返回）由
+/// `retype_integer_literal` 按目标宽度重定型并做值域诊断。
+fn integer_literal_ty(e: &ExprWrap, st: &mut SemState) -> TyId {
+    let Some(v) = parse_integer_literal(e.span.slice(&st.text)) else {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::IntegerOutOfRange,
+            e.span,
+            "integer literal out of range",
+        ));
+        return st.tys.error;
+    };
+    let kind = if fits_signed(v, 64) {
+        IntKind::I64
+    } else {
+        IntKind::I128
+    };
+    st.tys.intern(TyKind::Int(kind))
+}
+
+/// M1 字面量上下文定型：e 是整数字面量、target 是具体整型时，按目标宽度
+/// 重定型（值域按目标宽度诊断，越界报 IntegerOutOfRange 并投毒）。
+/// M2 T1 借用检查（v1 保守）：目标限局部名（Ident）；顶层全局
+/// 逃逸拒绝；&mut 要求可变绑定。非逃逸（不存字段/全局/返回）由
+/// 类型层保证：引用只与同一 Ref 类型等价（格无聚合臂），struct 字段
+/// 声明 &T 在 declare 期拒绝。
+fn check_borrow(target: &ExprWrap, mutable: bool, st: &mut SemState) {
+    let ExprKind::Ident(name) = &target.kind else {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemUnsupportedConstruct,
+            target.span,
+            "borrow targets other than a plain local name are not supported in semantic v1",
+        ));
+        return;
+    };
+    let Some(def) = st.expr_def.get(target.id).copied() else {
+        return;
+    };
+    // 顶层全局借用 = 逃逸（跨函数生命周期），v1 拒绝
+    if st.defs.get(def).scope == st.scopes.root() {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemUnsupportedConstruct,
+            target.span,
+            "borrowing a top-level global escapes; not supported in semantic v1",
+        ));
+        return;
+    }
+    if mutable {
+        match &st.defs.get(def).kind {
+            DefKind::LocalBinding { mutable: true } => {}
+            DefKind::LocalBinding { mutable: false } => {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemAssignToVal,
+                    target.span,
+                    "cannot borrow an immutable binding as mutable",
+                ));
+            }
+            _ => {}
+        }
+    }
+    let _ = name;
+}
+
+/// 调用点：绑定标注、构造/函数实参槽、return/尾式。已是 Error 的不再动。
+fn retype_integer_literal(e: &ExprWrap, target: TyId, st: &mut SemState) {
+    let TyKind::Int(kind) = st.tys.kind(target) else {
+        return;
+    };
+    if !matches!(e.kind, ExprKind::Literal(LiteralKind::Integer)) {
+        return;
+    }
+    let cur = st.expr_ty.get(e.id).copied().unwrap_or(st.tys.error);
+    if st.tys.is_error(cur) {
+        return;
+    }
+    let Some(v) = parse_integer_literal(e.span.slice(&st.text)) else {
+        return;
+    };
+    let bits = match kind {
+        IntKind::I4 => 4u32,
+        IntKind::I8 => 8,
+        IntKind::I16 => 16,
+        IntKind::I32 => 32,
+        IntKind::I64 => 64,
+        IntKind::I128 => 128,
+    };
+    if fits_signed(v, bits) {
+        st.expr_ty.set(e.id, target);
+    } else {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::IntegerOutOfRange,
+            e.span,
+            "integer literal out of range for the expected type",
+        ));
+        st.expr_ty.set(e.id, st.tys.error);
+    }
+}
+
+fn parse_integer_literal(text: &str) -> Option<i128> {
+    let cleaned: String = text.replace('_', "");
+    let (digits, radix) = match cleaned.as_str() {
+        s if s.len() > 2 && s[..2].eq_ignore_ascii_case("0x") => (&s[2..], 16),
+        s if s.len() > 2 && s[..2].eq_ignore_ascii_case("0o") => (&s[2..], 8),
+        s if s.len() > 2 && s[..2].eq_ignore_ascii_case("0b") => (&s[2..], 2),
+        s => (s, 10),
+    };
+    i128::from_str_radix(digits, radix).ok()
+}
+
+fn fits_signed(v: i128, bits: u32) -> bool {
+    if bits >= 128 {
+        return true;
+    }
+    let max = (1i128 << (bits - 1)) - 1;
+    let min = -(1i128 << (bits - 1));
+    (min..=max).contains(&v)
+}
+
 fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
     match &e.kind {
         ExprKind::Error(_) | ExprKind::Missing(_) => st.tys.error,
         ExprKind::Literal(lk) => match lk {
-            LiteralKind::Integer => st.tys.default_int,
+            LiteralKind::Integer => integer_literal_ty(e, st),
             LiteralKind::Float => st.tys.default_float,
             LiteralKind::String => st.tys.string,
             LiteralKind::Char => st.tys.char_,
@@ -551,6 +939,27 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             Some(def) => def_value_ty(def, st),
             None => st.tys.error,
         },
+        // M2 取址 &x / &mut x（T1 借用；v1 保守规则见 semantic-notes）
+        ExprKind::AddrOf { mutable, expr } => {
+            let inner = type_expr(expr, st, true);
+            check_borrow(expr, *mutable, st);
+            st.tys.intern(TyKind::Ref {
+                mutable: *mutable,
+                inner,
+            })
+        }
+        // M2 解引 *p：pointer/ref → 内层值
+        ExprKind::Deref { expr } => {
+            let pty = type_expr(expr, st, true);
+            match st.tys.kind(pty).clone() {
+                TyKind::Pointer { inner, .. } | TyKind::Ref { inner, .. } => inner,
+                TyKind::Error => st.tys.error,
+                _ => {
+                    mismatch(st, expr.span);
+                    st.tys.error
+                }
+            }
+        }
         ExprKind::Unary { op, operand } => {
             let o = type_expr(operand, st, true);
             match op {
@@ -732,7 +1141,7 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
         ExprKind::When { subject, branches } => {
             type_when(subject.as_deref(), branches, e.span, in_value, st)
         }
-        ExprKind::Loop { body } => {
+        ExprKind::Loop { body, .. } => {
             st.loops.push(LoopFrame {
                 break_values: Vec::new(),
                 break_total: 0,
@@ -744,11 +1153,13 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
                 // 无 break = 无出口；unit 只是保守结果型（未来 Never 类型可替换）。
                 st.tys.unit
             } else {
-                if frame.break_with_value != frame.break_total {
+                // 全裸 break（零带值）= unit 结果，不报错；混用（部分带值）才是类型错误
+                if frame.break_with_value != 0 && frame.break_with_value != frame.break_total {
                     mismatch(st, e.span);
                 }
                 let mut result = frame.break_values.first().copied().unwrap_or(st.tys.unit);
-                for ty in &frame.break_values[1..] {
+                // skip(1)：裸 `loop { break }`（值列表空）曾在此 [1..] 越界 panic
+                for ty in frame.break_values.iter().skip(1) {
                     result = match st.tys.join(result, *ty) {
                         Some(joined) => joined,
                         None => {
@@ -781,8 +1192,14 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             unsupported(st, e.span, "await is not supported in semantic v1");
             ty
         }
-        ExprKind::Comptime { block } | ExprKind::Unsafe { block } => {
-            type_block(block, st, in_value)
+        ExprKind::Comptime { block } => type_block(block, st, in_value),
+        // M6：unsafe 块建立 extern "c" 调用的许可上下文（language-design：
+        // FFI 调用在 unsafe 中）。深度计数覆盖嵌套块。
+        ExprKind::Unsafe { block } => {
+            st.unsafe_depth += 1;
+            let ty = type_block(block, st, in_value);
+            st.unsafe_depth -= 1;
+            ty
         }
         ExprKind::Lambda { .. } => {
             unsupported(st, e.span, "lambda typing is not supported in semantic v1");
@@ -981,13 +1398,12 @@ fn type_call(
         }
         _ => type_expr(callee, st, true),
     };
-    if !type_args.is_empty() {
-        unsupported(
-            st,
-            span,
-            "generic call instantiation is not supported in semantic v1",
-        );
-    }
+    // M7：类型实参在 resolve 期已 lower（ty_of_node 缓存）；之后的
+    // 分派按被调是否泛型逐个臂处理，毯式拒收已拆除
+    let targs: Vec<TyId> = type_args
+        .iter()
+        .map(|ta| st.ty_of_node.get(ta.ty.id).copied().unwrap_or(st.tys.error))
+        .collect();
     // callee 已出错（未定义名/错误基对象等，诊断已发）：不再级联第二条
     if st.tys.is_error(callee_ty) {
         type_all_args(args, st);
@@ -1001,6 +1417,14 @@ fn type_call(
             if matches!(st.defs.get(named).kind, DefKind::Enum)
                 && let ExprKind::Member { name, .. } = &callee.kind
             {
+                if !type_args.is_empty() {
+                    // M7 slice 1：泛型 enum 未排期，变体调用也不带类型实参
+                    st.diags.emit(Diagnostic::error(
+                        DiagCode::SemTypeArgMismatch,
+                        span,
+                        "enum variant calls do not take type arguments",
+                    ));
+                }
                 let resolved =
                     member_lookup(st, named, *name).and_then(|v| match st.defs.get(v).kind {
                         DefKind::EnumVariant { parent, index } => Some((parent, index)),
@@ -1017,8 +1441,53 @@ fn type_call(
         }
         TyKind::TypeObject(named) => match st.defs.get(named).kind.clone() {
             DefKind::Struct => {
-                let fields = st.defs.get(named).sig.fields.clone();
-                check_call_args(args, &fields, &[], span, st);
+                // M7：泛型 struct 构造——实例化 spec def，实参按代入后 sig 核查
+                if st.defs.get(named).ty_params > 0 {
+                    let want = st.defs.get(named).ty_params as usize;
+                    if targs.len() != want {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemTypeArgMismatch,
+                            span,
+                            format!(
+                                "generic struct expects {want} type argument(s), got {}",
+                                targs.len()
+                            ),
+                        ));
+                        type_all_args(args, st);
+                        return st.tys.error;
+                    }
+                    let spec = crate::mono::instantiate(st, named, &targs);
+                    // irc 的 call 分派按 expr_def 找构造目标（克隆 spec）
+                    st.expr_def.set(callee.id, spec);
+                    let sig = &st.defs.get(spec).sig;
+                    if !sig.params.is_empty() {
+                        // M3 主构造：参数槽机（含仅构造参数与默认值）
+                        let params = sig.params.clone();
+                        let defaults = sig.param_defaults.clone();
+                        check_call_args(args, &params, &defaults, span, st);
+                    } else {
+                        let fields = sig.fields.clone();
+                        check_call_args(args, &fields, &[], span, st);
+                    }
+                    return st.tys.builtin_named(spec);
+                }
+                if !type_args.is_empty() {
+                    st.diags.emit(Diagnostic::error(
+                        DiagCode::SemTypeArgMismatch,
+                        span,
+                        "this struct is not generic",
+                    ));
+                }
+                let sig = &st.defs.get(named).sig;
+                if !sig.params.is_empty() {
+                    // M3 主构造：参数槽机（含仅构造参数与默认值）
+                    let params = sig.params.clone();
+                    let defaults = sig.param_defaults.clone();
+                    check_call_args(args, &params, &defaults, span, st);
+                } else {
+                    let fields = sig.fields.clone();
+                    check_call_args(args, &fields, &[], span, st);
+                }
                 return st.tys.builtin_named(named);
             }
             DefKind::Enum => {
@@ -1036,8 +1505,15 @@ fn type_call(
                 if let Some(t) = target
                     && matches!(st.defs.get(t).kind, DefKind::Struct)
                 {
-                    let fields = st.defs.get(t).sig.fields.clone();
-                    check_call_args(args, &fields, &[], span, st);
+                    let sig = &st.defs.get(t).sig;
+                    if !sig.params.is_empty() {
+                        let params = sig.params.clone();
+                        let defaults = sig.param_defaults.clone();
+                        check_call_args(args, &params, &defaults, span, st);
+                    } else {
+                        let fields = sig.fields.clone();
+                        check_call_args(args, &fields, &[], span, st);
+                    }
                     return st.tys.builtin_named(t);
                 }
                 st.diags.emit(Diagnostic::error(
@@ -1056,6 +1532,43 @@ fn type_call(
     if let Some(def) = st.expr_def.get(callee.id).copied()
         && matches!(st.defs.get(def).kind, DefKind::Fun)
     {
+        // M6：extern "c" 调用必须在 unsafe 上下文中（FFI 永远 unchecked）
+        if st.defs.get(def).external && st.unsafe_depth == 0 {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                callee.span,
+                "calling an `extern \"c\"` function requires an `unsafe` block",
+            ));
+        }
+        // M7：泛型 fun 调用——取/建实例化，expr_def 指向 spec def
+        // （irc 按它 lower 克隆体），实参按代入后形参核查
+        if st.defs.get(def).ty_params > 0 {
+            let want = st.defs.get(def).ty_params as usize;
+            if targs.len() != want {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemTypeArgMismatch,
+                    span,
+                    format!(
+                        "generic function expects {want} type argument(s), got {}",
+                        targs.len()
+                    ),
+                ));
+                type_all_args(args, st);
+                return st.tys.error;
+            }
+            let spec = crate::mono::instantiate(st, def, &targs);
+            st.expr_def.set(callee.id, spec);
+            let (params, ret, defaults) = crate::mono::subst_params(st, def, &targs);
+            check_call_args(args, &params, &defaults, span, st);
+            return ret;
+        }
+        if !type_args.is_empty() {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemTypeArgMismatch,
+                span,
+                "this function is not generic",
+            ));
+        }
         let params = st.defs.get(def).sig.params.clone();
         let defaults = st.defs.get(def).sig.param_defaults.clone();
         let ret = st.defs.get(def).sig.ret;
@@ -1064,6 +1577,13 @@ fn type_call(
     }
     // 函数值调用（`(int) -> int` 型的形参/绑定作 callee）
     if let TyKind::Fn(ps, ret) = st.tys.kind(callee_ty).clone() {
+        if !type_args.is_empty() {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemTypeArgMismatch,
+                span,
+                "function values do not take type arguments",
+            ));
+        }
         if args.len() != ps.len() {
             st.diags.emit(Diagnostic::error(
                 DiagCode::SemArityMismatch,
@@ -1171,7 +1691,9 @@ fn check_call_args(
             continue;
         }
         let aty = type_expr(&arg.value, st, true);
-        slots[idx] = Some(aty);
+        // M1：形参是具体整型且实参是整数字面量 → 按形参宽度重定型
+        retype_integer_literal(&arg.value, params[idx].1, st);
+        slots[idx] = Some(st.expr_ty.get(arg.value.id).copied().unwrap_or(aty));
     }
     for i in 0..params.len() {
         if slots[i].is_none() {
@@ -1444,6 +1966,15 @@ fn refine_pattern_types(pat: &PatWrap, subject_ty: TyId, st: &mut SemState) {
         }
         PatKind::Struct { fields, .. } => {
             if let Some(res) = st.pat_res.get(pat.id).copied() {
+                // M7 slice 1：泛型 struct 模式未排期（字段类型是 Param，无可精化）
+                if st.defs.get(res.ctor).ty_params > 0 {
+                    unsupported(
+                        st,
+                        pat.span,
+                        "generic struct patterns are not supported in this slice",
+                    );
+                    return;
+                }
                 let fs = st.defs.get(res.ctor).sig.fields.clone();
                 for (name, fp) in fields {
                     if let Some((_, ft)) = fs.iter().find(|(n, _)| n == name) {
@@ -1509,6 +2040,8 @@ fn def_value_ty(def: DefId, st: &mut SemState) -> TyId {
             let target = st.defs.get(def).alias_resolved.unwrap_or(def);
             st.tys.intern(TyKind::TypeObject(target))
         }
+        // M7：类型形参名出现在值位置 = 类型/值分立违规
+        DefKind::TypeParam { .. } => st.tys.error,
         DefKind::StructField { .. } | DefKind::ImportNs { .. } | DefKind::BuiltinPrint => {
             st.tys.error
         }
@@ -1528,13 +2061,26 @@ mod verify {
     use crate::SemState;
 
     pub(super) fn run(ast: &SourceFile, st: &SemState) {
-        for item in &ast.items {
+        for (i, item) in ast.items.iter().enumerate() {
             match &item.kind {
-                DeclKind::Fun(f) => match &f.body {
-                    Some(FunctionBody::Block(b)) => block(b, st),
-                    Some(FunctionBody::Expr(e)) => expr(e, st),
-                    None => {}
-                },
+                DeclKind::Fun(f) => {
+                    // M7：泛型原件不检查（无 expr_ty 属预期）；克隆照常断言
+                    // （区分靠 def：spec def 的 ty_params = 0）
+                    let is_generic_orig = st
+                        .decl_def
+                        .get(i)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|d| st.defs.get(d).ty_params > 0);
+                    if is_generic_orig {
+                        continue;
+                    }
+                    match &f.body {
+                        Some(FunctionBody::Block(b)) => block(b, st),
+                        Some(FunctionBody::Expr(e)) => expr(e, st),
+                        None => {}
+                    }
+                }
                 DeclKind::Binding(b) => {
                     if let Some(init) = &b.init {
                         expr(init, st);

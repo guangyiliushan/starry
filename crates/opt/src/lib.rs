@@ -54,6 +54,8 @@ fn has_side_effects(instr: &Instr) -> bool {
         instr,
         Instr::Load { .. }
             | Instr::Store { .. }
+            | Instr::LoadPtr { .. }
+            | Instr::StorePtr { .. }
             | Instr::LoadGlobal { .. }
             | Instr::StoreGlobal { .. }
             | Instr::Param { .. }
@@ -65,7 +67,9 @@ fn has_side_effects(instr: &Instr) -> bool {
 /// 指令写的 Temp（定义点）；Store/Param/Call(None) 不写。
 fn def_temp(instr: &Instr) -> Option<TempId> {
     match instr {
-        Instr::Bin { dst, .. }
+        Instr::AddrOf { dst, .. }
+        | Instr::LoadPtr { dst, .. }
+        | Instr::Bin { dst, .. }
         | Instr::Un { dst, .. }
         | Instr::Copy { dst, .. }
         | Instr::Load { dst, .. }
@@ -118,6 +122,14 @@ fn sx(v: i128, w: u32) -> i128 {
     (v << s) >> s
 }
 
+/// 比较算子（结果 i1；Bin 的 ty 字段是操作数公共型）
+fn is_comparison(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+    )
+}
+
 fn fold_fun(fun: &mut FunBody, tys: &TyArena) -> bool {
     let mut changed = false;
     for block in &mut fun.blocks {
@@ -143,7 +155,13 @@ fn fold_fun(fun: &mut FunBody, tys: &TyArena) -> bool {
             };
             if let Some(c) = folded {
                 let (dst, ty) = match instr {
-                    Instr::Bin { dst, ty, .. } | Instr::Un { dst, ty, .. } => (*dst, *ty),
+                    Instr::Bin { dst, ty, op, .. } => {
+                        // 比较结果恒为 bool：ty 字段是操作数公共型，
+                        // 不能直接复用（i32 比较折叠出 `store i32 true`）
+                        let ty = if is_comparison(*op) { tys.bool_ } else { *ty };
+                        (*dst, ty)
+                    }
+                    Instr::Un { dst, ty, .. } => (*dst, *ty),
                     _ => unreachable!("folded instr is Bin/Un by construction"),
                 };
                 *instr = Instr::Copy {
@@ -321,7 +339,12 @@ fn copy_fun(fun: &mut FunBody) -> bool {
                 }
                 Instr::StoreGlobal { src, .. } => subst(src, &map, &mut changed),
                 Instr::Param { a, .. } => subst(a, &map, &mut changed),
-                Instr::LoadGlobal { .. } | Instr::Call { .. } | Instr::Slot { .. } => {}
+                Instr::StorePtr { src, .. } => subst(src, &map, &mut changed),
+                Instr::AddrOf { .. }
+                | Instr::LoadPtr { .. }
+                | Instr::LoadGlobal { .. }
+                | Instr::Call { .. }
+                | Instr::Slot { .. } => {}
             }
             match instr {
                 Instr::Copy { dst, src, .. } => {
@@ -515,6 +538,17 @@ fn dce_fun(fun: &mut FunBody) -> bool {
                     mark(src, &mut used);
                 }
                 Instr::StoreGlobal { src, .. } => mark(src, &mut used),
+                // M2 指针指令：AddrOf/LoadPtr/StorePtr 都读 ptr/base 槽
+                Instr::AddrOf { base, .. } => {
+                    used.insert(*base);
+                }
+                Instr::LoadPtr { ptr, .. } => {
+                    used.insert(*ptr);
+                }
+                Instr::StorePtr { ptr, src, .. } => {
+                    used.insert(*ptr);
+                    mark(src, &mut used);
+                }
                 // Call/LoadGlobal 无读操作数；Slot 无操作数
                 Instr::Call { .. } | Instr::LoadGlobal { .. } | Instr::Slot { .. } => {}
             }

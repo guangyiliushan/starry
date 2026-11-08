@@ -329,6 +329,8 @@ fn is_place(expr: &ExprWrap) -> bool {
             | ExprKind::Null
             | ExprKind::Ident(_)
             | ExprKind::Path(_)
+            // M2：*p 是赋值目标（可变性由 sem 按 pointee mutability 核查）
+            | ExprKind::Deref { .. }
             | ExprKind::Call { .. }
             | ExprKind::Index { .. }
             | ExprKind::Member { .. }

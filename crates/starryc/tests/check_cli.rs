@@ -30,8 +30,8 @@ fn check_reports_diagnostics_with_spans() {
     let (code, err) = check_file("bad", "fun main() {\n    nosuch()\n}");
     assert_eq!(code, Some(1));
     assert!(err.contains("SemUndefinedName"), "{err}");
-    // span 按字节偏移打印（nosuch 在源中的位置）
-    assert!(err.contains(":17..23:"), "{err}");
+    // 诊断按 `path:line:col` 打印（nosuch 在第 2 行第 5 列）
+    assert!(err.contains(":2:5:"), "{err}");
     assert!(err.contains("undefined name"), "{err}");
 }
 

@@ -6,3 +6,8 @@ struct Point {
 }
 
 operator fun plus(a: Point, b: Point) : Point = a
+
+fun main() {
+    val p = plus(Point(1, 2), Point(3, 4))
+    print(p.x)
+}

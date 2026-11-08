@@ -152,13 +152,90 @@ static char *dup_string(const char *s) {
     return out;
 }
 
+// 128 位十进制：按位长除法（避免 __udivti3 依赖 compiler-rt）。
+static char *fmt_u128(unsigned long long hi, unsigned long long lo) {
+    char rev[48];
+    int rn = 0;
+    for (;;) {
+        if (hi == 0 && lo == 0) break;
+        unsigned long long qhi = 0, qlo = 0, rem = 0;
+        for (int i = 127; i >= 0; i--) {
+            unsigned long long bit = (i >= 64) ? ((hi >> (i - 64)) & 1ULL) : ((lo >> i) & 1ULL);
+            rem = (rem << 1) | bit;
+            unsigned long long qb = rem >= 10;
+            if (qb) rem -= 10;
+            if (qb) {
+                if (i >= 64) qhi |= 1ULL << (i - 64);
+                else qlo |= 1ULL << i;
+            }
+        }
+        rev[rn++] = (char)('0' + (int)rem);
+        hi = qhi;
+        lo = qlo;
+    }
+    if (rn == 0) rev[rn++] = '0';
+    char *out = (char *)xalloc((SIZE_T)rn + 1);
+    if (!out) return 0;
+    for (int i = 0; i < rn; i++) out[i] = rev[rn - 1 - i];
+    out[rn] = 0;
+    return out;
+}
+
+static char *fmt_i128(unsigned long long hi, unsigned long long lo) {
+    int neg = (hi >> 63) != 0;
+    if (neg) {
+        unsigned long long old = lo;
+        lo = ~lo + 1ULL;
+        hi = ~hi + (old == 0 ? 1ULL : 0ULL);
+    }
+    char *digits = fmt_u128(hi, lo);
+    if (!neg) return digits;
+    SIZE_T n = cstr_len(digits);
+    char *out = (char *)xalloc(n + 2);
+    if (!out) return digits;
+    out[0] = '-';
+    cstr_copy(out + 1, digits, n);
+    out[n + 1] = 0;
+    return out;
+}
+
+// UTF-8 编码（char 的码点 → 字符串）
+static char *utf8_from_cp(unsigned int cp) {
+    char buf[5];
+    int n = 0;
+    if (cp < 0x80) {
+        buf[n++] = (char)cp;
+    } else if (cp < 0x800) {
+        buf[n++] = (char)(0xC0 | (cp >> 6));
+        buf[n++] = (char)(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        buf[n++] = (char)(0xE0 | (cp >> 12));
+        buf[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[n++] = (char)(0x80 | (cp & 0x3F));
+    } else {
+        buf[n++] = (char)(0xF0 | (cp >> 18));
+        buf[n++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        buf[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[n++] = (char)(0x80 | (cp & 0x3F));
+    }
+    return from_buf(buf, (SIZE_T)n);
+}
+
 char *starry_str_conv_i64(long long v) { return fmt_i64(v); }
 char *starry_str_conv_i32(int v) { return fmt_i64(v); }
+char *starry_str_conv_i16(short v) { return fmt_i64(v); }
 char *starry_str_conv_i8(signed char v) { return fmt_i64(v); }
 char *starry_str_conv_i1(int v) { return dup_string(v ? "true" : "false"); }
+char *starry_str_conv_i128(unsigned long long hi, unsigned long long lo) { return fmt_i128(hi, lo); }
+char *starry_str_conv_char(int cp) { return utf8_from_cp((unsigned int)cp); }
 char *starry_str_conv_f64(double v) { return fmt_double(v, 15); }
 char *starry_str_conv_f32(float v) { return fmt_double((double)v, 7); }
 char *starry_str_conv_string(const char *s) { return dup_string(s); }
+
+int starry_str_eq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
 
 char *starry_str_concat(const char *a, const char *b) {
     SIZE_T na = cstr_len(a), nb = cstr_len(b);
@@ -172,8 +249,14 @@ char *starry_str_concat(const char *a, const char *b) {
 
 void starry_print_i64(long long v) { write_line(fmt_i64(v)); }
 void starry_print_i32(int v) { write_line(fmt_i64(v)); }
+void starry_print_i16(short v) { write_line(fmt_i64(v)); }
 void starry_print_i8(signed char v) { write_line(fmt_i64(v)); }
+void starry_print_i128(unsigned long long hi, unsigned long long lo) { write_line(fmt_i128(hi, lo)); }
 void starry_print_i1(int v) { write_line(v ? "true" : "false"); }
+void starry_print_char(int cp) {
+    write_str(utf8_from_cp((unsigned int)cp));
+    write_str("\n");
+}
 void starry_print_f64(double v) { write_line(fmt_double(v, 15)); }
 void starry_print_f32(float v) { write_line(fmt_double((double)v, 7)); }
 void starry_print_string(const char *s) { write_line(s); }

@@ -11,15 +11,35 @@ use ast::syntax::pat::{PatKind, PatWrap};
 use ast::syntax::stmt::{StmtKind, StmtWrap};
 
 use crate::declare::{lookup_with_imports, lower_ty, resolve_path};
-use crate::def::{Def, DefKind, DefSig, ScopeId};
+use crate::def::{Def, DefId, DefKind, DefSig, ScopeId};
 use crate::ty::TyId;
 use crate::{FlowKind, FlowRes, FunFrame, LabelFrame, PatRes, SemState};
 
 pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
+    run_from(ast, st, 0);
+}
+
+/// M7 增量入口：只处理克隆追加的 items[start..]（原件跑 run = run_from(.., 0)）
+pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
     let root = st.scopes.root();
-    for item in &ast.items {
+    for (i, item) in ast.items.iter().enumerate().skip(start) {
         match &item.kind {
-            DeclKind::Fun(f) => resolve_fun(item.id, f, st),
+            DeclKind::Fun(f) => {
+                // M7：def 经 decl_def 侧链取（克隆 def 与原件同名同 span，
+                // 名字/span 反查都会撞车）
+                let Some(fdef) = st.decl_def.get(i).copied().flatten() else {
+                    continue;
+                };
+                resolve_fun(item.id, f, fdef, st)
+            }
+            DeclKind::Struct(s) => {
+                // M3：主构造默认值表达式在根作用域解析（与函数默认实参同纪律）
+                for p in &s.primary_ctor {
+                    if let Some(d) = &p.default {
+                        resolve_expr(d, st, root);
+                    }
+                }
+            }
             DeclKind::Binding(b) => {
                 if let Some(init) = &b.init {
                     resolve_expr(init, st, root);
@@ -34,14 +54,14 @@ fn zero_span() -> Span {
     Span { start: 0, end: 0 }
 }
 
-fn resolve_fun(decl_id: NodeId, f: &FunDecl, st: &mut SemState) {
+fn resolve_fun(decl_id: NodeId, f: &FunDecl, fdef: DefId, st: &mut SemState) {
     let root = st.scopes.root();
-    let Some(fdef) = st.scopes.lookup_local(root, f.name) else {
-        return;
-    };
-    // 参数作用域：参数 defs 的 ty 已在 declare 期 lower 进 fun sig
+    // 参数作用域：参数 defs 的 ty 已在 declare 期 lower 进 fun sig。
+    // M7：泛型 fun 的 pscope 挂在类型形参作用域下（member_scope 复用），
+    // 体里的 T 注解/类型实参 lower 才能解析
+    let parent = st.defs.get(fdef).member_scope.unwrap_or(root);
     let sig_params = st.defs.get(fdef).sig.params.clone();
-    let pscope = st.scopes.new_scope(Some(root));
+    let pscope = st.scopes.new_scope(Some(parent));
     for (name, ty) in sig_params {
         let def = st.defs.push(Def {
             kind: DefKind::Param,
@@ -57,6 +77,9 @@ fn resolve_fun(decl_id: NodeId, f: &FunDecl, st: &mut SemState) {
             alias_of: None,
             alias_resolved: None,
             member_scope: None,
+            external: false,
+            ty_params: 0,
+            decl: None,
         });
         if let Some(old) = st.scopes.insert(pscope, name, def) {
             // 保留首个参数定义，重复项报错（与 add_def 同纪律）
@@ -66,6 +89,13 @@ fn resolve_fun(decl_id: NodeId, f: &FunDecl, st: &mut SemState) {
                 zero_span(),
                 format!("duplicate parameter `{}`", st.interner.resolve(name)),
             ));
+        }
+    }
+    // 默认实参表达式在根作用域解析（只允许引用全局/函数；形参引用
+    // 需要调用点绑定语义，v1 未实现，按未定义名拒绝）。
+    for p in &f.params {
+        if let Some(default) = &p.default {
+            resolve_expr(default, st, root);
         }
     }
     st.funs.push(FunFrame {
@@ -237,6 +267,9 @@ fn resolve_condition(cond: &Condition, st: &mut SemState, scope: ScopeId) -> Sco
             resolve_expr(expr, st, scope);
             let pscope = st.scopes.new_scope(Some(scope));
             declare_local_binding(pattern, true, pscope, st);
+            // 与 ExprKind::Is 同纪律：构造器路径 resolve 期解析（pat_res），
+            // 否则两段构造器（Opt.Some(w)）在 if val 里不做 payload 精化
+            resolve_pattern(pattern, st, pscope);
             pscope
         }
     }
@@ -300,6 +333,7 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
             resolve_expr(rhs, st, scope);
         }
         ExprKind::Unary { operand, .. } => resolve_expr(operand, st, scope),
+        ExprKind::AddrOf { expr, .. } | ExprKind::Deref { expr } => resolve_expr(expr, st, scope),
         ExprKind::ForceUnwrap { expr: operand } => resolve_expr(operand, st, scope),
         ExprKind::Cast { expr, ty, .. } => {
             resolve_expr(expr, st, scope);
@@ -347,6 +381,8 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
                 resolve_expr(expr, st, scope);
                 let pscope = st.scopes.new_scope(Some(scope));
                 declare_local_binding(pattern, true, pscope, st);
+                // 与 is/while val 同纪律：两段构造器 resolve 期解析（pat_res）
+                resolve_pattern(pattern, st, pscope);
                 resolve_block(then_block, st, pscope);
                 if let Some(eb) = else_block {
                     resolve_block(eb, st, scope);
@@ -400,10 +436,10 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
         ExprKind::Comptime { block } | ExprKind::Unsafe { block } => {
             resolve_block(block, st, scope);
         }
-        ExprKind::Loop { body } => {
+        ExprKind::Loop { label, body } => {
             // loop 表达式同样提供 break/continue 目标（无标签帧 = 最近循环）
             st.labels.push(LabelFrame {
-                label: None,
+                label: *label,
                 node: e.id,
             });
             resolve_block(body, st, scope);
@@ -437,6 +473,9 @@ pub(crate) fn declare_local_binding(
                     alias_of: None,
                     alias_resolved: None,
                     member_scope: None,
+                    external: false,
+                    ty_params: 0,
+                    decl: None,
                 });
                 if st.scopes.insert(scope, *name, def).is_some() {
                     st.diags.emit(Diagnostic::error(

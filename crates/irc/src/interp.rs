@@ -15,8 +15,12 @@
 //! 浮点按 `ty` 的精度算（f32 逐次舍入到单精度）。LLVM 的 poison 在
 //! 解释器里一律表现为 trap（越界移位、fptosi 越界/NaN），不发明值。
 //! 已知局限：槽是 u64，`i128` 按 64 位建模。
+//! 已知局限：`extern "c"` 调用的程序无法经本解释器验证——外部符号只
+//! 存在于 native 链接，Callee::Extern 一律 UnknownFun trap。
+//! 已知局限：聚合/可空实参经 Value 快照只传递首槽——多槽实参的 interp
+//! 语义不完整（差分 harness 因此不选此类用例；native 断言归 build_cli）。
 
-use ast::interner::Interner;
+use ast::interner::{Interner, Symbol};
 use sem::{DefArena, DefId, FloatKind, IntKind, TyArena, TyKind};
 
 use crate::tac::{
@@ -97,12 +101,24 @@ pub fn run_named(
     name: &str,
     args: &[Value],
 ) -> Result<Value, InterpError> {
+    Ok(run_named_capturing(tac, tys, defs, interner, name, args)?.0)
+}
+
+/// run_named + 收集 print 输出（差分 harness：与 native stdout 对拍，P1-8）
+pub fn run_named_capturing(
+    tac: &TacOutput,
+    tys: &TyArena,
+    defs: &DefArena,
+    interner: &Interner,
+    name: &str,
+    args: &[Value],
+) -> Result<(Value, Vec<String>), InterpError> {
     let fun = tac
         .funs
         .iter()
         .find(|f| interner.resolve(defs.get(f.def).name) == name)
         .ok_or_else(|| InterpError::UnknownFun(name.into()))?;
-    run_fun(tac, tys, defs, interner, fun, args)
+    run_fun_capturing(tac, tys, defs, interner, fun, args)
 }
 
 pub fn run_fun(
@@ -113,16 +129,74 @@ pub fn run_fun(
     fun: &FunBody,
     args: &[Value],
 ) -> Result<Value, InterpError> {
+    Ok(run_fun_capturing(tac, tys, defs, interner, fun, args)?.0)
+}
+
+fn run_fun_capturing(
+    tac: &TacOutput,
+    tys: &TyArena,
+    defs: &DefArena,
+    interner: &Interner,
+    fun: &FunBody,
+    args: &[Value],
+) -> Result<(Value, Vec<String>), InterpError> {
     let _ = defs; // 签名与 emit 对称（名字查找在 run_named 消费）
     if fun.params.len() != args.len() {
         return Err(InterpError::Arity);
     }
+    let mut strings: Vec<String> = Vec::new();
+    let mut str_ids: std::collections::HashMap<Symbol, u64> = std::collections::HashMap::new();
+    // 预 intern 全部 Const::Str：op() 是只读的，常量侧表必须先建——
+    // 否则数组/元组/返回里的字符串常量被读成 0（差分 harness 抓到）
+    let const_ops: Vec<Operand> = tac
+        .funs
+        .iter()
+        .chain(tac.globals.iter().filter_map(|g| g.init.as_ref()))
+        .flat_map(|f| {
+            let mut ops: Vec<Operand> = Vec::new();
+            for block in &f.blocks {
+                for instr in &block.instrs {
+                    match instr {
+                        Instr::Bin { l, r, .. } => ops.extend([l.clone(), r.clone()]),
+                        Instr::Un { a, .. } => ops.push(a.clone()),
+                        Instr::Copy { src, .. } => ops.push(src.clone()),
+                        Instr::Load { idx, .. } => ops.push(idx.clone()),
+                        Instr::Store { idx, src, .. } => ops.extend([idx.clone(), src.clone()]),
+                        Instr::Param { a, .. } => ops.push(a.clone()),
+                        Instr::StorePtr { src, .. } => ops.push(src.clone()),
+                        _ => {}
+                    }
+                }
+                if let Term::Ret { value: Some(v), .. } = &block.term {
+                    ops.push(v.clone());
+                }
+            }
+            ops
+        })
+        .collect();
+    for op in const_ops {
+        if let Operand::Const(Const::Str(sym)) = op
+            && !str_ids.contains_key(&sym)
+        {
+            let text = interner.resolve(sym);
+            let id = strings
+                .iter()
+                .position(|s| s == text)
+                .map(|i| i as u64 + 1)
+                .unwrap_or_else(|| {
+                    strings.push(text.to_string());
+                    strings.len() as u64
+                });
+            str_ids.insert(sym, id);
+        }
+    }
     let mut machine = Machine {
         tac,
         tys,
-        interner,
-        strings: Vec::new(),
+        strings,
+        str_ids,
         globals: Vec::new(),
+        printed: Vec::new(),
     };
     // 全局初始化：按源序执行合成 init 函数，后续函数经 globals 表读写。
     for global in &tac.globals {
@@ -147,6 +221,9 @@ pub fn run_fun(
                 | Instr::Copy { dst, .. }
                 | Instr::Load { dst, .. }
                 | Instr::Slot { dst, .. } => Some(dst.0),
+                Instr::AddrOf { dst, base, .. } => Some(dst.0.max(base.0)),
+                Instr::LoadPtr { dst, ptr, .. } => Some(dst.0.max(ptr.0)),
+                Instr::StorePtr { ptr, .. } => Some(ptr.0),
                 Instr::Store { base, .. } => Some(base.0),
                 Instr::LoadGlobal { dst, .. } => Some(dst.0),
                 Instr::Call { dst, .. } => dst.map(|d| d.0),
@@ -160,18 +237,22 @@ pub fn run_fun(
     for ((t, ty), arg) in fun.params.iter().zip(args) {
         machine.bind_arg(&mut cells[t.0 as usize], *ty, arg)?;
     }
-    machine.exec(fun, &mut cells, 0).map(|ret| match ret {
+    let value = machine.exec(fun, &mut cells, 0).map(|ret| match ret {
         Some((v, ty)) => machine.decode(v, ty),
         None => Value::Unit,
-    })
+    })?;
+    Ok((value, machine.printed))
 }
 
 struct Machine<'a> {
     tac: &'a TacOutput,
     tys: &'a TyArena,
-    interner: &'a Interner,
     strings: Vec<String>,
+    /// Const::Str → 侧表 id（预 intern；op() 只读，查表不 intern）
+    str_ids: std::collections::HashMap<Symbol, u64>,
     globals: Vec<(DefId, u64)>,
+    /// print 输出收集（差分 harness；每条 = 一行，与 runtime write_line 对齐）
+    printed: Vec<String>,
 }
 
 impl<'a> Machine<'a> {
@@ -288,9 +369,8 @@ impl<'a> Machine<'a> {
                 Const::Float(v) => v.to_bits(),
                 Const::Bool(b) => u64::from(*b),
                 Const::Null | Const::Unit => 0,
-                // 字符串常量操作数：经侧表——Machine 不可变，此处用占位，
-                // Str 操作数只出现在 Param（interp 的 Param 处理特判）
-                Const::Str(_) => 0,
+                // 字符串常量：查预 intern 的侧表（构建期已全量收集）
+                Const::Str(sym) => self.str_ids.get(sym).copied().unwrap_or(0),
             },
         }
     }
@@ -474,6 +554,11 @@ impl<'a> Machine<'a> {
                 }
                 Ok(())
             }
+            // M2 指针指令：解释器无地址空间模型，一律 trap
+            //（差分 harness 不选指针程序；native build 为验收路径）
+            Instr::AddrOf { .. } | Instr::LoadPtr { .. } | Instr::StorePtr { .. } => {
+                Err(InterpError::Trap("pointer op (AddrOf/LoadPtr/StorePtr)"))
+            }
             Instr::Slot { dst, count } => {
                 let slot = &mut cells[dst.0 as usize];
                 if slot.len() < *count as usize {
@@ -482,14 +567,7 @@ impl<'a> Machine<'a> {
                 Ok(())
             }
             Instr::Param { a, ty } => {
-                // Const::Str 操作数在 Param 位：经侧表取 id
-                let v = match a {
-                    Operand::Const(Const::Str(sym)) => {
-                        let s = self.interner.resolve(*sym);
-                        self.str_id(s)
-                    }
-                    _ => self.op(cells, a),
-                };
+                let v = self.op(cells, a);
                 pending.push((self.norm(v, *ty), *ty));
                 Ok(())
             }
@@ -509,13 +587,36 @@ impl<'a> Machine<'a> {
                                 }
                             }
                             TyKind::String => self.strings[(v.max(1) - 1) as usize].clone(),
+                            TyKind::Char => char::from_u32(v as u32)
+                                .map(|c| c.to_string())
+                                .unwrap_or_default(),
                             _ => return Err(InterpError::Trap("strconv ty")),
                         };
                         self.str_id(&s)
                     }
-                    Callee::Runtime(RuntimeFn::Print) => {
-                        // 参考解释器验证值语义；进程 stdout 由 native build 验证。
+                    Callee::Runtime(RuntimeFn::StrConvChar) => {
+                        let (v, _) = args.first().copied().unwrap_or((0, *ty));
+                        let s = char::from_u32(v as u32)
+                            .map(|c| c.to_string())
+                            .unwrap_or_default();
+                        self.str_id(&s)
+                    }
+                    Callee::Runtime(RuntimeFn::StrEq) => {
+                        let a = args.first().map(|(v, _)| *v).unwrap_or(0);
+                        let b = args.get(1).map(|(v, _)| *v).unwrap_or(0);
+                        let sa = &self.strings[(a.max(1) - 1) as usize];
+                        let sb = &self.strings[(b.max(1) - 1) as usize];
+                        u64::from(sa == sb)
+                    }
+                    Callee::Runtime(RuntimeFn::Print) | Callee::Runtime(RuntimeFn::PrintChar) => {
+                        // 差分验证（P1-8）：print 文本形态收集进 printed，
+                        // 由 diff harness 与 native stdout 逐行对拍
+                        let (v, pty) = args.first().copied().unwrap_or((0, *ty));
+                        self.printed.push(self.print_line(v, pty));
                         0
+                    }
+                    Callee::Extern(def) => {
+                        return Err(InterpError::UnknownFun(format!("extern def {}", def.0)));
                     }
                     Callee::Runtime(RuntimeFn::StrConcat) => {
                         let a = args.first().map(|(v, _)| *v).unwrap_or(0);
@@ -579,6 +680,25 @@ impl<'a> Machine<'a> {
             self.bind_arg(&mut cells[t.0 as usize], *ty, arg)?;
         }
         self.exec(fun, &mut cells, depth + 1)
+    }
+
+    /// print 输出的文本形态，与 runtime `starry_print_*` 对齐
+    /// （i64 十进制、bool 小写、string 原文、char 按码点）。浮点的
+    /// C fmt_double 15 位文本不复刻——差分用例排除浮点打印（已知局限）。
+    fn print_line(&self, v: u64, ty: sem::TyId) -> String {
+        match self.tys.kind(ty) {
+            TyKind::String => self.strings[(v.max(1) - 1) as usize].clone(),
+            TyKind::Char => char::from_u32(v as u32)
+                .map(|c| c.to_string())
+                .unwrap_or_default(),
+            TyKind::Bool => if v != 0 { "true" } else { "false" }.to_string(),
+            // 差分用例不含浮点打印；占位形态仅供人工排查
+            TyKind::Float(_) => format!("{:?}", self.decode(v, ty)),
+            _ => match self.decode(v, ty) {
+                Value::I(i) => i.to_string(),
+                other => format!("{other:?}"),
+            },
+        }
     }
 
     fn set_bool(&self, cells: &mut [Vec<u64>], dst: &TempId, b: bool) -> Result<(), InterpError> {

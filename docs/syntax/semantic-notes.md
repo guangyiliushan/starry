@@ -41,7 +41,12 @@ Error 恒真，出错子树不再级联诊断。parser 诊断原样保留在前�
 
 ## 类型系统 v1
 
-- 字面量默认：`Integer → i32`、`Float → f64`。
+- 字面量默认（M1）：`Float → f64`；`Integer` 未约束默认 **i64**（超 i64
+  取 i128，超 i128 报 `IntegerOutOfRange`）。**上下文定型**：标注
+  （`val x: i32 = 1`）、形参（`f(1)`）、返回（`return 5`）把整数字面量
+  钉到目标宽度，值域按目标宽度诊断（越界 = IntegerOutOfRange，
+  不是类型不匹配）。显式窄化仍走 `as`；二元运算操作数不做上下文传播
+  （`f(1)` 传播，`1 + 2` 不传播——操作数各自按未约束定型后 join）。
 - 内建标量：`i4..i128`、`int`(=i64)、`f32/f64`、`bool`、`string`、
   `char`、`unit` lower 为原子 `TyKind`；`Own`/`Shared` lower 为
   `Named(builtin_def, args)`。
@@ -82,8 +87,8 @@ Error 恒真，出错子树不再级联诊断。parser 诊断原样保留在前�
   （`member_field_ty` 的 Enum 臂）；未知变体报 `SemUnknownMember`。
 - 构造器调用：callee 定型为 `Named(struct)` → 按 `sig.fields` 走槽位机
   （位置/命名实参皆可）；`Named(enum)` 的 `E.A(x)` / `Opt.Some(x)` →
-  变体实参**仅位置形**（裸名槽参数无可信名），命名实参报
-  `SemUnsupportedConstruct`。
+  变体实参走同一槽位机（变体形参名在 declare 期保留，命名实参
+  `Opt.Some(value = x)` 同样可用）。
 - 函数值调用：callee 定型为 `TyKind::Fn`（形参/绑定持有的函数值），
   仅位置实参、无默认值补位；命名实参与默认值是具名函数的专有路径。
 - **类型对象分立**：类型名在值位置出现得到 `TyKind::TypeObject(DefId)`
@@ -115,8 +120,9 @@ when 分支顶层（`arrow_types == false`）把裸名解析为单段 Constructo
 `DefKind::LocalBinding.mutable` = 是否可重新赋值，由 `val`/`var`
 决定（`var → mutable`）；for 循环变量与 `val` 条件绑定（`if/while val`）
 一律不可变。模式里的 `mut`（`val mut x`）是值可变性标记，
-不授予重新赋值权（sem v1 不区分内部可变性）。结构体字段可变性不核查
-（v1 松弛，见跳过清单）。
+不授予重新赋值权（sem v1 不区分内部可变性）。字段/元素赋值穿透到
+根绑定：`val p` 的 `p.x = 1`、`val a` 的 `a[i] = 1` 与参数成员赋值
+一律报 `SemAssignToVal`（v1 把 `val` 聚合视为整体不可变）。
 
 ## 第七轮裁决（穷尽性、聚合格、别名）
 
@@ -181,22 +187,104 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
 
 以下「声称支持但 v1 不核查」的松弛项也已记录在案：
 
-- 结构体字段可变性（`p.x = 1` 不核查 mutable；class 字段规则待定）
+- 结构体字段可变性已核查（见「可变性」：val 聚合整体不可写）
 - `Own<T>` 的构造入口（moveck 测试以标注绑定近似，自带一条
   `SemTypeMismatch`，断言完整诊断序列钉住这一点）
 - import 存在性核查（`import a.b.*` 空转不查目标）
-- 间接类型别名循环（`A→B→A` 惰性 lower，仅使用时报告；
-  直接循环已报 `SemTypeCycle`）
-- 直接自引用 struct（`struct N { next: N }` 接受，无限大小留给 codegen）
 - `as`/`as?`/`as!` 不核查可转换性（`"s" as int` 亦 clean——显式转换的
   合法对集合未定义，留给类型设计；v1 全部接受、照目标类型定型）。
 - 内建类型名大小写敏感（`String` ≠ `string`，样例需随语法修订）
-- 整数字面量的值域与默认 `i32` 型不核查（`return 0xFFFFFFFFFF` 型标
-  i32、值超界；值解码与 i128 值域诊断在 irc 层，超大值发
-  `IntegerOutOfRange`）——字面量值的类型化核查归 sem 的未来条款
+- 间接类型别名循环（`A→B→A` 惰性 lower，仅使用时报告；
+  直接循环已报 `SemTypeCycle`）
+- 整数字面量的值域：超出 i32 自动取 i64/i128，超出 i128 报
+  `IntegerOutOfRange`；`as` 窄化仍按显式转换接受
+- 直接自引用 struct/enum（`struct N { next: N }`）按无限大小拒绝
+  （`SemTypeCycle`，codegen 不再栈溢出）
+
+## 2026-11 审查修复（语义契约）
+
+- **默认实参参与 resolve/check**：`fun f(x: int = expr)` 的 `expr` 在
+  参数作用域内解析并定型一次；类型不符报 `SemTypeMismatch`，irc 调用点
+  重放 AST 时 `expr_ty/expr_def` 已就绪。默认值可引用函数/全局。
+- **`if val` / `for` 模式走同一主语下推**：`refine_pattern_types` 统一
+  处理构造器（补 `pat_res`）与元组/数组元素类型，`if val Some(v)`、
+  `for (a, b) in pairs` 与 `when` 的模式绑定语义一致。
+- **物化 Range 保存开闭**：`Range(T)` 布局 = lo、hi、i8 开闭标记
+  （`..`=0，`..=`=1）；`in`/`for` 消费物化值时按标记选择 `<`/`<=`，
+  与区间字面量路径一致（不再有「物化后按闭区间」的 corner）。
+- **结构相等**：字符串 `==`/`!=` 走 `starry_str_eq` 内容比较；struct/
+  数组/元组/区间/nullable/enum 逐槽递归比较（enum 先比 tag 再比该变体
+  payload）。聚合比较不再落到 LLVM `icmp` 指针。
+- **递归聚合类型**：struct/enum 按值包含自身（含 nullable 字段）报
+  `SemTypeCycle`，避免 `scalar_slots` 无限递归。
+- **val 聚合不可写**：字段/元素赋值穿透根绑定，`val` 与参数报
+  `SemAssignToVal`。
+- **extern "c" 的 i128 标量 ABI 拒收**：i128 形参/返回值跨 C ABI 在本目标上与 IR i128 传参不一致（llvme 对 runtime 入口拆 hi/lo 规避，extern 无法替用户改 C 原型）——声明点报 `SemUnsupportedConstruct`；别名经 lower 归一为 `Int(I128)` 同样命中。聚合参数按指针传递不受影响。
+- **递归类型检测与全局依赖排序改显式栈迭代**：声明数不受 parser 深度限制，数万级 struct 字段链 / 全局初始化链的递归 DFS 会爆栈；诊断根序按声明源序稳定（原 HashMap 迭代序随进程随机）。
+- **if val 两段构造器精化**：`if val Opt.Some(w) = o` 的构造器路径此前只在
+  `is` 表达式解析（pat_res），if/while 的 val 条件漏 `resolve_pattern`——w 不被
+  payload 精化（差分 harness 抓到）。现三处同纪律。
+
+## 当前契约 vs 设计差距（M0 登记，2026-11-07）
+
+以下差距按 implementation-plan 的里程碑归属，**当前实现不伪装成设计目标**：
+
+- **指针（D-007 / M2）**：`*const T`/`*mut T` 类型+FFI 传参+`&x`/`*p`
+  表达式已落地（v1 保守借用见下节）。bare `*T` 现诊断（ExpectedToken）。
+  剩余 T2 checked pointer 后置 M10（Q7 裁定）。
+- **可空（D-007 / M2）**：前缀 `?T` + 原子后缀糖 `T?` 已落地（同一
+  `Nullable` AST）；复合后缀 `[T; N]?`/`(T, U)?` 拒绝并提示前缀形态。
+- **引用（D-007 / M2）**：`&T`/`&mut T`/`?&T` 类型 + `&x`/`*p` 表达式已
+  落地；借用检查为 v1 保守规则（见下节）。
+
+## 字段可变性三态与主构造（M3）
+
+- 主构造：`struct Point(val x: int, var y: int)`——`val`/`var` 头参数
+  声明字段（槽序 = 参数序 ++ body 序，重名报 SemDuplicateDef）；无修饰符
+  参数仅构造期使用（求值保留、值不存）；默认值与具名实参同函数纪律。
+- 字段可变性三态（`DefKind::StructField.mutable`）：`Some(true)`=var 字段
+  恒可写（`val` 根绑定也拦不住——Swift 深度可变性）；`Some(false)`=val
+  字段恒拒（`var` 根绑定也写不了）；`None`=legacy 无修饰符 body 字段，
+  按根绑定穿透检查（兼容既有语义）。
+- body 字段可带显式 `val`/`var` 硬关键字前缀；引用字段（头参数与 body
+  同纪律）在 declare 期拒绝（M2 非逃逸规则的 M3 延申）。
+
+## T1 借用规则（M2，v1 保守版）
+
+- 借用目标限**局部名**（Ident）；复合表达式目标、`&` 复合目标（字段/索引链）
+  报 `SemUnsupportedConstruct`。
+- **顶层全局不可借用**（跨函数生命周期 = 逃逸）：`SemUnsupportedConstruct`。
+- `&mut` 要求可变绑定（`var`）；`val`/参数报 `SemAssignToVal`。
+- **非逃逸**：引用不可存（struct 引用字段在 declare 期拒绝）、不可返回
+  （返回型 `&T` 拒绝）；引用只与同一 `Ref` 类型等价（格无聚合臂）。
+- 经解引赋值要求 pointee 可变（`*mut`/`&mut`），否则 `SemAssignToVal`。
+- 引用 → 裸指针（FFI 边界）须显式 `as`（`(&mut x) as *mut T`），
+  不做隐式转换；`as` 比前缀 `&` 绑定松，取址后转换要加括号。
+- 重叠 `&mut` 追踪（活借用区间数据流）未实现——v1 的规则集是
+  「不可逃逸 + 不可变借用只读」的最小安全面，区间追踪列为 M10 前专项。
+- **主构造（M3）**：✅ 已落地（见上节「字段可变性三态与主构造」）；
+  剩余：泛型 struct 默认值逐实例化检查未排期。
+- **class/ARC（M4）**：稳定拒收不变；spike 已按 D-004 重写（ARC 默认、
+  arena 后置）。R3/R4 已裁定 v1 形态（线程本地非原子、`weak var`、
+  `deinit`、引用相等、默认 final、无二级构造）。
+- **泛型（M7 slice 1）**：fun/struct 单态化已落地（见 generic-mono-spike.md）；
+  trait bounds/形参默认值/实参推断/泛型 enum 后置（R2 核心 exit 后不写进承诺）。
+
+## extern "c" 调用的 unsafe 边界（M6）
+
+- FFI 永远 unchecked：`extern "c"` 函数**只能在 `unsafe` 块内调用**，
+  否则报 `SemUnsupportedConstruct`（「calling an `extern "c"` function
+  requires an `unsafe` block」）。纯声明不调用无诊断。
+- sem 用深度计数（`SemState.unsafe_depth`）实现：`unsafe` 表达式臂进出
+  增减深度，深度贯穿普通块嵌套（unsafe 内嵌套块继承许可），离开块后
+  归零。
+- 检查点钉在命名函数调用定型路径（`type_call` 的 `expr_def → DefKind::Fun`
+  臂）：外部符号才有 external 标记，普通函数调用零开销（一次 bool+usize
+  比较）。
+- `unsafe { }` 是块表达式，值 = 块尾式；FFI 调用的结果照常参与定型。
 
 ## 诊断码
 
 全部 `Sem*` 前缀，定义在 `crates/ast/src/syntax/node.rs::DiagCode`，
-20 个（SemUndefinedName … SemUnknownMember）；另有 `Irc*` 2 个属 irc
+23 个（SemUndefinedName … SemUnknownMember、SemTypeArgMismatch）；另有 `Irc*` 2 个属 irc
 阶段（码表同址，见 opt-notes）。解析器码不受影响。

@@ -76,6 +76,7 @@ impl Parser {
             interner: session.interner,
             diagnostics: session.diags.all().to_vec(),
             node_count: session.id_gen.count(),
+            text: source.to_string(),
         })
     }
 }

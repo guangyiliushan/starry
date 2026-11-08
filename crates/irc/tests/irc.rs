@@ -34,7 +34,7 @@ fn arith_and_return() {
 fn var_slot_assignment_and_load() {
     assert_tac(
         "fun f(): int {\n    var i = 0\n    i = i + 1\n    return i\n}",
-        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i32\n    %t1 = load i32 %t0[0]\n    %t2 = add i32 %t1, 1\n    store %t0[0] = %t2 : i32\n    %t3 = load i32 %t0[0]\n    %t4 = conv %t3 : i32 -> i64\n    ret %t4 : i64\n",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i64\n    %t1 = load i64 %t0[0]\n    %t2 = add i64 %t1, 1\n    store %t0[0] = %t2 : i64\n    %t3 = load i64 %t0[0]\n    ret %t3 : i64\n",
     );
 }
 
@@ -42,7 +42,7 @@ fn var_slot_assignment_and_load() {
 fn while_loop_with_break_continue() {
     assert_tac(
         "fun f(n: int): int {\n    var i = 0\n    while i < n {\n        i = i + 1\n        if i == 2 {\n            continue\n        }\n        if i > 5 {\n            break\n        }\n    }\n    return i\n}",
-        "fun f(%t0: i64) -> i64:\n  b0:\n    store %t1[0] = 0 : i32\n    jmp b1\n  b1:\n    %t2 = load i32 %t1[0]\n    %t3 = conv %t2 : i32 -> i64\n    %t4 = lt i64 %t3, %t0\n    br %t4 -> b2, b3\n  b2:\n    %t5 = load i32 %t1[0]\n    %t6 = add i32 %t5, 1\n    store %t1[0] = %t6 : i32\n    %t7 = load i32 %t1[0]\n    %t8 = eq i32 %t7, 2\n    br %t8 -> b4, b5\n  b3:\n    %t11 = load i32 %t1[0]\n    %t12 = conv %t11 : i32 -> i64\n    ret %t12 : i64\n  b4:\n    jmp b1\n  b5:\n    jmp b6\n  b6:\n    %t9 = load i32 %t1[0]\n    %t10 = gt i32 %t9, 5\n    br %t10 -> b7, b8\n  b7:\n    jmp b3\n  b8:\n    jmp b9\n  b9:\n    jmp b1\n",
+        "fun f(%t0: i64) -> i64:\n  b0:\n    store %t1[0] = 0 : i64\n    jmp b1\n  b1:\n    %t2 = load i64 %t1[0]\n    %t3 = lt i64 %t2, %t0\n    br %t3 -> b2, b3\n  b2:\n    %t4 = load i64 %t1[0]\n    %t5 = add i64 %t4, 1\n    store %t1[0] = %t5 : i64\n    %t6 = load i64 %t1[0]\n    %t7 = eq i64 %t6, 2\n    br %t7 -> b4, b5\n  b3:\n    %t10 = load i64 %t1[0]\n    ret %t10 : i64\n  b4:\n    jmp b1\n  b5:\n    jmp b6\n  b6:\n    %t8 = load i64 %t1[0]\n    %t9 = gt i64 %t8, 5\n    br %t9 -> b7, b8\n  b7:\n    jmp b3\n  b8:\n    jmp b9\n  b9:\n    jmp b1\n",
     );
 }
 
@@ -136,7 +136,7 @@ fn enum_variant_value_and_ctor() {
 fn array_literal_and_dynamic_index() {
     assert_tac(
         "fun f(i: int): int {\n    val a = [1, 2, 3]\n    return a[i]\n}",
-        "fun f(%t0: i64) -> i64:\n  b0:\n    store %t1[0] = 1 : i32\n    store %t1[1] = 2 : i32\n    store %t1[2] = 3 : i32\n    %t2 = load i32 %t1[%t0]\n    %t3 = conv %t2 : i32 -> i64\n    ret %t3 : i64\n",
+        "fun f(%t0: i64) -> i64:\n  b0:\n    store %t1[0] = 1 : i64\n    store %t1[1] = 2 : i64\n    store %t1[2] = 3 : i64\n    %t2 = load i64 %t1[%t0]\n    ret %t2 : i64\n",
     );
 }
 
@@ -144,7 +144,7 @@ fn array_literal_and_dynamic_index() {
 fn array_repeat_fill_loop() {
     assert_tac(
         "fun f(): int {\n    val a = [9; 3]\n    return a[0]\n}",
-        "fun f() -> i64:\n  b0:\n    %t0 = slot [3]\n    store %t1[0] = 0 : i32\n    jmp b1\n  b1:\n    %t2 = load i32 %t1[0]\n    %t3 = lt i32 %t2, 3\n    br %t3 -> b2, b3\n  b2:\n    %t4 = load i32 %t1[0]\n    store %t0[%t4] = 9 : i32\n    %t5 = add i32 %t4, 1\n    store %t1[0] = %t5 : i32\n    jmp b1\n  b3:\n    %t6 = load i32 %t0[0]\n    %t7 = conv %t6 : i32 -> i64\n    ret %t7 : i64\n",
+        "fun f() -> i64:\n  b0:\n    %t0 = slot [3]\n    store %t1[0] = 0 : i32\n    jmp b1\n  b1:\n    %t2 = load i32 %t1[0]\n    %t3 = lt i32 %t2, 3\n    br %t3 -> b2, b3\n  b2:\n    %t4 = load i32 %t1[0]\n    store %t0[%t4] = 9 : i64\n    %t5 = add i32 %t4, 1\n    store %t1[0] = %t5 : i32\n    jmp b1\n  b3:\n    %t6 = load i64 %t0[0]\n    ret %t6 : i64\n",
     );
 }
 
@@ -152,7 +152,7 @@ fn array_repeat_fill_loop() {
 fn tuple_literal() {
     assert_tac(
         "fun f(): int {\n    val t = (1, true)\n    return 0\n}",
-        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i32\n    store %t0[1] = true : i1\n    ret 0 : i64\n",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i64\n    store %t0[1] = true : i1\n    ret 0 : i64\n",
     );
 }
 
@@ -176,7 +176,7 @@ fn aggregate_var_assignment_copies() {
 fn when_statement_enum_subject() {
     assert_tac(
         "enum E {\n    A\n    B\n}\nfun f(e: E): int {\n    when e {\n        E.A -> 1\n        E.B -> 2\n    }\n}",
-        "fun f(%t0: E) -> i64:\n  b0:\n    %t2 = load i8 %t0[0]\n    %t3 = eq i8 %t2, 0\n    br %t3 -> b2, b3\n  b1:\n    %t6 = load i32 %t1[0]\n    %t7 = conv %t6 : i32 -> i64\n    ret %t7 : i64\n  b2:\n    store %t1[0] = 1 : i32\n    jmp b1\n  b3:\n    %t4 = load i8 %t0[0]\n    %t5 = eq i8 %t4, 1\n    br %t5 -> b4, b5\n  b4:\n    store %t1[0] = 2 : i32\n    jmp b1\n  b5:\n    unreachable\n",
+        "fun f(%t0: E) -> i64:\n  b0:\n    %t2 = load i8 %t0[0]\n    %t3 = eq i8 %t2, 0\n    br %t3 -> b2, b3\n  b1:\n    %t6 = load i64 %t1[0]\n    ret %t6 : i64\n  b2:\n    store %t1[0] = 1 : i64\n    jmp b1\n  b3:\n    %t4 = load i8 %t0[0]\n    %t5 = eq i8 %t4, 1\n    br %t5 -> b4, b5\n  b4:\n    store %t1[0] = 2 : i64\n    jmp b1\n  b5:\n    unreachable\n",
     );
 }
 
@@ -184,7 +184,7 @@ fn when_statement_enum_subject() {
 fn when_expression_with_else() {
     assert_tac(
         "fun f(x: int): int {\n    val y = when x {\n        0 -> 10\n        else -> 20\n    }\n    return y\n}",
-        "fun f(%t0: i64) -> i64:\n  b0:\n    %t2 = conv %t0 : i64 -> i32\n    %t3 = eq i32 %t2, 0\n    br %t3 -> b2, b3\n  b1:\n    %t4 = load i32 %t1[0]\n    %t5 = copy %t4 : i32\n    %t6 = conv %t5 : i32 -> i64\n    ret %t6 : i64\n  b2:\n    store %t1[0] = 10 : i32\n    jmp b1\n  b3:\n    jmp b4\n  b4:\n    store %t1[0] = 20 : i32\n    jmp b1\n  b5:\n    unreachable\n",
+        "fun f(%t0: i64) -> i64:\n  b0:\n    %t2 = conv %t0 : i64 -> i32\n    %t3 = eq i32 %t2, 0\n    br %t3 -> b2, b3\n  b1:\n    %t4 = load i64 %t1[0]\n    %t5 = copy %t4 : i64\n    ret %t5 : i64\n  b2:\n    store %t1[0] = 10 : i64\n    jmp b1\n  b3:\n    jmp b4\n  b4:\n    store %t1[0] = 20 : i64\n    jmp b1\n  b5:\n    unreachable\n",
     );
 }
 
@@ -200,7 +200,7 @@ fn for_over_array() {
 fn for_over_inclusive_range() {
     assert_tac(
         "fun f(): int {\n    var s: int = 0\n    for i in 1..=3 {\n        s = s + i\n    }\n    return s\n}",
-        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i64\n    store %t1[0] = 1 : i32\n    jmp b1\n  b1:\n    %t2 = load i32 %t1[0]\n    %t3 = le i32 %t2, 3\n    br %t3 -> b2, b4\n  b2:\n    %t4 = load i32 %t1[0]\n    %t5 = load i64 %t0[0]\n    %t6 = conv %t4 : i32 -> i64\n    %t7 = add i64 %t5, %t6\n    store %t0[0] = %t7 : i64\n    jmp b3\n  b3:\n    %t8 = load i32 %t1[0]\n    %t9 = add i32 %t8, 1\n    store %t1[0] = %t9 : i32\n    jmp b1\n  b4:\n    %t10 = load i64 %t0[0]\n    ret %t10 : i64\n",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i64\n    store %t1[0] = 1 : i64\n    jmp b1\n  b1:\n    %t2 = load i64 %t1[0]\n    %t3 = le i64 %t2, 3\n    br %t3 -> b2, b4\n  b2:\n    %t4 = load i64 %t1[0]\n    %t5 = load i64 %t0[0]\n    %t6 = add i64 %t5, %t4\n    store %t0[0] = %t6 : i64\n    jmp b3\n  b3:\n    %t7 = load i64 %t1[0]\n    %t8 = add i64 %t7, 1\n    store %t1[0] = %t8 : i64\n    jmp b1\n  b4:\n    %t9 = load i64 %t0[0]\n    ret %t9 : i64\n",
     );
 }
 
@@ -232,7 +232,7 @@ fn is_pattern_binds_in_then_branch() {
 fn defer_runs_after_return_value_computed() {
     assert_tac(
         "fun f(): int {\n    var x = 0\n    defer {\n        x = 99\n    }\n    return x\n}",
-        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i32\n    %t1 = load i32 %t0[0]\n    %t2 = conv %t1 : i32 -> i64\n    store %t0[0] = 99 : i32\n    ret %t2 : i64\n",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i64\n    %t1 = load i64 %t0[0]\n    store %t0[0] = 99 : i64\n    ret %t1 : i64\n",
     );
 }
 
@@ -256,7 +256,7 @@ fn safe_call_chain_with_elvis() {
 fn for_loop_break_targets_loop() {
     assert_tac(
         "fun f(): int {\n    var s = 0\n    for i in 1..3 {\n        s = s + i\n        break\n    }\n    return s\n}",
-        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i32\n    store %t1[0] = 1 : i32\n    jmp b1\n  b1:\n    %t2 = load i32 %t1[0]\n    %t3 = lt i32 %t2, 3\n    br %t3 -> b2, b4\n  b2:\n    %t4 = load i32 %t1[0]\n    %t5 = load i32 %t0[0]\n    %t6 = add i32 %t5, %t4\n    store %t0[0] = %t6 : i32\n    jmp b4\n  b3:\n    %t7 = load i32 %t1[0]\n    %t8 = add i32 %t7, 1\n    store %t1[0] = %t8 : i32\n    jmp b1\n  b4:\n    %t9 = load i32 %t0[0]\n    %t10 = conv %t9 : i32 -> i64\n    ret %t10 : i64\n",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i64\n    store %t1[0] = 1 : i64\n    jmp b1\n  b1:\n    %t2 = load i64 %t1[0]\n    %t3 = lt i64 %t2, 3\n    br %t3 -> b2, b4\n  b2:\n    %t4 = load i64 %t1[0]\n    %t5 = load i64 %t0[0]\n    %t6 = add i64 %t5, %t4\n    store %t0[0] = %t6 : i64\n    jmp b4\n  b3:\n    %t7 = load i64 %t1[0]\n    %t8 = add i64 %t7, 1\n    store %t1[0] = %t8 : i64\n    jmp b1\n  b4:\n    %t9 = load i64 %t0[0]\n    ret %t9 : i64\n",
     );
 }
 
@@ -264,7 +264,7 @@ fn for_loop_break_targets_loop() {
 fn defer_at_return_runs_innermost_first() {
     assert_tac(
         "fun f(): int {\n    var a = 0\n    defer {\n        a = a + 10\n    }\n    if true {\n        defer {\n            a = a + 1\n        }\n        return a\n    }\n    return 0\n}",
-        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i32\n    br true -> b1, b2\n  b1:\n    %t1 = load i32 %t0[0]\n    %t2 = conv %t1 : i32 -> i64\n    %t3 = load i32 %t0[0]\n    %t4 = add i32 %t3, 1\n    store %t0[0] = %t4 : i32\n    %t5 = load i32 %t0[0]\n    %t6 = add i32 %t5, 10\n    store %t0[0] = %t6 : i32\n    ret %t2 : i64\n  b2:\n    jmp b3\n  b3:\n    ret 0 : i64\n",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i64\n    br true -> b1, b2\n  b1:\n    %t1 = load i64 %t0[0]\n    %t2 = load i64 %t0[0]\n    %t3 = add i64 %t2, 1\n    store %t0[0] = %t3 : i64\n    %t4 = load i64 %t0[0]\n    %t5 = add i64 %t4, 10\n    store %t0[0] = %t5 : i64\n    ret %t1 : i64\n  b2:\n    jmp b3\n  b3:\n    ret 0 : i64\n",
     );
 }
 
@@ -272,7 +272,7 @@ fn defer_at_return_runs_innermost_first() {
 fn defer_at_break_runs_loop_level_only() {
     assert_tac(
         "fun f(): int {\n    var a = 0\n    defer {\n        a = a + 10\n    }\n    while a < 1 {\n        defer {\n            a = a + 1\n        }\n        break\n    }\n    return a\n}",
-        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i32\n    jmp b1\n  b1:\n    %t1 = load i32 %t0[0]\n    %t2 = lt i32 %t1, 1\n    br %t2 -> b2, b3\n  b2:\n    %t3 = load i32 %t0[0]\n    %t4 = add i32 %t3, 1\n    store %t0[0] = %t4 : i32\n    jmp b3\n  b3:\n    %t5 = load i32 %t0[0]\n    %t6 = conv %t5 : i32 -> i64\n    %t7 = load i32 %t0[0]\n    %t8 = add i32 %t7, 10\n    store %t0[0] = %t8 : i32\n    ret %t6 : i64\n",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 0 : i64\n    jmp b1\n  b1:\n    %t1 = load i64 %t0[0]\n    %t2 = lt i64 %t1, 1\n    br %t2 -> b2, b3\n  b2:\n    %t3 = load i64 %t0[0]\n    %t4 = add i64 %t3, 1\n    store %t0[0] = %t4 : i64\n    jmp b3\n  b3:\n    %t5 = load i64 %t0[0]\n    %t6 = load i64 %t0[0]\n    %t7 = add i64 %t6, 10\n    store %t0[0] = %t7 : i64\n    ret %t5 : i64\n",
     );
 }
 
@@ -280,15 +280,15 @@ fn defer_at_break_runs_loop_level_only() {
 fn when_with_literal_subject() {
     assert_tac(
         "fun f(): int {\n    return when 0 {\n        0 -> 1\n        else -> 2\n    }\n}",
-        "fun f() -> i64:\n  b0:\n    %t0 = copy 0 : i32\n    %t2 = eq i32 %t0, 0\n    br %t2 -> b2, b3\n  b1:\n    %t3 = load i32 %t1[0]\n    %t4 = conv %t3 : i32 -> i64\n    ret %t4 : i64\n  b2:\n    store %t1[0] = 1 : i32\n    jmp b1\n  b3:\n    jmp b4\n  b4:\n    store %t1[0] = 2 : i32\n    jmp b1\n  b5:\n    unreachable\n",
+        "fun f() -> i64:\n  b0:\n    %t0 = copy 0 : i64\n    %t2 = conv %t0 : i64 -> i32\n    %t3 = eq i32 %t2, 0\n    br %t3 -> b2, b3\n  b1:\n    %t4 = load i64 %t1[0]\n    ret %t4 : i64\n  b2:\n    store %t1[0] = 1 : i64\n    jmp b1\n  b3:\n    jmp b4\n  b4:\n    store %t1[0] = 2 : i64\n    jmp b1\n  b5:\n    unreachable\n",
     );
 }
 
 #[test]
-fn range_value_materializes_two_slots() {
+fn range_value_materializes_slots_with_inclusivity() {
     assert_tac(
-        "fun f(x: i32): bool {\n    val r = 1..5\n    return x in r\n}",
-        "fun f(%t0: i32) -> i1:\n  b0:\n    store %t1[0] = 1 : i32\n    store %t1[1] = 5 : i32\n    %t2 = load i32 %t1[0]\n    %t3 = load i32 %t1[1]\n    %t4 = ge i32 %t0, %t2\n    %t5 = le i32 %t0, %t3\n    br %t4 -> b1, b3\n  b1:\n    br %t5 -> b2, b3\n  b2:\n    %t6 = copy true : i1\n    jmp b4\n  b3:\n    %t6 = copy false : i1\n    jmp b4\n  b4:\n    ret %t6 : i1\n",
+        "fun f(x: i32): bool {\n    val r = 1..5\n    return x in r\n}\n",
+        "fun f(%t0: i32) -> i1:\n  b0:\n    store %t1[0] = 1 : i64\n    store %t1[1] = 5 : i64\n    store %t1[2] = 0 : i8\n    %t2 = load i32 %t1[0]\n    %t3 = load i32 %t1[1]\n    %t4 = load i8 %t1[2]\n    %t5 = ge i32 %t0, %t2\n    %t7 = ne i8 %t4, 0\n    br %t7 -> b1, b2\n  b1:\n    %t8 = le i32 %t0, %t3\n    %t6 = copy %t8 : i1\n    jmp b3\n  b2:\n    %t9 = lt i32 %t0, %t3\n    %t6 = copy %t9 : i1\n    jmp b3\n  b3:\n    br %t5 -> b4, b6\n  b4:\n    br %t6 -> b5, b6\n  b5:\n    %t10 = copy true : i1\n    jmp b7\n  b6:\n    %t10 = copy false : i1\n    jmp b7\n  b7:\n    ret %t10 : i1\n",
     );
 }
 
@@ -296,7 +296,7 @@ fn range_value_materializes_two_slots() {
 fn for_iterable_hoisted_out_of_loop() {
     assert_tac(
         "fun f(): int {\n    var arr = [1, 2, 3]\n    var s: int = 0\n    for i in arr {\n        s = s + i\n    }\n    return s\n}",
-        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i32\n    store %t0[1] = 2 : i32\n    store %t0[2] = 3 : i32\n    %t2 = load i32 %t0[0]\n    store %t1[0] = %t2 : i32\n    %t3 = load i32 %t0[1]\n    store %t1[1] = %t3 : i32\n    %t4 = load i32 %t0[2]\n    store %t1[2] = %t4 : i32\n    store %t5[0] = 0 : i64\n    %t7 = load i32 %t1[0]\n    store %t6[0] = %t7 : i32\n    %t8 = load i32 %t1[1]\n    store %t6[1] = %t8 : i32\n    %t9 = load i32 %t1[2]\n    store %t6[2] = %t9 : i32\n    store %t10[0] = 0 : i32\n    jmp b1\n  b1:\n    %t11 = load i32 %t10[0]\n    %t12 = lt i32 %t11, 3\n    br %t12 -> b2, b4\n  b2:\n    %t14 = load i32 %t10[0]\n    %t13 = load i32 %t6[%t14]\n    %t15 = load i64 %t5[0]\n    %t16 = conv %t13 : i32 -> i64\n    %t17 = add i64 %t15, %t16\n    store %t5[0] = %t17 : i64\n    jmp b3\n  b3:\n    %t18 = load i32 %t10[0]\n    %t19 = add i32 %t18, 1\n    store %t10[0] = %t19 : i32\n    jmp b1\n  b4:\n    %t20 = load i64 %t5[0]\n    ret %t20 : i64\n",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i64\n    store %t0[1] = 2 : i64\n    store %t0[2] = 3 : i64\n    %t2 = load i64 %t0[0]\n    store %t1[0] = %t2 : i64\n    %t3 = load i64 %t0[1]\n    store %t1[1] = %t3 : i64\n    %t4 = load i64 %t0[2]\n    store %t1[2] = %t4 : i64\n    store %t5[0] = 0 : i64\n    %t7 = load i64 %t1[0]\n    store %t6[0] = %t7 : i64\n    %t8 = load i64 %t1[1]\n    store %t6[1] = %t8 : i64\n    %t9 = load i64 %t1[2]\n    store %t6[2] = %t9 : i64\n    store %t10[0] = 0 : i32\n    jmp b1\n  b1:\n    %t11 = load i32 %t10[0]\n    %t12 = lt i32 %t11, 3\n    br %t12 -> b2, b4\n  b2:\n    %t14 = load i32 %t10[0]\n    %t13 = load i64 %t6[%t14]\n    %t15 = load i64 %t5[0]\n    %t16 = add i64 %t15, %t13\n    store %t5[0] = %t16 : i64\n    jmp b3\n  b3:\n    %t17 = load i32 %t10[0]\n    %t18 = add i32 %t17, 1\n    store %t10[0] = %t18 : i32\n    jmp b1\n  b4:\n    %t19 = load i64 %t5[0]\n    ret %t19 : i64\n",
     );
 }
 
@@ -328,7 +328,7 @@ fn member_field_assignment() {
 fn array_index_assignment() {
     assert_tac(
         "fun f(): int {\n    var a = [1, 2, 3]\n    a[1] = 9\n    return a[1]\n}",
-        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i32\n    store %t0[1] = 2 : i32\n    store %t0[2] = 3 : i32\n    %t2 = load i32 %t0[0]\n    store %t1[0] = %t2 : i32\n    %t3 = load i32 %t0[1]\n    store %t1[1] = %t3 : i32\n    %t4 = load i32 %t0[2]\n    store %t1[2] = %t4 : i32\n    store %t1[1] = 9 : i32\n    %t6 = load i32 %t1[0]\n    store %t5[0] = %t6 : i32\n    %t7 = load i32 %t1[1]\n    store %t5[1] = %t7 : i32\n    %t8 = load i32 %t1[2]\n    store %t5[2] = %t8 : i32\n    %t9 = load i32 %t5[1]\n    %t10 = conv %t9 : i32 -> i64\n    ret %t10 : i64\n",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i64\n    store %t0[1] = 2 : i64\n    store %t0[2] = 3 : i64\n    %t2 = load i64 %t0[0]\n    store %t1[0] = %t2 : i64\n    %t3 = load i64 %t0[1]\n    store %t1[1] = %t3 : i64\n    %t4 = load i64 %t0[2]\n    store %t1[2] = %t4 : i64\n    store %t1[1] = 9 : i64\n    %t6 = load i64 %t1[0]\n    store %t5[0] = %t6 : i64\n    %t7 = load i64 %t1[1]\n    store %t5[1] = %t7 : i64\n    %t8 = load i64 %t1[2]\n    store %t5[2] = %t8 : i64\n    %t9 = load i64 %t5[1]\n    ret %t9 : i64\n",
     );
 }
 
@@ -344,7 +344,7 @@ fn compound_assignment_through_member() {
 fn compound_assignment_through_index() {
     assert_tac(
         "fun f(): int {\n    var a = [1, 2, 3]\n    a[1] += 5\n    return a[1]\n}",
-        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i32\n    store %t0[1] = 2 : i32\n    store %t0[2] = 3 : i32\n    %t2 = load i32 %t0[0]\n    store %t1[0] = %t2 : i32\n    %t3 = load i32 %t0[1]\n    store %t1[1] = %t3 : i32\n    %t4 = load i32 %t0[2]\n    store %t1[2] = %t4 : i32\n    %t6 = load i32 %t1[0]\n    store %t5[0] = %t6 : i32\n    %t7 = load i32 %t1[1]\n    store %t5[1] = %t7 : i32\n    %t8 = load i32 %t1[2]\n    store %t5[2] = %t8 : i32\n    %t9 = load i32 %t5[1]\n    %t10 = add i32 %t9, 5\n    store %t1[1] = %t10 : i32\n    %t12 = load i32 %t1[0]\n    store %t11[0] = %t12 : i32\n    %t13 = load i32 %t1[1]\n    store %t11[1] = %t13 : i32\n    %t14 = load i32 %t1[2]\n    store %t11[2] = %t14 : i32\n    %t15 = load i32 %t11[1]\n    %t16 = conv %t15 : i32 -> i64\n    ret %t16 : i64\n",
+        "fun f() -> i64:\n  b0:\n    store %t0[0] = 1 : i64\n    store %t0[1] = 2 : i64\n    store %t0[2] = 3 : i64\n    %t2 = load i64 %t0[0]\n    store %t1[0] = %t2 : i64\n    %t3 = load i64 %t0[1]\n    store %t1[1] = %t3 : i64\n    %t4 = load i64 %t0[2]\n    store %t1[2] = %t4 : i64\n    %t6 = load i64 %t1[0]\n    store %t5[0] = %t6 : i64\n    %t7 = load i64 %t1[1]\n    store %t5[1] = %t7 : i64\n    %t8 = load i64 %t1[2]\n    store %t5[2] = %t8 : i64\n    %t9 = load i64 %t5[1]\n    %t10 = add i64 %t9, 5\n    store %t1[1] = %t10 : i64\n    %t12 = load i64 %t1[0]\n    store %t11[0] = %t12 : i64\n    %t13 = load i64 %t1[1]\n    store %t11[1] = %t13 : i64\n    %t14 = load i64 %t1[2]\n    store %t11[2] = %t14 : i64\n    %t15 = load i64 %t11[1]\n    ret %t15 : i64\n",
     );
 }
 
@@ -374,7 +374,7 @@ fn for_continue_targets_step_block() {
     // 不再跳过自增死循环；自增也不再落进 break 后的孤儿块
     assert_tac(
         "fun f(n: int): int {\n    var s: int = 0\n    for i in 0..n {\n        if i == 1 {\n            continue\n        }\n        s = s + i\n    }\n    return s\n}",
-        "fun f(%t0: i64) -> i64:\n  b0:\n    store %t1[0] = 0 : i64\n    store %t2[0] = 0 : i32\n    jmp b1\n  b1:\n    %t3 = load i32 %t2[0]\n    %t4 = lt i32 %t3, %t0\n    br %t4 -> b2, b4\n  b2:\n    %t5 = load i32 %t2[0]\n    %t6 = eq i64 %t5, 1\n    br %t6 -> b5, b6\n  b3:\n    %t9 = load i32 %t2[0]\n    %t10 = add i32 %t9, 1\n    store %t2[0] = %t10 : i32\n    jmp b1\n  b4:\n    %t11 = load i64 %t1[0]\n    ret %t11 : i64\n  b5:\n    jmp b3\n  b6:\n    jmp b7\n  b7:\n    %t7 = load i64 %t1[0]\n    %t8 = add i64 %t7, %t5\n    store %t1[0] = %t8 : i64\n    jmp b3\n",
+        "fun f(%t0: i64) -> i64:\n  b0:\n    store %t1[0] = 0 : i64\n    store %t2[0] = 0 : i64\n    jmp b1\n  b1:\n    %t3 = load i64 %t2[0]\n    %t4 = lt i64 %t3, %t0\n    br %t4 -> b2, b4\n  b2:\n    %t5 = load i64 %t2[0]\n    %t6 = eq i64 %t5, 1\n    br %t6 -> b5, b6\n  b3:\n    %t9 = load i64 %t2[0]\n    %t10 = add i64 %t9, 1\n    store %t2[0] = %t10 : i64\n    jmp b1\n  b4:\n    %t11 = load i64 %t1[0]\n    ret %t11 : i64\n  b5:\n    jmp b3\n  b6:\n    jmp b7\n  b7:\n    %t7 = load i64 %t1[0]\n    %t8 = add i64 %t7, %t5\n    store %t1[0] = %t8 : i64\n    jmp b3\n",
     );
 }
 
@@ -384,7 +384,7 @@ fn if_is_condition_keeps_outer_scope() {
     // 外层 val 不再被弹掉（曾 IrcUnsupportedLowering）
     assert_tac(
         "enum Opt {\n    None\n    Some(int)\n}\nfun f(o: Opt): int {\n    val x = 5\n    if o is Opt.Some(v) {\n        return v\n    }\n    return x\n}",
-        "fun f(%t0: Opt) -> i64:\n  b0:\n    %t1 = copy 5 : i32\n    %t2 = load i8 %t0[0]\n    %t3 = eq i8 %t2, 1\n    %t4 = load i64 %t0[1]\n    br %t3 -> b1, b2\n  b1:\n    ret %t4 : i64\n  b2:\n    jmp b3\n  b3:\n    %t5 = conv %t1 : i32 -> i64\n    ret %t5 : i64\n",
+        "fun f(%t0: Opt) -> i64:\n  b0:\n    %t1 = copy 5 : i64\n    %t2 = load i8 %t0[0]\n    %t3 = eq i8 %t2, 1\n    %t4 = load i64 %t0[1]\n    br %t3 -> b1, b2\n  b1:\n    ret %t4 : i64\n  b2:\n    jmp b3\n  b3:\n    ret %t1 : i64\n",
     );
 }
 
@@ -487,7 +487,8 @@ fn print_builtin_lowers_to_runtime_call() {
     );
     assert_eq!(codes, Vec::new(), "{codes:?}");
     assert!(
-        text.contains("param 42 : i32") && text.contains("call starry_print : unit"),
+        // M1：42 未约束 → i64（param 类型随字面量定型）
+        text.contains("param 42 : i64") && text.contains("call starry_print : unit"),
         "{text}"
     );
 }
@@ -502,8 +503,9 @@ fn mutable_destructuring_binding_assignment() {
 }",
     );
     assert_eq!(codes, Vec::new(), "{codes:?}");
+    // M1：未约束字面量默认 i64
     assert!(
-        text.contains("= 3 : i32") && text.contains("add i32"),
+        text.contains("= 3 : i64") && text.contains("add i64"),
         "{text}"
     );
 }
@@ -524,6 +526,7 @@ fun f(a: [P; 2]): int {
 }",
     );
     assert_eq!(codes, Vec::new(), "{codes:?}");
+    // 聚合元素跨槽（es=2 → mul）；s: int 恒 i64（M1 不受影响）
     assert!(text.contains("mul") && text.contains("load i64"), "{text}");
 }
 
@@ -578,5 +581,90 @@ fn single_slot_aggregate_read_is_a_base() {
     assert_tac(
         "struct P { x: int }\nfun f(p: P): int {\n    return p.x\n}",
         "fun f(%t0: P) -> i64:\n  b0:\n    %t1 = load i64 %t0[0]\n    ret %t1 : i64\n",
+    );
+}
+
+#[test]
+fn cyclic_global_initializers_report_with_decl_spans() {
+    // 环诊断定位到环内各全局的声明（Def.span），不再恒 0..0
+    let src = "val a: int = b\nval b: int = a";
+    let parsed = parser::parse_source(src).expect("machine parse");
+    let mut sem_out = sem::analyze(parsed);
+    let tac: TacOutput = irc::lower(&mut sem_out, src);
+    // 回边目标（环的根成员）报一条即可拒绝整个环——与 sem 递归类型
+    // 检测同一粒度；关键是 span 指向声明本身，不再恒 0..0
+    assert_eq!(tac.diags.len(), 1, "{:?}", tac.diags);
+    assert_eq!(
+        tac.diags[0].span,
+        ast::token::Span { start: 0, end: 14 },
+        "{:?}",
+        tac.diags
+    );
+}
+
+#[test]
+fn deep_global_chain_does_not_overflow() {
+    // 回归：全局依赖排序原为递归 DFS，数万级初始化链在 2 MiB 测试
+    // 线程栈上爆栈；显式栈迭代应稳过（链无环 → 零诊断）
+    let n = 20_000;
+    let mut src = String::new();
+    for i in 0..n {
+        if i + 1 < n {
+            src.push_str(&format!("val g{i}: int = g{}\n", i + 1));
+        } else {
+            src.push_str(&format!("val g{i}: int = 0\n"));
+        }
+    }
+    let parsed = parser::parse_source(&src).expect("machine parse");
+    let mut sem_out = sem::analyze(parsed);
+    assert!(
+        sem_out.diagnostics.is_empty(),
+        "{:?}",
+        sem_out.diagnostics.first()
+    );
+    let tac: TacOutput = irc::lower(&mut sem_out, &src);
+    assert!(tac.diags.is_empty(), "{:?}", tac.diags.first());
+}
+#[test]
+fn annotated_array_literal_stores_at_target_element_width() {
+    // 审查 P0-1：字面量块按目标元素宽直写（消除 [n x i64] 块里的 store i32
+    // 与二次 widen 双块）；窄写宽读是静默错编源
+    let (text, codes) = dump("fun f() : int {\n    val a: [int; 2] = [7, 8]\n    return a[0]\n}");
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(
+        text.contains("store %t0[0] = 7 : i64") && text.contains("store %t0[1] = 8 : i64"),
+        "{text}"
+    );
+    assert!(!text.contains(": i32"), "{text}");
+}
+#[test]
+fn aggregate_top_level_global_use_reports_stable_unsupported() {
+    // 审查 P0-3：未 lower 的顶层聚合全局，使用点是稳定码 unsupported 诊断，
+    // 不是「契约破缺」内部断言，也不级联
+    let (_, codes) = dump("val G: [int; 2] = [7, 8]\nfun main() {\n    print(G[0])\n}");
+    assert_eq!(
+        codes,
+        vec![
+            DiagCode::IrcUnsupportedLowering,
+            DiagCode::IrcUnsupportedLowering
+        ]
+    );
+}
+#[test]
+fn borrow_and_deref_lower_to_pointer_instrs() {
+    // M2 slice 2：&x → AddrOf；*p → LoadPtr；*p = v → StorePtr
+    let (text, codes) = dump(
+        "fun f() : int {
+    var y = 7
+    val p = &y
+    val q = &mut y
+    *q = 9
+    return *p
+}",
+    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(
+        text.contains("addrof") && text.contains("loadptr") && text.contains("storeptr"),
+        "{text}"
     );
 }

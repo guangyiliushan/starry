@@ -11,13 +11,13 @@ use ast::interner::{Interner, Symbol};
 use ast::syntax::decl::{BindingDecl, DeclKind, FunDecl, FunctionBody};
 use ast::syntax::expr::{Block, Condition};
 use ast::syntax::node::{DiagCode, Diagnostic, NodeId, SourceFile, Span};
-use ast::syntax::pat::PatKind;
+use ast::syntax::pat::{PatKind, PatWrap};
 use ast::syntax::stmt::{StmtKind, StmtWrap};
 use ast::token::OperatorKind;
-use sem::{DefArena, DefId, DefKind, FlowRes, SideTable, TyArena, TyId, TyKind};
+use sem::{DefArena, DefId, FlowRes, SideTable, TyArena, TyId, TyKind};
 
 use crate::expr;
-use crate::tac::{BlockId, FunBody, GlobalBody, Instr, Operand, TacOutput, TempId, Term};
+use crate::tac::{BlockId, Callee, FunBody, GlobalBody, Instr, Operand, TacOutput, TempId, Term};
 
 /// SemanticOutput 的字段级拆分（lib.rs lower 处 destructure 产物）：
 /// 共享侧表/arena + interner 的可变字段借，disjoint 故可同船
@@ -31,6 +31,7 @@ pub(crate) struct SemRef<'a> {
     pub pat_binding_def: &'a SideTable<DefId>,
     pub flow_res: &'a SideTable<FlowRes>,
     pub ty_of_node: &'a SideTable<TyId>,
+    pub decl_def: &'a [Option<DefId>],
     pub interner: &'a mut Interner,
 }
 
@@ -104,6 +105,9 @@ pub(crate) struct Ctx<'r, 'a> {
     block_index: std::collections::HashMap<BlockId, usize>,
     /// 顶层全局：Symbol → (DefId, 类型)；只含标量（v1）
     globals: &'r HashMap<Symbol, (DefId, TyId)>,
+    /// 声明了但未 lower 的顶层全局名（聚合/非简单模式）：使用点给稳定
+    /// unsupported 诊断（M-later），不再落「契约破缺」断言
+    pub(crate) unsupported_globals: &'r std::collections::HashSet<Symbol>,
 }
 
 pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> TacOutput {
@@ -112,15 +116,20 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
 
     // 顶层全局表：v1 只 lower 标量 Binding；聚合全局仍需 TAC 存储扩展。
     let mut globals: HashMap<Symbol, (DefId, TyId)> = HashMap::new();
+    let mut skipped: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
     for item in &ast.items {
         let DeclKind::Binding(binding) = &item.kind else {
             continue;
         };
+        if !matches!(binding.pattern.kind, PatKind::Binding { .. }) {
+            // 非简单模式的全局同样未 lower：登记其名，使用点给稳定诊断
+            collect_pattern_names(&binding.pattern, &mut skipped);
+        }
         let PatKind::Binding { name, .. } = &binding.pattern.kind else {
             out.diags.push(Diagnostic::error(
                 DiagCode::IrcUnsupportedLowering,
                 binding.pattern.span,
-                "非简单顶层全局声明的 lowering 在 M-later（解构全局）",
+                "destructured top-level globals are not lowered in this milestone (M-later)",
             ));
             continue;
         };
@@ -137,8 +146,9 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
             out.diags.push(Diagnostic::error(
                 DiagCode::IrcUnsupportedLowering,
                 binding.pattern.span,
-                "聚合顶层全局声明的 lowering 在 M-later",
+                "aggregate top-level globals are not lowered in this milestone (M-later)",
             ));
+            skipped.insert(*name);
             continue;
         }
         globals.insert(*name, (def, ty));
@@ -157,16 +167,14 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
             continue;
         };
         let init = if let Some(init) = &binding.init {
-            let mut ctx = Ctx::new(sem, source, i8_ty, &globals);
+            let mut ctx = Ctx::new(sem, source, i8_ty, &globals, &skipped);
             let entry = ctx.reserve_block();
             ctx.switch_to(entry);
             ctx.fun.entry = entry;
             ctx.fun.def = def;
             ctx.fun.ret = ty;
             ctx.env.push(HashMap::new());
-            let value = expr::lower_expr(&mut ctx, init);
-            let from_ty = ctx.expr_ty(init);
-            let value = expr::coerce(&mut ctx, value, from_ty, ty);
+            let value = expr::lower_expr_as(&mut ctx, init, ty);
             if ctx.is_unit(ty) {
                 ctx.terminate(Term::Ret { value: None, ty });
             } else {
@@ -194,16 +202,173 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
     }
 
     // 函数体 lowering（顶层全局表穿入 Ctx，供 Ident 读写）。
-    for item in &ast.items {
-        if !matches!(item.kind, DeclKind::Fun(_)) {
+    // M7：泛型原件无 expr_ty（sem 不检查），只 lower 实例化克隆；
+    // def 经 decl_def 侧链取（克隆 def 与原件同 span，span 反查会撞车）
+    for (i, item) in ast.items.iter().enumerate() {
+        let DeclKind::Fun(f) = &item.kind else {
+            continue;
+        };
+        if !f.type_params.is_empty() {
             continue;
         }
-        let mut ctx = Ctx::new(sem, source, i8_ty, &globals);
-        ctx.lower_fun(item.span);
+        let Some(def) = sem.decl_def.get(i).copied().flatten() else {
+            continue;
+        };
+        let mut ctx = Ctx::new(sem, source, i8_ty, &globals, &skipped);
+        ctx.lower_fun(def);
         out.diags.append(&mut ctx.diags);
         out.funs.push(ctx.fun);
     }
+    reorder_globals(&mut out, sem.defs);
     out
+}
+
+/// 模式内全部绑定名（非简单顶层全局的 skipped 登记用，与 declare.walk 同形）
+fn collect_pattern_names(pat: &PatWrap, out: &mut std::collections::HashSet<Symbol>) {
+    match &pat.kind {
+        PatKind::Binding { name, .. } => {
+            out.insert(*name);
+        }
+        PatKind::Or(ps)
+        | PatKind::Tuple { elements: ps, .. }
+        | PatKind::Array { elements: ps, .. } => {
+            for p in ps {
+                collect_pattern_names(p, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 顶层全局初始化按依赖序执行（`val b = a + 3` 先于 `val a` 声明时，
+/// 仍先初始化 a）。依赖 = init 函数直接读的全局 + 其调用链读的全局；
+/// 环报 IrcUnsupportedLowering（无法定义顺序，不静默按源序），
+/// 诊断定位到环的回边目标成员的声明（Def.span，一条即拒绝整个环）。
+fn reorder_globals(out: &mut TacOutput, defs: &DefArena) {
+    use std::collections::{BTreeSet, HashMap};
+    if out.globals.len() < 2 {
+        return;
+    }
+    let index: HashMap<DefId, usize> = out
+        .globals
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.def, i))
+        .collect();
+    let mut reads: HashMap<DefId, BTreeSet<DefId>> = HashMap::new();
+    let mut calls: HashMap<DefId, BTreeSet<DefId>> = HashMap::new();
+    let mut scan = |fun: &FunBody| {
+        let mut r = BTreeSet::new();
+        let mut c = BTreeSet::new();
+        for b in &fun.blocks {
+            for i in &b.instrs {
+                match i {
+                    Instr::LoadGlobal { global, .. } => {
+                        r.insert(*global);
+                    }
+                    Instr::Call {
+                        callee: Callee::Def(d),
+                        ..
+                    } => {
+                        c.insert(*d);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        reads.insert(fun.def, r);
+        calls.insert(fun.def, c);
+    };
+    for fun in &out.funs {
+        scan(fun);
+    }
+    for g in &out.globals {
+        if let Some(init) = &g.init {
+            scan(init);
+        }
+    }
+    // 调用链闭包：被调函数读的全局也是调用者读的全局
+    loop {
+        let mut changed = false;
+        let keys: Vec<DefId> = calls.keys().copied().collect();
+        for def in keys {
+            let callees = calls.get(&def).cloned().unwrap_or_default();
+            let mut add = BTreeSet::new();
+            for c in &callees {
+                if let Some(rs) = reads.get(c) {
+                    add.extend(rs.iter().copied());
+                }
+            }
+            let entry = reads.entry(def).or_default();
+            let before = entry.len();
+            entry.extend(add);
+            if entry.len() != before {
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let n = out.globals.len();
+    let deps: Vec<Vec<usize>> = out
+        .globals
+        .iter()
+        .map(|g| {
+            reads
+                .get(&g.def)
+                .map(|rs| {
+                    rs.iter()
+                        .filter_map(|d| index.get(d).copied())
+                        .filter(|&i| i != index[&g.def])
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    // 显式栈迭代 DFS（声明数不受 parser 深度限制，深链递归会爆栈）
+    let mut state = vec![0u8; n];
+    let mut order = Vec::with_capacity(n);
+    let mut cycles: Vec<usize> = Vec::new();
+    for start in 0..n {
+        if state[start] != 0 {
+            continue;
+        }
+        state[start] = 1;
+        let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
+        while let Some(top) = stack.last_mut() {
+            let node = top.0;
+            if top.1 < deps[node].len() {
+                let d = deps[node][top.1];
+                top.1 += 1;
+                match state[d] {
+                    0 => {
+                        state[d] = 1;
+                        stack.push((d, 0));
+                    }
+                    1 if !cycles.contains(&d) => {
+                        cycles.push(d);
+                    }
+                    _ => {}
+                }
+            } else {
+                state[node] = 2;
+                order.push(node);
+                stack.pop();
+            }
+        }
+    }
+    for &i in &cycles {
+        let span = defs.get(out.globals[i].def).span;
+        out.diags.push(Diagnostic::error(
+            DiagCode::IrcUnsupportedLowering,
+            span,
+            "cyclic global initializers cannot be ordered",
+        ));
+    }
+    let globals = std::mem::take(&mut out.globals);
+    let mut slots: Vec<Option<GlobalBody>> = globals.into_iter().map(Some).collect();
+    out.globals = order.into_iter().filter_map(|i| slots[i].take()).collect();
 }
 
 impl<'r, 'a> Ctx<'r, 'a> {
@@ -216,6 +381,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
         source: &'a str,
         i8_ty: TyId,
         globals: &'r HashMap<Symbol, (DefId, TyId)>,
+        unsupported_globals: &'r std::collections::HashSet<Symbol>,
     ) -> Self {
         let unit = sem.tys.unit;
         Self {
@@ -239,6 +405,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             defers: Vec::new(),
             block_index: std::collections::HashMap::new(),
             globals,
+            unsupported_globals,
         }
     }
 
@@ -328,22 +495,17 @@ impl<'r, 'a> Ctx<'r, 'a> {
         matches!(self.sem.tys.kind(ty), TyKind::Unit)
     }
 
-    fn find_fun_def(&mut self, span: Span) -> Option<DefId> {
-        for i in 0..self.sem.defs.len() {
-            let def = self.sem.defs.get(DefId(i as u32));
-            if def.span == span && matches!(def.kind, DefKind::Fun) {
-                return Some(DefId(i as u32));
-            }
-        }
-        self.diag(span, "函数声明未找到对应 DefId（sem 契约破缺）");
-        None
-    }
-
     /// 以 DefId 找函数声明 AST（默认值表达式在 callee 侧，需要 AST 原文）。
-    /// 返回 'a 生命期（借自 sem.source，与 &mut self 发射无冲突）
+    /// 返回 'a 生命期（借自 sem.source，与 &mut self 发射无冲突）。
+    /// M7：优先 decl_def 侧链（克隆 def 与原件同 span，span 反查会撞车）
     pub(crate) fn find_fun_decl(&self, def: DefId) -> Option<&'a FunDecl> {
-        let span = self.sem.defs.get(def).span;
         let source: &'a SourceFile = self.sem.source;
+        if let Some(idx) = self.sem.decl_def.iter().position(|d| *d == Some(def))
+            && let DeclKind::Fun(decl) = &source.items[idx].kind
+        {
+            return Some(decl);
+        }
+        let span = self.sem.defs.get(def).span;
         for item in &source.items {
             if let DeclKind::Fun(decl) = &item.kind
                 && item.span == span
@@ -354,14 +516,46 @@ impl<'r, 'a> Ctx<'r, 'a> {
         None
     }
 
+    /// 以 DefId 找 struct 声明 AST（主构造默认值在声明侧，需要 AST 原文）
+    pub(crate) fn find_struct_decl(&self, def: DefId) -> Option<&'a ast::syntax::decl::StructDecl> {
+        let source: &'a SourceFile = self.sem.source;
+        if let Some(idx) = self.sem.decl_def.iter().position(|d| *d == Some(def))
+            && let DeclKind::Struct(decl) = &source.items[idx].kind
+        {
+            return Some(decl);
+        }
+        let span = self.sem.defs.get(def).span;
+        for item in &source.items {
+            if let DeclKind::Struct(decl) = &item.kind
+                && item.span == span
+            {
+                return Some(decl);
+            }
+        }
+        None
+    }
+
+    /// 主构造第 idx 个参数的默认表达式
+    pub(crate) fn find_struct_default(
+        &self,
+        def: DefId,
+        idx: usize,
+    ) -> Option<&'a ast::syntax::expr::ExprWrap> {
+        self.find_struct_decl(def)?
+            .primary_ctor
+            .get(idx)?
+            .default
+            .as_deref()
+    }
+
     // ---- 函数 ----
 
-    fn lower_fun(&mut self, span: Span) {
-        let Some(def) = self.find_fun_def(span) else {
-            return;
-        };
+    fn lower_fun(&mut self, def: DefId) {
         let Some(decl) = self.find_fun_decl(def) else {
-            self.diag(span, "函数声明 AST 缺失（sem 契约破缺）");
+            self.diag(
+                self.sem.defs.get(def).span,
+                "函数声明 AST 缺失（sem 契约破缺）",
+            );
             return;
         };
         self.fun.def = def;
@@ -387,8 +581,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 self.finish_fun(tail);
             }
             Some(FunctionBody::Expr(e)) => {
-                let op = expr::lower_expr(self, e);
-                let op = expr::coerce(self, op, self.expr_ty(e), self.fun.ret);
+                let op = expr::lower_expr_as(self, e, self.fun.ret);
                 let value = if self.is_unit(self.fun.ret) {
                     None
                 } else {
@@ -473,10 +666,9 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 self.lower_jump(s.id, expr::FlowTarget::Continue, s.span, None)
             }
             StmtKind::Return { value } => {
-                let op = value.as_ref().map(|v| {
-                    let op = expr::lower_expr(self, v);
-                    expr::coerce(self, op, self.expr_ty(v), self.fun.ret)
-                });
+                let op = value
+                    .as_ref()
+                    .map(|v| expr::lower_expr_as(self, v, self.fun.ret));
                 self.emit_defers_above(0);
                 self.terminate(Term::Ret {
                     value: op,
@@ -509,16 +701,14 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 self.diag(b.pattern.span, "无初始化解构绑定的 lowering 未排期");
                 return;
             };
-            let op = expr::lower_expr(self, init);
-            let from = self.expr_ty(init);
             let to = self
                 .sem
                 .pat_binding_def
                 .get(b.pattern.id)
                 .map(|d| self.sem.defs.get(*d).sig.ty)
                 .filter(|ty| !matches!(self.sem.tys.kind(*ty), TyKind::Unknown))
-                .unwrap_or(from);
-            let op = expr::coerce(self, op, from, to);
+                .unwrap_or_else(|| self.expr_ty(init));
+            let op = expr::lower_expr_as(self, init, to);
             // sem 已限 Binding/Wildcard/Tuple/Array；条件必为 true
             expr::lower_pattern(self, &b.pattern, op, to, b.pattern.span);
             if !b.immutable {
@@ -543,10 +733,8 @@ impl<'r, 'a> Ctx<'r, 'a> {
             self.env_top().insert(*name, (Place::Slot(slot), ty));
             return;
         };
-        let op = expr::lower_expr(self, init);
-        let from = self.expr_ty(init);
-        let to = target.unwrap_or(from);
-        let op = expr::coerce(self, op, from, to);
+        let to = target.unwrap_or_else(|| self.expr_ty(init));
+        let op = expr::lower_expr_as(self, init, to);
         if b.immutable {
             if crate::layout::is_aggregate(self, to) {
                 // 聚合：不可变 → 别名构造基址（无重赋值，零拷贝安全）
@@ -593,8 +781,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             return;
         };
         if op == OperatorKind::Eq {
-            let v = expr::lower_expr(self, value);
-            let v = expr::coerce(self, v, self.expr_ty(value), to);
+            let v = expr::lower_expr_as(self, value, to);
             expr::assign_to(self, target, v, target.span);
             return;
         }
@@ -1051,7 +1238,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
         self.switch_to(merge_b);
     }
 
-    /// for Pattern in range_value：lo/hi 两槽（Range 类型不区分开闭，按闭区间）
+    /// for Pattern in 物化 Range 值：lo/hi/开闭标记三槽（槽 2n = i8 标记，`..`=0 按 `<`、`..=`=1 按 `<=`）
     fn lower_for_range_value(
         &mut self,
         node: NodeId,
@@ -1075,6 +1262,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 self.temp()
             }
         };
+        let n = crate::layout::scalar_slots(self, inner).max(1);
         let lo = self.temp();
         self.emit(Instr::Load {
             dst: lo,
@@ -1086,8 +1274,15 @@ impl<'r, 'a> Ctx<'r, 'a> {
         self.emit(Instr::Load {
             dst: hi,
             base: rbase,
-            idx: Operand::Const(crate::tac::Const::Int(1)),
+            idx: Operand::Const(crate::tac::Const::Int(n as i128)),
             ty: inner,
+        });
+        let flag = self.temp();
+        self.emit(Instr::Load {
+            dst: flag,
+            base: rbase,
+            idx: Operand::Const(crate::tac::Const::Int((2 * n) as i128)),
+            ty: self.i8_ty,
         });
         let counter = self.temp();
         self.emit(Instr::Store {
@@ -1109,16 +1304,15 @@ impl<'r, 'a> Ctx<'r, 'a> {
             idx: Operand::Const(crate::tac::Const::Int(0)),
             ty: inner,
         });
-        let cmp = self.temp();
-        self.emit(Instr::Bin {
-            dst: cmp,
-            op: crate::tac::BinOp::Le,
-            l: Operand::Temp(c),
-            r: Operand::Temp(hi),
-            ty: inner,
-        });
+        let cmp = expr::range_upper(
+            self,
+            Operand::Temp(c),
+            Operand::Temp(hi),
+            Operand::Temp(flag),
+            inner,
+        );
         self.terminate(Term::Br {
-            cond: Operand::Temp(cmp),
+            cond: cmp,
             then_: body_b,
             else_: merge_b,
         });

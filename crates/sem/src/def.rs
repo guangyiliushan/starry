@@ -26,9 +26,12 @@ pub enum DefKind {
     },
     Param,
     Struct,
+    /// M3 字段可变性三态：Some(true)=var 字段（恒可写）/
+    /// Some(false)=val 字段（恒不可写）/None=legacy（按根绑定可变性）。
     StructField {
         parent: DefId,
         index: usize,
+        mutable: Option<bool>,
     },
     Enum,
     EnumVariant {
@@ -37,6 +40,12 @@ pub enum DefKind {
     },
     Class,
     TypeAlias,
+    /// M7 泛型类型形参：un f<T>(...) 的 T。注册进泛型作用域；
+    /// lower 期经 SemState.mono_subst 兑现为具体类型（克隆体）或
+    /// TyKind::Param(index)（泛型原件签名）。
+    TypeParam {
+        index: u32,
+    },
     BuiltinType,
     /// v1 I/O builtin `print(value)`; overload by argument type at call sites.
     BuiltinPrint,
@@ -87,6 +96,13 @@ pub struct Def {
     pub alias_resolved: Option<DefId>,
     /// 成员作用域（struct/enum/class）
     pub member_scope: Option<ScopeId>,
+    /// extern "c" 声明：调用点按外部符号名发射，不生成函数体
+    pub external: bool,
+    /// M7：类型形参个数（0 = 非泛型）；check 的 type_call 据此刻度实参并代入
+    pub ty_params: u32,
+    /// 声明在 SourceFile.items 中的下标（M7 克隆 def 反查声明用；
+    /// 非顶层声明 / 实例化 spec def 无 items 对应 = None）
+    pub decl: Option<usize>,
 }
 
 #[derive(Debug, Default)]

@@ -5,3 +5,9 @@ fun grade(score: int) : int = when score {
     60..89 -> 3
     else -> 0
 }
+
+fun main() {
+    print(grade(95))
+    print(grade(60))
+    print(grade(10))
+}

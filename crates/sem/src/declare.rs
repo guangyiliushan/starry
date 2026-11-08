@@ -21,10 +21,30 @@ const BUILTINS: &[&str] = &[
 pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
     register_builtins(st);
     let root = st.scopes.root();
-    for item in &ast.items {
-        declare_decl(item, root, st);
+    for (i, item) in ast.items.iter().enumerate() {
+        declare_one(item, i, root, st);
     }
     lower_top_level_sigs(ast, st);
+}
+
+/// M7 增量入口：只处理克隆追加的 items[st.items_done..]。
+/// 不重跑 register_builtins/lower_top_level_sigs（它们只服务原件）；
+/// 克隆已在 mono::make_fun_clone 里登记（spec def + 类型形参作用域），
+/// 这里跳过声明（再 add_def 会与原件撞 SemDuplicateDef）。
+pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
+    let root = st.scopes.root();
+    for (i, item) in ast.items.iter().enumerate().skip(start) {
+        if i < st.decl_def.len() {
+            continue;
+        }
+        declare_one(item, i, root, st);
+    }
+}
+
+/// 逐项声明：先占 decl_def 槽（与 items 1:1 对齐），再登记名字
+fn declare_one(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState) {
+    st.decl_def.push(None);
+    declare_decl(decl, index, scope, st);
 }
 
 fn register_builtins(st: &mut SemState) {
@@ -42,6 +62,9 @@ fn register_builtins(st: &mut SemState) {
             alias_of: None,
             alias_resolved: None,
             member_scope: None,
+            external: false,
+            ty_params: 0,
+            decl: None,
         });
         st.scopes.insert(root, sym, def);
         if *name == "Own" {
@@ -61,6 +84,9 @@ fn add_def(st: &mut SemState, scope: ScopeId, name: Symbol, span: Span, kind: De
         alias_of: None,
         alias_resolved: None,
         member_scope: None,
+        external: false,
+        ty_params: 0,
+        decl: None,
     });
     if let Some(old) = st.scopes.insert(scope, name, def) {
         // 保留第一个定义，重复项报错
@@ -74,7 +100,76 @@ fn add_def(st: &mut SemState, scope: ScopeId, name: Symbol, span: Span, kind: De
     def
 }
 
-fn declare_decl(decl: &DeclNode, scope: ScopeId, st: &mut SemState) {
+/// M7：类型形参作用域——形参名注册为 DefKind::TypeParam，返回新作用域
+/// （空列表返回 parent 自身）。泛型 fun 把它存 member_scope 供
+/// resolve/check 期作 pscope 祖先；struct 只作签名 lower 的临时作用域。
+fn type_param_scope(
+    st: &mut SemState,
+    parent: ScopeId,
+    type_params: &[ast::syntax::ty::TypeParam],
+) -> ScopeId {
+    let scope = st.scopes.new_scope(Some(parent));
+    for (i, tp) in type_params.iter().enumerate() {
+        let ast::syntax::ty::TypeParamName::Valid(name) = &tp.name else {
+            continue;
+        };
+        let def = st.defs.push(Def {
+            kind: DefKind::TypeParam { index: i as u32 },
+            name: *name,
+            scope,
+            span: tp.span,
+            sig: DefSig::new(st.tys.unit, st.tys.unknown),
+            resolving: false,
+            alias_of: None,
+            alias_resolved: None,
+            member_scope: None,
+            external: false,
+            ty_params: 0,
+            decl: None,
+        });
+        // 同名形参：保留首个，重复项报错（与参数重名同纪律）
+        if let Some(old) = st.scopes.insert(scope, *name, def) {
+            st.scopes.insert(scope, *name, old);
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemDuplicateDef,
+                tp.span,
+                format!("duplicate type parameter `{}`", st.interner.resolve(*name)),
+            ));
+        }
+    }
+    scope
+}
+
+/// M7 slice 1 拒收面：类型形参的 bounds/默认值/variance 与 where 子句。
+/// （trait bounds 是 M9 的地基，先给稳定诊断而非半特性。）
+fn reject_generic_extras(
+    type_params: &[ast::syntax::ty::TypeParam],
+    where_clause: &[WhereConstraint],
+    span: Span,
+    st: &mut SemState,
+    what: &str,
+) {
+    let fancy = type_params
+        .iter()
+        .any(|tp| tp.variance.is_some() || !tp.bounds.is_empty() || tp.default.is_some());
+    if fancy {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemUnsupportedConstruct,
+            span,
+            format!(
+                "type parameter bounds/defaults/variance on generic {what} are not supported in this slice"
+            ),
+        ));
+    }
+    if !where_clause.is_empty() {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemUnsupportedConstruct,
+            span,
+            format!("where clauses on generic {what} are not supported in this slice"),
+        ));
+    }
+}
+fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState) {
     match &decl.kind {
         DeclKind::Import(i) => {
             if let ImportKind::Qualified { path, suffix } = &i.kind {
@@ -93,34 +188,98 @@ fn declare_decl(decl: &DeclNode, scope: ScopeId, st: &mut SemState) {
             // Native import：v1 注册别名名（调用解析为 unsupported）
         }
         DeclKind::Fun(f) => {
+            let def = add_def(st, scope, f.name, decl.span, DefKind::Fun);
+            st.defs.get_mut(def).ty_params = f.type_params.len() as u32;
+            st.defs.get_mut(def).decl = Some(index);
+            *st.decl_def.last_mut().expect("decl_def slot") = Some(def);
             if !f.type_params.is_empty() {
-                st.diags.emit(Diagnostic::error(
-                    DiagCode::SemUnsupportedConstruct,
-                    decl.span,
-                    "generic functions are not supported in semantic v1",
-                ));
+                reject_generic_extras(&f.type_params, &f.where_clause, decl.span, st, "functions");
+                if st.interner.resolve(f.name) == "main" {
+                    // 入口无法实例化：泛型 main 永远无体可链
+                    st.diags.emit(Diagnostic::error(
+                        DiagCode::SemUnsupportedConstruct,
+                        decl.span,
+                        "generic `main` is not supported (entry point cannot be instantiated)",
+                    ));
+                }
+                // 类型形参作用域：签名（declare 期）与体（resolve/check 期，
+                // 经 member_scope 作 pscope 祖先）共用；M7 单态化克隆各建一份
+                let tscope = type_param_scope(st, scope, &f.type_params);
+                st.defs.get_mut(def).member_scope = Some(tscope);
             }
-            add_def(st, scope, f.name, decl.span, DefKind::Fun);
         }
         DeclKind::Binding(b) => {
             declare_binding_name(b, scope, decl.span, st);
         }
         DeclKind::Struct(s) => {
             let def = add_def(st, scope, s.name, decl.span, DefKind::Struct);
+            st.defs.get_mut(def).ty_params = s.type_params.len() as u32;
+            st.defs.get_mut(def).decl = Some(index);
+            *st.decl_def.last_mut().expect("decl_def slot") = Some(def);
+            if !s.type_params.is_empty() {
+                reject_generic_extras(&s.type_params, &[], decl.span, st, "structs");
+                if s.primary_ctor.iter().any(|p| p.default.is_some()) {
+                    // 默认值表达式逐实例化检查未排期（M7 后续切片）
+                    st.diags.emit(Diagnostic::error(
+                        DiagCode::SemUnsupportedConstruct,
+                        decl.span,
+                        "generic struct primary-constructor defaults are not supported in this slice",
+                    ));
+                }
+            }
             let ms = st.scopes.new_scope(Some(scope));
             st.defs.get_mut(def).member_scope = Some(ms);
-            for (index, field) in s.fields.iter().enumerate() {
+            // M3 字段注册序 = 槽布局序：头构造 val/var 参数（声明字段）在前，
+            // body 字段在后；member_scope 内重名由 add_def 报 SemDuplicateDef。
+            let mut index = 0usize;
+            for p in &s.primary_ctor {
+                if matches!(
+                    p.modifier,
+                    ast::syntax::decl::ParamModifier::Val | ast::syntax::decl::ParamModifier::Var
+                ) {
+                    add_def(
+                        st,
+                        ms,
+                        p.name,
+                        decl.span,
+                        DefKind::StructField {
+                            parent: def,
+                            index,
+                            mutable: Some(p.modifier == ast::syntax::decl::ParamModifier::Var),
+                        },
+                    );
+                    index += 1;
+                }
+            }
+            for field in &s.fields {
+                // 显式 var/val 走三态；无修饰符 = None（legacy：按根绑定可变性）
+                let mutable = field.mutable;
                 add_def(
                     st,
                     ms,
                     field.name,
                     decl.span,
-                    DefKind::StructField { parent: def, index },
+                    DefKind::StructField {
+                        parent: def,
+                        index,
+                        mutable,
+                    },
                 );
+                index += 1;
             }
         }
         DeclKind::Enum(e) => {
             let def = add_def(st, scope, e.name, decl.span, DefKind::Enum);
+            st.defs.get_mut(def).ty_params = e.type_params.len() as u32;
+            st.defs.get_mut(def).decl = Some(index);
+            *st.decl_def.last_mut().expect("decl_def slot") = Some(def);
+            if !e.type_params.is_empty() {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    decl.span,
+                    "generic enums are not supported in this slice",
+                ));
+            }
             let ms = st.scopes.new_scope(Some(scope));
             st.defs.get_mut(def).member_scope = Some(ms);
             for (index, variant) in e.variants.iter().enumerate() {
@@ -152,20 +311,36 @@ fn declare_decl(decl: &DeclNode, scope: ScopeId, st: &mut SemState) {
             }
         }
         DeclKind::TypeAlias(t) => {
+            if !t.type_params.is_empty() {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    decl.span,
+                    "generic type aliases are not supported in this slice",
+                ));
+            }
             let def = add_def(st, scope, t.name, decl.span, DefKind::TypeAlias);
             st.defs.get_mut(def).alias_of = Some(t.ty.clone());
         }
         DeclKind::Extern(e) => match &e.body {
             ExternBody::Fun(sig) => {
-                add_def(st, scope, sig.name, decl.span, DefKind::Fun);
+                let def = add_def(st, scope, sig.name, decl.span, DefKind::Fun);
+                st.defs.get_mut(def).external = true;
             }
             ExternBody::Block { members } | ExternBody::Namespace { members, .. } => {
                 for sig in members {
-                    add_def(st, scope, sig.name, decl.span, DefKind::Fun);
+                    let def = add_def(st, scope, sig.name, decl.span, DefKind::Fun);
+                    st.defs.get_mut(def).external = true;
                 }
             }
         },
         DeclKind::Union(u) => {
+            if !u.type_params.is_empty() {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    decl.span,
+                    "generic unions are not supported in semantic v1",
+                ));
+            }
             add_def(st, scope, u.name, decl.span, DefKind::Struct);
         }
         DeclKind::Trait(t) => {
@@ -266,8 +441,6 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                     Some(d) => d,
                     None => continue,
                 };
-                // 泛型 fun 不 lower（T 未定义会级联 SemUndefinedType）；
-                // 参数名保留维持 arity，类型走投毒 Error
                 let (params, ret) = if f.type_params.is_empty() {
                     (
                         lower_params(st, root, &f.params, item.span),
@@ -277,9 +450,15 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                         },
                     )
                 } else {
+                    // M7：泛型签名 lower 进类型形参作用域——T 落成
+                    // TyKind::Param(index)，调用点经 TyArena::subst 代入
+                    let tscope = st.defs.get(def).member_scope.unwrap_or(root);
                     (
-                        f.params.iter().map(|p| (p.name, st.tys.error)).collect(),
-                        st.tys.error,
+                        lower_params(st, tscope, &f.params, item.span),
+                        match &f.ret {
+                            Some(t) => lower_ty(st, tscope, t),
+                            None => st.tys.unit,
+                        },
                     )
                 };
                 let defaults: Vec<bool> = f.params.iter().map(|p| p.default.is_some()).collect();
@@ -293,12 +472,68 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                     Some(d) => d,
                     None => continue,
                 };
-                let fields: Vec<(Symbol, TyId)> = s
-                    .fields
-                    .iter()
-                    .map(|f| (f.name, lower_ty(st, root, &f.ty)))
-                    .collect();
+                // M7：泛型 struct 的字段类型 lower 进类型形参作用域（T → Param）
+                let sscope = if s.type_params.is_empty() {
+                    root
+                } else {
+                    type_param_scope(st, root, &s.type_params)
+                };
+                // M3 主构造：头 val/var 参数类型（引用字段拒绝同纪律）+ body 字段
+                let mut fields: Vec<(Symbol, TyId)> = Vec::new();
+                for p in &s.primary_ctor {
+                    if matches!(
+                        p.modifier,
+                        ast::syntax::decl::ParamModifier::Val
+                            | ast::syntax::decl::ParamModifier::Var
+                    ) {
+                        let ty = match &p.ty {
+                            Some(t) => lower_ty(st, sscope, t),
+                            None => {
+                                st.diags.emit(Diagnostic::error(
+                                    DiagCode::SemParamTypeRequired,
+                                    item.span,
+                                    format!(
+                                        "parameter `{}` requires a type annotation",
+                                        st.interner.resolve(p.name)
+                                    ),
+                                ));
+                                st.tys.error
+                            }
+                        };
+                        if matches!(st.tys.kind(ty), TyKind::Ref { .. }) {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemUnsupportedConstruct,
+                                item.span,
+                                "reference struct fields are not supported in semantic v1",
+                            ));
+                        }
+                        fields.push((p.name, ty));
+                    }
+                }
+                fields.extend(s.fields.iter().map(|f| {
+                    let ft = lower_ty(st, sscope, &f.ty);
+                    // M2 非逃逸纪律不变：引用字段拒绝（head 参数同规则）
+                    if matches!(st.tys.kind(ft), TyKind::Ref { .. }) {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnsupportedConstruct,
+                            f.ty.span,
+                            "reference struct fields are not supported in semantic v1",
+                        ));
+                    }
+                    (f.name, ft)
+                }));
+                let _legacy_unused: Vec<(Symbol, TyId)> = Vec::new();
+                let _ = &s.fields;
                 st.defs.get_mut(def).sig.fields = fields;
+                // 头构造参数（全量，含仅构造参数）+ 默认值标记进 sig.params
+                if !s.primary_ctor.is_empty() {
+                    let params = lower_params(st, sscope, &s.primary_ctor, item.span);
+                    let defaults: Vec<bool> =
+                        s.primary_ctor.iter().map(|p| p.default.is_some()).collect();
+                    let sig = &mut st.defs.get_mut(def).sig;
+                    sig.params = params;
+                    sig.param_defaults = defaults;
+                }
             }
             DeclKind::Enum(e) => {
                 let def = match st.scopes.lookup_local(root, e.name) {
@@ -378,6 +613,20 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                             Some(t) => lower_ty(st, root, t),
                             None => st.tys.unit,
                         };
+                        // extern "c" 走真实 C ABI：i128 标量形参/返回值在本
+                        // 目标上与 IR i128 传参不一致（llvme 对 runtime 入口
+                        // 拆 hi/lo 规避；extern 无法替用户改 C 原型）→ 声明点
+                        // 拒收。别名经 lower 归一为 Int(I128)，同样命中。
+                        // 聚合参数按指针传递，成员含 i128 不受影响。
+                        let is_i128_scalar =
+                            |ty| matches!(st.tys.kind(ty), TyKind::Int(IntKind::I128));
+                        if is_i128_scalar(ret) || params.iter().any(|(_, t)| is_i128_scalar(*t)) {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemUnsupportedConstruct,
+                                item.span,
+                                "extern \"c\" functions cannot take or return i128 (C ABI mismatch on this target); use i64, or pass an aggregate containing i128",
+                            ));
+                        }
                         let d = &mut st.defs.get_mut(def).sig;
                         d.params = params;
                         d.ret = ret;
@@ -507,8 +756,49 @@ fn lower_ty_uncached(st: &mut SemState, scope: ScopeId, ty: &TypeWrap) -> TyId {
                 .collect();
             let kind = st.defs.get(def).kind.clone();
             match kind {
+                // M7：类型形参——克隆体经 mono_subst 兑现具体类型；
+                // 泛型原件（未检查体）落成 TyKind::Param(index)
+                DefKind::TypeParam { index } => st
+                    .mono_subst
+                    .iter()
+                    .find(|(d, _)| *d == def)
+                    .map(|(_, t)| *t)
+                    .unwrap_or_else(|| st.tys.intern(TyKind::Param(index))),
                 DefKind::BuiltinType => st.tys.intern(TyKind::Named(def, args)),
-                DefKind::Struct | DefKind::Enum | DefKind::Class => {
+                DefKind::Struct => {
+                    let want = st.defs.get(def).ty_params as usize;
+                    if want == 0 {
+                        if !args.is_empty() {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemTypeArgMismatch,
+                                ty.span,
+                                "this struct is not generic",
+                            ));
+                        }
+                        st.tys.intern(TyKind::Named(def, args))
+                    } else if args.len() != want {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemTypeArgMismatch,
+                            ty.span,
+                            format!(
+                                "generic struct expects {want} type argument(s), got {}",
+                                args.len()
+                            ),
+                        ));
+                        st.tys.error
+                    } else if args.iter().any(|a| st.tys.mentions_param(*a)) {
+                        // M7：泛型签名 lower 期（`struct A<T> { b: B<T> }` 的
+                        // 字段）——形参未代入，保留 Named(原件, [Param]) 占位；
+                        // 调用点实例化时经 subst+concretize 落 spec def
+                        st.tys.intern(TyKind::Named(def, args))
+                    } else {
+                        // M7：实例化 = spec def（代入后的 fields/params），
+                        // 值类型一律 Named(spec, [])——下游布局/成员解析零改动
+                        let spec = crate::mono::instantiate_struct(st, def, &args);
+                        st.tys.builtin_named(spec)
+                    }
+                }
+                DefKind::Enum | DefKind::Class => {
                     if !args.is_empty() {
                         st.diags.emit(Diagnostic::error(
                             DiagCode::SemUnsupportedConstruct,
@@ -528,6 +818,20 @@ fn lower_ty_uncached(st: &mut SemState, scope: ScopeId, ty: &TypeWrap) -> TyId {
                     st.tys.error
                 }
             }
+        }
+        TypeKind::Ref { mutable, inner } => {
+            let i = lower_ty(st, scope, inner);
+            st.tys.intern(TyKind::Ref {
+                mutable: *mutable,
+                inner: i,
+            })
+        }
+        TypeKind::Pointer { mutable, inner } => {
+            let i = lower_ty(st, scope, inner);
+            st.tys.intern(TyKind::Pointer {
+                mutable: *mutable,
+                inner: i,
+            })
         }
         TypeKind::Nullable(inner) => {
             let t = lower_ty(st, scope, inner);

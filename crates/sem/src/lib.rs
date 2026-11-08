@@ -17,6 +17,7 @@
 mod check;
 mod declare;
 mod definite;
+mod mono;
 mod moveck;
 mod resolve;
 
@@ -60,6 +61,13 @@ impl<T: Clone> SideTable<T> {
         Self(vec![None; node_count as usize])
     }
 
+    /// M7 克隆追加后扩容（NodeId 越过原始 node_count；保持密度契约）
+    pub fn grow(&mut self, new_len: usize) {
+        if new_len > self.0.len() {
+            self.0.resize(new_len, None);
+        }
+    }
+
     pub fn set(&mut self, id: NodeId, value: T) {
         // node_count 记账漂移必须是可观测的不变量，而非静默丢语义
         debug_assert!(
@@ -91,6 +99,9 @@ pub struct SemanticOutput {
     pub pat_binding_def: SideTable<DefId>,
     /// 类型注解节点 → 定型结果（irc 取模式标注的 widening 目标）
     pub ty_of_node: SideTable<TyId>,
+    /// M7：顶层声明下标 → def（irc 按 item 找 def；克隆 def 与原件同 span，
+    /// span 反查会撞车）
+    pub decl_def: Vec<Option<DefId>>,
 }
 
 /// 语义分析入口；parser 诊断原样保留在前，语义诊断附加在后
@@ -102,6 +113,14 @@ pub fn analyze(parse: ParseOutput) -> SemanticOutput {
         declare::run(ast, st);
         resolve::run(ast, st);
         check::run(ast, st);
+        st.items_done = ast.items.len();
+    }
+    // M7 泛型实例化波次：check 排队的 fun 实例在此克隆追加并增量过三遍；
+    // 新发现的实例化进下一波，直到不动点
+    mono::run_waves(&mut sem);
+    {
+        let ast = &sem.ast;
+        let st = &mut sem.st;
         definite::run(ast, st);
         moveck::run(ast, st);
     }
@@ -111,6 +130,8 @@ pub fn analyze(parse: ParseOutput) -> SemanticOutput {
 /// 共享可变状态（与 AST 分离，三遍 pass 以 `(&SourceFile, &mut SemState)` 签名并行借用）
 pub(crate) struct SemState {
     pub interner: Interner,
+    /// 源码文本（span → 字面量值解码）
+    pub text: String,
     pub diags: DiagCollector,
     pub tys: TyArena,
     pub defs: DefArena,
@@ -127,6 +148,22 @@ pub(crate) struct SemState {
     pub funs: Vec<FunFrame>,
     pub loops: Vec<LoopFrame>,
     pub own_def: Option<DefId>,
+    /// M6：unsafe 块深度——extern "c" 调用要求在 unsafe 上下文中
+    ///（language-design：FFI 调用在 unsafe 中）
+    pub unsafe_depth: usize,
+    // ---- M7 泛型单态化（generic-mono-spike.md） ----
+    /// fun 实例化作业队列（struct 同步完成，不排队）
+    pub mono_queue: Vec<mono::MonoJob>,
+    /// 实例化注册表：(泛型 def, 具体类型实参) → spec def；去重靠它
+    pub mono_insts: std::collections::BTreeMap<(DefId, Vec<TyId>), DefId>,
+    /// 当前波次的类型形参兑现表：TypeParam def → 具体 TyId
+    pub mono_subst: Vec<(DefId, TyId)>,
+    /// 克隆 NodeId 分配的下一基址（从原始 node_count 起）
+    pub next_node: u32,
+    /// 增量 pass 已处理的 items 前缀长度
+    pub items_done: usize,
+    /// 顶层声明下标 → def（M7 克隆 def 与原件同 span，span 反查会撞车）
+    pub decl_def: Vec<Option<DefId>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -160,8 +197,10 @@ impl Sem {
             diags.emit(diag);
         }
         let node_count = parse.node_count;
+        let text = parse.text;
         let mut st = SemState {
             interner: parse.interner,
+            text,
             diags,
             tys: TyArena::new(),
             defs: DefArena::new(),
@@ -177,6 +216,13 @@ impl Sem {
             funs: Vec::new(),
             loops: Vec::new(),
             own_def: None,
+            unsafe_depth: 0,
+            mono_queue: Vec::new(),
+            mono_insts: std::collections::BTreeMap::new(),
+            mono_subst: Vec::new(),
+            next_node: node_count,
+            items_done: 0,
+            decl_def: Vec::new(),
         };
         // v1 I/O builtin：注册到根作用域；调用点按实参类型实例化 runtime 入口。
         let root = st.scopes.root();
@@ -191,6 +237,9 @@ impl Sem {
             alias_of: None,
             alias_resolved: None,
             member_scope: None,
+            external: false,
+            ty_params: 0,
+            decl: None,
         });
         st.scopes.insert(root, print, def);
         Self { ast: parse.ast, st }
@@ -209,6 +258,7 @@ impl Sem {
             flow_res: self.st.flow_res,
             pat_binding_def: self.st.pat_binding_def,
             ty_of_node: self.st.ty_of_node,
+            decl_def: self.st.decl_def,
         }
     }
 }

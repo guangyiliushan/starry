@@ -33,9 +33,20 @@ pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
         }
     }
 
-    for item in &ast.items {
+    for (i, item) in ast.items.iter().enumerate() {
         match &item.kind {
             DeclKind::Fun(f) => {
+                // M7：泛型原件未检查（无 expr_ty 侧表）；明确赋值在克隆上。
+                // 区分靠 def：spec def 的 ty_params = 0
+                let is_generic_orig = st
+                    .decl_def
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|d| st.defs.get(d).ty_params > 0);
+                if is_generic_orig {
+                    continue;
+                }
                 if let Some(body) = &f.body {
                     match body {
                         FunctionBody::Block(b) => {
@@ -248,6 +259,8 @@ fn expr(e: &ExprWrap, init: &mut HashSet<DefId>, st: &mut SemState) {
             declare_pattern_st(st, pattern, true, init);
         }
         ExprKind::Unary { operand, .. }
+        | ExprKind::AddrOf { expr: operand, .. }
+        | ExprKind::Deref { expr: operand }
         | ExprKind::ForceUnwrap { expr: operand }
         | ExprKind::Await { expr: operand }
         | ExprKind::Cast { expr: operand, .. }
@@ -255,7 +268,7 @@ fn expr(e: &ExprWrap, init: &mut HashSet<DefId>, st: &mut SemState) {
         ExprKind::Async { block: b } | ExprKind::Concurrent { block: b } => {
             let _ = block(b, init, st);
         }
-        ExprKind::Loop { body } => {
+        ExprKind::Loop { body, .. } => {
             let mut body_init = init.clone();
             let _ = block(body, &mut body_init, st);
         }

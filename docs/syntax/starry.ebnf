@@ -93,7 +93,11 @@ ConstructorDecl := Modifiers «init» "(" ParameterList ")" Block ;
 InitBlock       := «init» Block ;
 AccessorDecl    := «get» Block [ «set» Block ] | «set» Block [ «get» Block ] ;
 
-StructDecl  := Modifiers "struct" IDENT TypeParams? "{" { StructField [ "," ] } "}" ;
+(* M3 主构造：头参数 val/var 声明字段（槽布局序 = 参数序 ++ body 序）；
+   无修饰符参数仅构造期使用不存字段；body 可省略或与头构造共存。 *)
+StructDecl  := Modifiers "struct" IDENT TypeParams? [ PrimaryCtorParams ]
+              [ "{" { StructField [ "," ] } "}" ] ;
+PrimaryCtorParams := "(" [ Parameter { "," Parameter } ] ")" ;
 StructField := Modifiers IDENT ":" Type ;
 
 EnumDecl        := Modifiers "enum" IDENT TypeParams? "{" EnumVariantList "}" ;
@@ -156,10 +160,18 @@ TypeArgument  := Type | IDENT "=" Type ;
 
 Type         := FunctionType ;
 FunctionType := UnionType [ "->" FunctionType ] ;
-UnionType    := PostfixType { "|" PostfixType } ;
-PostfixType  := PrimaryType { "?" } ;
-PrimaryType  := NamedType | TupleType | UnitType | "Self" | "dyn" Bound
-             | ArrayType | "(" Type ")" ;
+UnionType    := PrefixType { "|" PrefixType } ;
+(* D-007 / M2：类型构造子固定前缀，正交组合无外层特殊规则。 *)
+PrefixType   := NullableType | RefType | PointerType | AtomicType ;
+NullableType := "?" PrefixType ;
+RefType      := "&" [ "mut" ] PrefixType ;
+(* 裸指针 bare `*T` 拒绝（诊断：只允许 *const/*mut）。 *)
+PointerType  := "*" ( "const" | "mut" ) PrefixType ;
+(* 原子后缀糖：NamedType? = ?NamedType（只限原子/命名/内建）。复合类型
+   可空必须前缀（?[T; N]、?(T, U)、?*const T、?&T）；[T; N]? 与
+   (T, U)? 拒绝并提示前缀形态。*const T? = *const (?T)（? 归内层）。 *)
+AtomicType   := NamedType { "?" } | TupleType | UnitType | "Self" | "dyn" Bound
+              | ArrayType | "(" Type ")" ;
 ArrayType    := "[" Type ";" INTEGER "]" ;
 NamedType    := QualifiedName [ TypeArgs ] ;
 TupleType    := "(" Type "," Type { "," Type } [ "," ] ")" ;
@@ -295,7 +307,11 @@ MultiplicativeExpr := CastExpr { ( "*" | "/" | "%" ) CastExpr } ;
 
 CastExpr := UnaryExpr { ( "as" | "as?" | "as!" ) Type } ;
 UnaryExpr := { UnaryOperator } PostfixExpr ;
-UnaryOperator := "await" | "!" | "-" | "~" | "&" | "*" ;
+UnaryOperator := "await" | "!" | "-" | "~" ;
+(* M2：&x / &mut x 取址与 *p 解引是独立表达式构造（借用检查/指针 lowering），
+   不再走通用 Unary。`&` 后可跟硬关键字 mut。as 比前缀 & 绑定松：`&x as T`
+   读作 &(x as T)，取址后转换须加括号。*)
+AddrOfExpr := ( "&" [ "mut" ] | "*" ) UnaryExpr ;
 
 PostfixExpr := Primary { PostfixSuffix } ;
 PostfixSuffix := "." IDENT

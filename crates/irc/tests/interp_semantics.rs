@@ -162,19 +162,20 @@ fn loop_expression_returns_break_value() {
 
 #[test]
 fn int_arith_wraps_at_type_width() {
-    let src = "fun f(): i32 {\n    return 2000000000 + 2000000000\n}";
+    // M1 后未约束字面量默认 i64：宽度意图用 as i32 钉住（i64 加法再截断）
+    let src = "fun f(): i32 {\n    return (2000000000 + 2000000000) as i32\n}";
     assert_eq!(run(src, "f", &[]), Value::I(-294_967_296));
 }
 
 #[test]
 fn int_div_sees_wrapped_operand() {
-    let src = "fun f(): i32 {\n    return (2000000000 + 2000000000) / 2\n}";
+    let src = "fun f(): i32 {\n    return ((2000000000 + 2000000000) as i32) / (2 as i32)\n}";
     assert_eq!(run(src, "f", &[]), Value::I(-147_483_648));
 }
 
 #[test]
 fn int_compare_sees_wrapped_operand() {
-    let src = "fun f(): bool {\n    return (2000000000 + 2000000000) < 0\n}";
+    let src = "fun f(): bool {\n    return ((2000000000 + 2000000000) as i32) < 0\n}";
     assert_eq!(run(src, "f", &[]), Value::B(true));
 }
 
@@ -203,8 +204,9 @@ fn float_conv_rounds_to_single_precision() {
 
 #[test]
 fn shift_out_of_type_width_traps() {
-    // 移位量判据是目标位宽；越界是 LLVM poison，解释器以 trap 表示
-    let src = "fun f(): i32 {\n    return 1 << 40\n}";
+    // 移位量判据是操作数类型位宽；越界是 LLVM poison，解释器以 trap 表示。
+    // M1 后未约束字面量默认 i64——宽度和越界意图用 as i32 钉住。
+    let src = "fun f(): i32 {\n    return (1 as i32) << 40\n}";
     assert_eq!(
         run_res(src, "f", &[]),
         Err(InterpError::Trap("shift out of range"))
@@ -219,4 +221,27 @@ fn fptosi_out_of_range_traps() {
         run_res(src, "f", &[Value::F(1e30)]),
         Err(InterpError::Trap("fptosi out of range"))
     );
+}
+#[test]
+fn tier0_scalar_conformance() {
+    // P1-7 tier conformance 骨架：T0 每个标量类型种类经
+    // parse → sem → irc → interp 往返保持值。新增标量类型时加行。
+    let cases: &[(&str, &str, Value)] = &[
+        ("i4", "7 as i4", Value::I(7)),
+        ("i8", "-5 as i8", Value::I(-5)),
+        ("i16", "10 as i16", Value::I(10)),
+        ("i32", "2147483647", Value::I(2147483647)),
+        ("i64", "9223372036854775807", Value::I(9223372036854775807)),
+        ("int", "3000000000", Value::I(3000000000)),
+        ("f32", "1.5 as f32", Value::F(1.5)),
+        ("f64", "-0.25", Value::F(-0.25)),
+        ("bool", "3 > 2", Value::B(true)),
+        ("string", "\"ab\" + \"cd\"", Value::S("abcd".to_string())),
+        ("char", "'x'", Value::I('x' as i64)),
+    ];
+    for (ty, expr, expected) in cases {
+        let src = format!("fun probe() : {ty} = {expr}");
+        let got = run(&src, "probe", &[]);
+        assert_eq!(&got, expected, "tier0 conformance for {ty}: {src}");
+    }
 }

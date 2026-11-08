@@ -8,6 +8,7 @@ pub mod expr;
 pub mod modifier;
 pub mod node;
 pub mod pat;
+pub mod renumber;
 pub mod stmt;
 pub mod ty;
 
@@ -29,4 +30,6 @@ pub struct ParseOutput {
     pub interner: Interner,
     pub diagnostics: Vec<Diagnostic>,
     pub node_count: u32,
+    /// 源码文本：sem 需要按 span 解码字面量值（整数字面量的定型/值域）
+    pub text: String,
 }

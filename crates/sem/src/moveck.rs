@@ -18,9 +18,20 @@ use crate::def::{DefId, DefKind};
 use crate::ty::TyKind;
 
 pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
-    for item in &ast.items {
+    for (i, item) in ast.items.iter().enumerate() {
         match &item.kind {
             DeclKind::Fun(f) => {
+                // M7：泛型原件未检查；move 检查在实例化克隆上。
+                // 区分靠 def：spec def 的 ty_params = 0
+                let is_generic_orig = st
+                    .decl_def
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|d| st.defs.get(d).ty_params > 0);
+                if is_generic_orig {
+                    continue;
+                }
                 let mut moved = BTreeSet::new();
                 match &f.body {
                     Some(FunctionBody::Block(b)) => block(b, st, &mut moved),
@@ -162,7 +173,7 @@ fn expr(e: &ExprWrap, st: &mut SemState, moved: &mut BTreeSet<DefId>) {
         | ExprKind::Cast { expr: operand, .. }
         | ExprKind::ArrayRepeat { value: operand, .. } => expr(operand, st, moved),
         ExprKind::Async { block: b } | ExprKind::Concurrent { block: b } => block(b, st, moved),
-        ExprKind::Loop { body } => {
+        ExprKind::Loop { body, .. } => {
             let mut inner = moved.clone();
             block(body, st, &mut inner);
             moved.extend(inner);

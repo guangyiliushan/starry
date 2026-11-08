@@ -190,12 +190,17 @@ pub struct StructDecl {
     pub modifiers: ModifierList,
     pub name: Symbol,
     pub type_params: Vec<TypeParam>,
+    /// M3 主构造函数头参数：`val`/`var` 参数声明字段，无修饰符参数
+    /// 仅构造期使用（不存字段）。空 = 无头构造（仅 body 字段槽位构造）。
+    pub primary_ctor: Vec<Param>,
     pub fields: Vec<StructField>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StructField {
     pub modifiers: ModifierList,
+    /// M3 显式 val/var（Some(false)/Some(true)）；None = 无修饰（legacy）
+    pub mutable: Option<bool>,
     pub name: Symbol,
     pub ty: TypeWrap,
 }

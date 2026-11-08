@@ -18,7 +18,11 @@
 | # | EBNF 产生式 | AST 变体 | walk 访问 | 终端审计 | 状态 |
 |---|------------|---------|----------|---------|------|
 | 1 | LambdaExpr (params+arrow optional) | ExprKind::Lambda | params, body | «move» 无终端 | ✓ |
-| 1a | LoopExpr (`loop Block`) | ExprKind::Loop | body | `loop` ∈ hard；无标签表达式形态 | ✓ |
+| — | PointerType (`*const T` / `*mut T`) | TypeKind::Pointer | mutable, inner | D-007 / M2：bare `*T` 诊断；类型+FFI；取址/解引未排期 | ✓ |
+| — | RefType (`&T` / `&mut T`) | TypeKind::Ref | mutable, inner | D-007 / M2：T1 借用类型层；表达式未排期 | ✓ |
+| — | NullableType（前缀 `?T` + 原子后缀糖） | TypeKind::Nullable | inner | 复合后缀拒绝（?[T; N] 提示）；两种写法同一 AST | ✓ |
+| — | AddrOfExpr（&x / &mut x / *p） | ExprKind::AddrOf / Deref | expr（+mutable） | M2：借用检查 v1 保守；`is_place` 收 Deref | ✓ |
+| 1a | LoopExpr (`loop Block`) | ExprKind::Loop | label, body | `loop` ∈ hard；label 仅由块尾 LoopStatement 归一而来（parser-notes） | ✓ |
 | 2 | OperatorExpr 12 级分层 | ExprKind::Binary | lhs, rhs | 十 AssignOp + 逻辑 + 比较 + 范围 | ✓ |
 | 3 | CastExpr (as/as?/as!) | ExprKind::Cast | expr, ty | as/as?/as! ∈ 规则表 | ✓ |
 | 4 | UnaryExpr (含 await) | ExprKind::Unary | operand | !/-/~/&/*/await | ✓ |
@@ -36,7 +40,7 @@
 | 声明 | 正文落点 |
 |------|---------|
 | 插值字符串模式栈（设计缺口） | 审计行"设计缺口·归 lexer 计划" |
-| 注释跳过层（待决策） | 审计行"待决策" |
+| 注释跳过层（已实现：块注释嵌套、行注释） | 审计行"待决策" |
 | comptime 槽位收窄（expression_or_block → stmt-only） | coverage 行 comptime |
 | NL 前言约定（不逐产生式塞 NL） | EBNF 前言声明 |
 | mutable 模式 | pat.rs BindingPattern mutable 字段 |
@@ -58,7 +62,7 @@
 | v0.4 宏调用 `name!(...)` | ExprKind::MacroCall + TokenTree 流 |
 | v0.4 数组 `[T; N]` / `[v; N]` | TypeKind::Array / ExprKind::ArrayRepeat |
 | v0.4 module 声明移除 | SourceFile 仅 package；`by` 降为 slot word |
-| v0.4 LoopExpr / LoopStatement 分立 | ExprKind::Loop（表达式）/ StmtKind::Loop（带标签语句） |
+| v0.4 LoopExpr / LoopStatement 分立 | ExprKind::Loop（表达式，label 字段承块尾归一）/ StmtKind::Loop（带标签语句，块尾时归一为 LoopExpr） |
 | 元组下标常量槽 | ExprKind::Index.const_index（parser 解码整数字面量；动态下标仅数组） |
 
 ## v0.4 gap closures（本轮补全）

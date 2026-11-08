@@ -65,8 +65,8 @@ pub enum Instr {
     Slot { dst: TempId, count: u32 },  // 2026-10-27：聚合基址声明（数组填充的动态槽写入尺寸）
     Call { dst: Option<TempId>, callee: Callee,         ty: TyId },
 }
-pub enum Callee { Def(DefId), Runtime(RuntimeFn) }  // 2026-10-27 修正案
-pub enum RuntimeFn { StrConv /*标量→string，源类型在 Param.ty*/, StrConcat, Print /*标量→stdout*/ }
+pub enum Callee { Def(DefId), Extern(DefId), Runtime(RuntimeFn) }  // 2026-10-27 修正案；Extern(DefId) = extern "c"（2026-11）
+pub enum RuntimeFn { StrConv /*标量→string，源类型在 Param.ty*/, StrConvChar /*char→string*/, StrConcat, StrEq /*(string,string)→bool 内容比较*/, Print /*标量→stdout*/, PrintChar /*char→stdout*/ }
 pub enum Term { Jmp(BlockId), Br { cond, then_, else_ }, Ret { value, ty }, Unreachable }
 pub struct Block { pub id: BlockId, pub instrs: Vec<Instr>, pub term: Term }
 pub struct TacOutput { funs, globals: Vec<GlobalBody>, diags } // opt gates on diagnostics
@@ -99,12 +99,15 @@ pub struct TacOutput { funs, globals: Vec<GlobalBody>, diags } // opt gates on d
   同为 1 槽，但前者是基址、后者是值。
 - **和类型（enum/nullable）槽位布局**：
   - 槽 0 = tag，宽度 i8（>255 变体 → `IrcTooManyVariants` 诊断）；
-  - 槽 1..k = payload，按变体声明序摊平，每个标量一槽（8 字节），
-    非 i64 槽访问由 llvme 发 bitcast（隔离在 llvme 一处）；
+  - 槽 1..k = payload，按变体声明序摊平，每个标量一槽（**默认槽步长
+    8 字节**；聚合含 i128 成员时该块整体加宽到 16 字节/槽，
+    标量按自身宽度写，读按槽类型）；
   - nullable = 2 变体和类型特例 `{i8 flag, payload}`；
   - llvme 对每个 `Named(enum)` 取最大槽数变体定 LLVM 类型
-    `{i8, [k x i64]}`，确定性可复现；
-  - struct 按 `sig.fields` 摊平；array = len 个元素槽；tuple 同理。
+    （含 i128 时 `{i8, [k x i128]}`，否则 `{i8, [k x i64]}`），
+    确定性可复现；
+  - struct 按 `sig.fields` 摊平；array = len 个元素槽；tuple 同理；
+  - range = lo、hi、i8 开闭标记（`..`=0，`..=`=1）三槽。
 - **局部表示**：`val`（不可变）→ Temp（跨块引用合法：前驱支配后继，
   无需 phi）；`var`（可变）→ slot + Load/Store；if/when 作表达式
   产生值 → 结果槽（两分支 Store、汇合 Load——用内存绕开 phi，
@@ -139,7 +142,7 @@ LLVM。修法各记一条，防回退：
   值版走结果槽汇合 → 链尾 fallthrough 恒发 `unreachable`（LLVM 块
   必须终结；防 sem 松弛项穿透）。
 - `for`：desugar 为下标循环（Array/Range 两种 iterable）。
-- `x in a..b` → `x>=a && x<=b`；`x in arr` → 线性扫描循环。
+- `x in a..b` → `x>=a && x<b`（`..=` 用 `<=`）；`x in arr` → 线性扫描循环。
 - `defer`：lowering 上下文维护 defer 栈，return/break/continue/块出口
   逆序发射。
 - 枚举构造 `Opt.Some(x)`：Store tag + Store payload 槽；`E.A` 无参
@@ -189,8 +192,8 @@ rest 槽位映射，rest 不产生绑定）/Range；Or 支持共享绑定（每�
 `is`（绑定限 then 分支作用域，negated 取反）；`when`（主语单求值 →
 源序 Br 链，模式/guard 内嵌，值语境结果槽，链尾 unreachable）；`in`
 （区间 → 双比较短路，`..` 不含/`..=` 含上界；数组 → 线性扫描循环）；
-`for`（数组下标循环；Range 字面量计数循环；物化 Range 值按闭区间——
-Range 类型不区分开闭，记为表示层 corner）；`defer`（块作用域栈 +
+`for`（数组下标循环；Range 字面量计数循环；物化 Range 值按开闭标记槽选择 `<`/`<=`（2026-11 起第 3 槽 i8 标记）——
+原「Range 类型不区分开闭」corner 已闭合）；`defer`（块作用域栈 +
 return/break/continue 出口全量发射，出口后清空防重复；顺带修复 M1
 潜在 bug：块尾表达式现于块作用域内求值）；`??`（flag 分支 + 结果槽
 汇合）；`?.` 安全调用（标量字段：flag 检查 + nullable 结果传播）；
@@ -198,8 +201,8 @@ and/or 操作数常量短路在发射期折叠。
 
 **M3（2026-10-27）运行时契约与赋值补全**：`Callee` 枚举修正案——
 调用目标分 `Def(DefId)`（用户函数）与 `Runtime(RuntimeFn)`（运行时
-extern 入口：v1 = StrConv/StrConcat/Print，名字由 llvme 映射
-`starry_str_conv_*`/`starry_str_concat`/`starry_print_*` 并 declare；std-only 红线下
+extern 入口：v1 = StrConv/StrConvChar/StrConcat/StrEq/Print/PrintChar，名字由 llvme 映射
+`starry_str_conv_*`/`starry_str_conv_char`/`starry_str_concat`/`starry_str_eq`/`starry_print_*`/`starry_print_char` 并 declare；std-only 红线下
 运行时以符号存在不进 crate。opt 侧影响：五个 pass 对 Call 均按
 "有副作用"处理，callee 形状不可见，零改动成立）。StringInterp
 lowering：逐 part StrConv（源类型由前置 Param 的 ty 携带）+ 左结合
@@ -217,6 +220,10 @@ nullable/aggregate stringification, aggregate/destructured top-level globals (sc
 原存储（var 的 read_place 是快照拷贝，经它写入会丢失——2026-10-27
 审查修复，金样断言赋值后读取见新值）。
 
+- **M2 指针指令（AddrOf/LoadPtr/StorePtr）**：AddrOf 纯地址计算（DCE 可删）；
+  LoadPtr/StorePtr 与 Load/Store 同副作用契约（永不删）。**DCE 使用扫描
+  契约**：三者都读 ptr/base 槽——漏标会把 AddrOf 误判死代码删掉，
+  下游 loadptr 拿到未初始化指针（M2 实测抓到：native 挂起）。
 ## 优化 pass（v1，按序）
 
 教科书局部/全局基础集，全部纯函数 `&mut FunBody`：
@@ -279,6 +286,7 @@ v1 跳过（记入扩展位，不归本阶段）：全局数据流（到达定�
 - LLVM poison 一律表现为 trap（越界移位、fptosi 越界/NaN），不发明值，
   与 opt「不折叠越界移位/除零」同一立场。
 - 已知局限：槽是 u64，`i128` 按 64 位建模。
+- 已知局限：`extern "c"` 调用的程序无法经参考解释器验证——`Callee::Extern` 一律 `UnknownFun` trap（外部符号只存在于 native 链接）。
 - **差分验证层就此可用**：`opt` 侧 `opt_preserves_semantics_*`（6 条）
   优化前后各跑一遍解释器、断言逐值相等。回归验证过：把折叠改回 i128
   语义，`fold_wrap`/`fold_compare` 两条立刻红（快照测试看不出异常）。
@@ -288,25 +296,66 @@ v1 跳过（记入扩展位，不归本阶段）：全局数据流（到达定�
 
 ## llvme 落地（2026-10-27）
 
-存储模型定案：每个 temp = 入口块恰好一个 alloca（Cell = i64 槽；
-Block(n) = [n x i64]；PtrCell = ptr 槽装聚合指针——聚合实参/返回值
+存储模型定案：每个 temp = 入口块恰好一个 alloca（Cell = i64 槽，
+i128 用 16 字节 WideCell；Block(n) = [n x i64]，含 i128 成员时
+WideBlock = [n x i128]；PtrCell = ptr 槽装聚合指针——聚合实参/返回值
 按指针，sem v1 形参不可变故别名安全）；槽寻址统一
-`getelementptr [n x i64], ptr p, i64 0, i64 i`，tag/flag 是槽 0 里的
+`getelementptr [n x E], ptr p, i64 0, i64 i`（E = i64/i128），tag/flag 是槽 0 里的
 i8（写时就地 store i8，免 bitcast——不透明指针风格，LLVM 15+）；
 升 SSA 全交外部 `opt -mem2reg`。temp 存储分类两遍法：常量槽访问 /
 Slot 声明 / 聚合返回值推断槽数。浮点一律十六进制字面量（f32/f64
 各按位模式）；字符串常量 @.str.N private constant + gep 操作数；
 运行时入口按调用点参数类型实例化声明（starry_str_conv_i64、starry_print_i32 等）；
-main 包装 = 无参 main 存在时 `define i32 @main` 调它返 0。
+main 包装 = 无参 main 存在时 `define i32 @main`：先跑全局 init，入口返回值收敛到 i32（int trunc/sext、bool 零扩展、unit/聚合按 0）。
 `irc::layout` 公开为 LayoutView trait（irc/llvme 共享槽布局的
 跨 crate 契约）。
 
-2026-10-31 正确性修正：Cell/Block 槽仍恒为 i64；LLVM 15+ 不透明指针
-允许按值类型直接 load/store，标量读写统一走 `op_val`/`store_val`，不再
-让 Copy 特例恒按 i64 搬运，也不发无效的指针 bitcast。Conv 按 `from`
-加载源值；GEP 下标与 `default_int` 类型一致（i32 是合法 GEP 下标，无需
-强转 i64）；入口 prologue 以 `br` 终结后进入首个 TAC 块。可选验收层
-优先调用 llvm-as，缺失时回落 `clang -x ir -c`，两者都没有才跳过。
+2026-10-31 正确性修正：LLVM 15+ 不透明指针允许按值类型直接
+load/store，标量读写统一走 `op_val`/`store_val`，不再让 Copy 特例恒按
+i64 搬运，也不发无效的指针 bitcast。Conv 按 `from` 加载源值；GEP 下标与
+`default_int` 类型一致（i32 是合法 GEP 下标，无需强转 i64）；入口
+prologue 以 `br` 终结后进入首个 TAC 块。可选验收层优先调用 llvm-as，
+缺失时回落 `clang -x ir -c`，两者都没有才跳过。槽宽在 2026-11 审查中
+按类型加宽（只对 i128 标量/含 i128 成员的聚合），见下节。
+
+## 工具链基线与链接取舍（2026-11 补记）
+
+- **LLVM 基线 = 15+**：不透明指针是槽模型的硬前提（`store i8 ..., ptr` 免
+  bitcast 全靠它）。`starryc llvme` 的校验器优先 llvm-as、回落 clang，
+  两者皆无显式打印 SKIP；版本低于 15 的行为不受支持。
+- **`-nostdlib` 与 target triple**：Windows 链接行硬编码 `-nostdlib` +
+  `-lkernel32`——runtime 是自包含的（自带 mainCRTStartup 与
+  write_str），不引入 CRT 初始化；代价是 clang 报
+  `overriding the module target triple` 警告（IR 未声明 target，clang 用
+  宿主默认值覆盖）。取舍记录在此：要消除警告需在 IR 头发射 target
+  triple/datalayout，但钉死 triple 会牺牲交叉编译自由度，v1 保持宽松。
+
+## 2026-11 审查修复（opt / irc / 后端）
+
+- **比较折叠的类型**：`fold_fun` 把 `Bin` 折成 `Copy` 时，比较算子的目标
+  类型取 `bool_`（`Bin.ty` 是操作数公共型，直接复用会发出
+  `store i32 true` → clang 拒绝）。
+- **全局初始化依赖序**：irc 收尾对 `TacOutput.globals` 做拓扑排序
+  （直接 `LoadGlobal` + 调用链闭包）；`val b = a + 3` 声明在 `a` 之前时
+  仍先初始化 `a`。环报 `IrcUnsupportedLowering`（不静默按源序执行）。
+- **字符串相等**：`==`/`!=`/字符串模式走 `RuntimeFn::StrEq`（runtime
+  `starry_str_eq` 按内容比较），不再对 `i8*` 发 `icmp` 指针比较。
+- **聚合结构相等**：irc 递归发射逐槽比较（struct 字段、数组/元组元素、
+  range 三槽、nullable flag+payload、enum tag+payload 分支）；`Ne`
+  取反。字符串字段仍走 runtime 内容比较。
+- **聚合 coerce**：数组/元组/区间逐槽 `Load → Conv → Store` 到新块；
+  `[int; 2] = [7, 8]` 的元素加宽不再留 4 字节 store / 8 字节 load。
+- **物化 Range**：范围值携带开闭标记（第 3 槽），`in`/`for` 按标记
+  选择 `<`/`<=`。
+- **i128**：i128 标量用 16 字节 WideCell；含 i128 成员的聚合用
+  WideBlock（`[n x i128]`），其余聚合仍是 8 字节/槽。runtime 入口用
+  `(hi, lo)` 拆分传参，`fmt_i128` 用按位长除法（不依赖 `__udivti3`）。
+- **extern "c" 的 i128 拒收**：sem 声明点报 `SemUnsupportedConstruct`（见 semantic-notes）；llvme 对 runtime 入口拆 hi/lo 的规避不适用于 extern（C 原型属用户）。
+- **值 → Nullable 的显式构造**：`coerce` 补 flag=1 + payload 路径——原落到 copy_slots 多槽 Const 分支，同一常量写进每个槽（flag=4/payload=4），native 侧 br 按 i1 低比特判真直接走错分支（差分 harness 抓到，`m ?? 9` 非空侧错值）。
+- **差分 harness（P1-8）**：`llvme/tests/diff_native.rs` 同一源码双路径对拍——irc 参考解释器（`run_named_capturing` 收集 print，`print_line` 与 runtime 文本形态对齐）vs 原生程序 stdout，14 用例逐行一致。选型纪律：extern/浮点打印/i128 不入选（已知局限）。interp 侧修 Const::Str 预 intern（数组/返回里的字符串常量原被读成 0）。
+- **环状全局初始化诊断带声明 span**：`reorder_globals` 的环诊断定位到环的回边目标成员的 `Def.span`（原恒 0..0）；递归 DFS 改显式栈迭代（声明数不受 parser 深度限制）。
+- **CLI**：诊断改 `path:line:col`；`build` 缺 `main` 直接报错；
+  `llvme` 用 clang 校验产物后才输出。
 
 ## LLVM IR 发射契约（llvme）
 
@@ -315,8 +364,24 @@ pub fn emit(tac: &TacOutput, tys: &TyArena, defs: &DefArena, interner: &Interner
 ```
 
 - 不调用任何 LLVM 库；funs → `define`，Block → 标签，Temp → `%tN`。
-- main 包装：`define i32 @main()` 调 Starry `main`，返回 i32 0。
-- `Const` → LLVM 字面量；`TyId` → `i32`/`double` 等；槽布局见上。
+- main 包装：`define i32 @main()` 先按依赖序调用全局 init，再把 Starry
+  `main` 的返回值收敛为 i32（int → trunc/sext，bool → zext，unit/其余
+  → 0）；缺少 `fun main()` 由 `starryc build` 直接报错，不再落到链接器。
+- **聚合返回值**：callee 仍 `ret ptr`（指向自己的槽），调用方在 Call 的
+  目标 temp 上分配 `[n x i64]`（含 i128 成员时 `[n x i128]`）并逐槽拷贝；
+  调用方持有的永远是自己的块，第二次调用不会覆写前一次的值。聚合实参
+  按基址传（callee 只读）。
+- **extern "c"**：sem 在 `Def.external` 标记；irc 发 `Callee::Extern`；
+  llvme 以 `declare <ret> @symbol(<params>)` 发射并按符号名调用。
+- **runtime 入口**：`starry_print_{i1,i8,i16,i32,i64,i128,f32,f64,string,
+  char}`、`starry_str_conv_*`、`starry_str_concat`、`starry_str_eq`。
+  i1 实参先 `zext` 到 i32（C 形参是 `int`，高位不干净会把 false 打成
+  true）；i4 先 `sext` 到 i8；i128 拆成 `(hi, lo)` 两个 i64（MSVC ABI
+  的 `__int128` 与 LLVM `i128` 传参不一致，实测段错误）。
+- **槽宽**：i128 标量/含 i128 成员的聚合加宽到 16 字节/槽，普通聚合
+  仍 8 字节/槽；GEP 下标按元素计，i128 标量/成员不再越界写栈。
+- `starryc llvme` 在 clang 可用时先 `clang -x ir -c` 校验产物，非法 IR
+  exit 1（`store i32 true` 一类不再静默输出）。
 - **验证 = 可选验收层**：机器上有 LLVM 工具链则 `llvm-as`/`lli` 行为
   对拍、外部 `opt -mem2reg` 升 SSA 后复验；没有则跳过并在测试输出
   明示，不阻塞 fmt/test/clippy 核心门禁。
