@@ -20,17 +20,40 @@ use irc::layout::scalar_slots;
 use irc::tac::{
     BinOp, Callee, Const, FunBody, Instr, Operand, RuntimeFn, TacOutput, TempId, Term, UnOp,
 };
-use sem::{DefArena, FloatKind, IntKind, TyArena, TyId, TyKind};
+use sem::{DefArena, DefId, FloatKind, IntKind, TyArena, TyId, TyKind};
 
 use crate::ty::{Lc, TyClass, class_of, float_lit, fun_name, scalar_ty};
 
-pub fn emit_module(tac: &TacOutput, tys: &TyArena, defs: &DefArena, interner: &Interner) -> String {
+pub fn emit_module(
+    tac: &TacOutput,
+    tys: &TyArena,
+    defs: &DefArena,
+    interner: &mut Interner,
+) -> String {
+    let mut g = Global::default();
+    // M1 (D2 contract): pre-intern every emitted function name; the checked
+    // trap message carries the function name (span approximation). Interning
+    // must happen here because Lc holds a shared &Interner afterwards.
+    for fun in tac
+        .funs
+        .iter()
+        .chain(tac.globals.iter().filter_map(|gl| gl.init.as_ref()))
+    {
+        let def = fun.def;
+        let name = format!(
+            "{}.{}",
+            sanitize(interner.resolve(defs.get(def).name)),
+            def.0
+        );
+        let sym = interner.intern(&name);
+        let id = g.str_id(sym);
+        g.fun_str.insert(def, (id, name.len() + 1));
+    }
     let lc = Lc {
         tys,
         defs,
         interner,
     };
-    let mut g = Global::default();
     let mut body = String::new();
     let mut defined = Vec::new();
     for fun in &tac.funs {
@@ -71,11 +94,23 @@ pub fn emit_module(tac: &TacOutput, tys: &TyArena, defs: &DefArena, interner: &I
         let _ = writeln!(decls, "declare {} @{}({})", ret, name, params);
     }
     for (name, (ret, params)) in std::mem::take(&mut g.runtime_decls) {
-        let _ = writeln!(decls, "declare {} @{}({})", ret, name, params);
+        if name == "starry_overflow_panic" {
+            // M1 (D2 contract): noreturn via attribute group (IR-valid form)
+            let _ = writeln!(decls, "declare {} @{}({}) #0", ret, name, params);
+        } else {
+            let _ = writeln!(decls, "declare {} @{}({})", ret, name, params);
+        }
+    }
+    if g.used_ovf_panic {
+        let _ = writeln!(decls, "attributes #0 = {{ noreturn }}");
     }
 
     let mut out = String::new();
+    let used_strs = g.used_strs.clone();
     for (sym, id) in &g.strings {
+        if !used_strs.contains(id) {
+            continue;
+        }
         let text = lc.interner.resolve(*sym);
         let _ = writeln!(
             out,
@@ -97,6 +132,13 @@ struct Global {
     strings: BTreeMap<Symbol, usize>,
     runtime_decls: BTreeMap<String, (String, String)>,
     extern_decls: BTreeMap<String, (String, String)>,
+    /// M1 (D2): def to (@.str id, byte len incl NUL) for trap messages
+    fun_str: BTreeMap<DefId, (usize, usize)>,
+    /// M1 (D2): starry_overflow_panic was referenced (emit noreturn attrs)
+    used_ovf_panic: bool,
+    /// M1 (D2): @.str ids actually referenced (unused fun-name strings are
+    /// not emitted, keeping .ll goldens stable)
+    used_strs: std::collections::BTreeSet<usize>,
 }
 
 impl Global {
@@ -344,6 +386,8 @@ struct FnEmit<'e, 'l> {
     st: &'e [Storage],
     out: &'e mut String,
     u: u32,
+    /// M1（D2 契约）：当前函数名——受检 trap 消息携带（函数名即源位置近似）
+    fun: (usize, usize),
 }
 
 impl<'e, 'l> FnEmit<'e, 'l> {
@@ -424,6 +468,7 @@ impl<'e, 'l> FnEmit<'e, 'l> {
             Const::Unit => "0".into(),
             Const::Str(sym) => {
                 let id = self.g.str_id(*sym);
+                self.g.used_strs.insert(id);
                 let len = self.lc.interner.resolve(*sym).len() + 1;
                 format!("getelementptr ([{len} x i8], ptr @.str.{id}, i64 0, i64 0)")
             }
@@ -482,12 +527,20 @@ fn emit_fun_named(lc: &Lc, g: &mut Global, fun: &FunBody, body: &mut String, nam
     let _ = writeln!(body, "define {} {}({}) {{", ret_ty, name, params.join(", "));
 
     // entry allocas
+    let fun_str = *g.fun_str.get(&fun.def).unwrap_or_else(|| {
+        panic!(
+            "fun name pre-interned (M1 D2): def {:?} name {:?}",
+            fun.def,
+            lc.interner.resolve(lc.defs.get(fun.def).name)
+        )
+    });
     let mut e = FnEmit {
         lc,
         g,
         st: &st,
         out: body,
         u: 0,
+        fun: fun_str,
     };
     for (i, s) in st.iter().enumerate() {
         match s {
@@ -539,6 +592,116 @@ fn block_label(id: u32) -> String {
     format!("b{}", id)
 }
 
+/// M1（Q5）：受检整型加减乘——llvm.s{add,sub,mul}.with.overflow 序列，
+/// 溢出分支 call starry_overflow_panic + unreachable，正常路径落入新续标签
+/// （后续指令顺延；槽式存储无 phi，无需修补）
+/// M1 (D2/D4 contract): checked trap call. noreturn decl; the message
+/// carries the op code and the current function name (span approximation).
+fn emit_panic(e: &mut FnEmit, code: i8) {
+    e.g.used_ovf_panic = true;
+    e.g.runtime_decls
+        .entry("starry_overflow_panic".into())
+        .or_insert(("void".into(), "i8, ptr".into()));
+    let (id, len) = e.fun;
+    e.g.used_strs.insert(id);
+    let _ = writeln!(
+        e.out,
+        "  call void @starry_overflow_panic(i8 {}, ptr getelementptr ([{} x i8], ptr @.str.{}, i64 0, i64 0))",
+        code, len, id
+    );
+    let _ = writeln!(e.out, "  unreachable");
+}
+
+fn emit_checked_arith(e: &mut FnEmit, dst: TempId, op: BinOp, ty: TyId, lv: &str, rv: &str) {
+    let tname = scalar_ty(e.lc.tys, ty);
+    let intrinsic = match op {
+        BinOp::Add => "llvm.sadd.with.overflow",
+        BinOp::Sub => "llvm.ssub.with.overflow",
+        _ => "llvm.smul.with.overflow",
+    };
+    let code = match op {
+        BinOp::Add => 1,
+        BinOp::Sub => 2,
+        _ => 3,
+    };
+    e.g.runtime_decls
+        .entry("starry_overflow_panic".into())
+        .or_insert(("void".into(), "i8, ptr".into()));
+    let pair = e.fresh();
+    let _ = writeln!(
+        e.out,
+        "  {} = call {{ {}, i1 }} @{}.{}({} {}, {} {})",
+        pair, tname, intrinsic, tname, tname, lv, tname, rv
+    );
+    let ov = e.fresh();
+    let _ = writeln!(
+        e.out,
+        "  {} = extractvalue {{ {}, i1 }} {}, 1",
+        ov, tname, pair
+    );
+    let lp = e.fresh();
+    let lc = e.fresh();
+    let _ = writeln!(e.out, "  br i1 {}, label {}, label {}", ov, lp, lc);
+    let _ = writeln!(e.out, "{}:", &lp[1..]);
+    emit_panic(e, code);
+    let _ = writeln!(e.out, "{}:", &lc[1..]);
+    let res = e.fresh();
+    let _ = writeln!(
+        e.out,
+        "  {} = extractvalue {{ {}, i1 }} {}, 0",
+        res, tname, pair
+    );
+    e.store_val(dst, ty, res);
+}
+
+/// M1（Q5）：受检整型除法——sdiv/srem 前显式守卫除零与 INT_MIN ÷ -1
+/// （LLVM 对两者是 poison/硬件异常，统一为可读的 overflow panic）
+fn emit_checked_div(e: &mut FnEmit, dst: TempId, op: BinOp, ty: TyId, lv: &str, rv: &str) {
+    let tname = scalar_ty(e.lc.tys, ty);
+    e.g.runtime_decls
+        .entry("starry_overflow_panic".into())
+        .or_insert(("void".into(), "i8, ptr".into()));
+    let zero_code = if op == BinOp::Div { 4 } else { 6 };
+    let min_code = if op == BinOp::Div { 5 } else { 7 };
+    // i4 以 i8 存储，守卫常量按语义位宽取最小值
+    let min_text = match e.lc.tys.kind(ty) {
+        TyKind::Int(IntKind::I4) => "-8",
+        TyKind::Int(IntKind::I8) => "-128",
+        TyKind::Int(IntKind::I16) => "-32768",
+        TyKind::Int(IntKind::I32) => "-2147483648",
+        TyKind::Int(IntKind::I64) => "-9223372036854775808",
+        _ => "-170141183460469231731687303715884105728",
+    };
+    let z = e.fresh();
+    let _ = writeln!(e.out, "  {} = icmp eq {} {}, 0", z, tname, rv);
+    let at_min = e.fresh();
+    let _ = writeln!(
+        e.out,
+        "  {} = icmp eq {} {}, {}",
+        at_min, tname, lv, min_text
+    );
+    let neg1 = e.fresh();
+    let _ = writeln!(e.out, "  {} = icmp eq {} {}, -1", neg1, tname, rv);
+    // D4: zero guard first (code 4/6), then INT_MIN/-1 (code 5/7)
+    let lz = e.fresh();
+    let lzc = e.fresh();
+    let _ = writeln!(e.out, "  br i1 {}, label {}, label {}", z, lz, lzc);
+    let _ = writeln!(e.out, "{}:", &lz[1..]);
+    emit_panic(e, zero_code);
+    let _ = writeln!(e.out, "{}:", &lzc[1..]);
+    let both = e.fresh();
+    let _ = writeln!(e.out, "  {} = and i1 {}, {}", both, at_min, neg1);
+    let lm = e.fresh();
+    let lmc = e.fresh();
+    let _ = writeln!(e.out, "  br i1 {}, label {}, label {}", both, lm, lmc);
+    let _ = writeln!(e.out, "{}:", &lm[1..]);
+    emit_panic(e, min_code);
+    let _ = writeln!(e.out, "{}:", &lmc[1..]);
+    let v = e.fresh();
+    let mnemonic = if op == BinOp::Div { "sdiv" } else { "srem" };
+    let _ = writeln!(e.out, "  {} = {} {} {}, {}", v, mnemonic, tname, lv, rv);
+    e.store_val(dst, ty, v);
+}
 fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr) {
     match instr {
         Instr::Bin { dst, op, l, r, ty } => {
@@ -546,6 +709,16 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
             let rv = e.op_val(r, *ty);
             // bin_llvm 自管 fresh：内联实现（借用冲突回避）
             let is_float = matches!(e.lc.tys.kind(*ty), TyKind::Float(_));
+            // M1（Q5）：整型 + - * 走 llvm.*.with.overflow 受检序列，
+            // 除法先显式守卫除零/INT_MIN÷-1；+% -% *% 与浮点保持原路
+            if !is_float && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
+                emit_checked_arith(e, *dst, *op, *ty, &lv, &rv);
+                return;
+            }
+            if !is_float && matches!(op, BinOp::Div | BinOp::Rem) {
+                emit_checked_div(e, *dst, *op, *ty, &lv, &rv);
+                return;
+            }
             let tname = scalar_ty(e.lc.tys, *ty);
             let mnemonic = match op {
                 BinOp::Add => {
@@ -569,6 +742,10 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                         "mul"
                     }
                 }
+                // M1（Q5）：wrapping 变体发裸指令（回绕 = LLVM 原生语义）
+                BinOp::WrappingAdd => "add",
+                BinOp::WrappingSub => "sub",
+                BinOp::WrappingMul => "mul",
                 BinOp::Div => {
                     if is_float {
                         "fdiv"

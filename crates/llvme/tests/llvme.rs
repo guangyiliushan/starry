@@ -8,7 +8,7 @@ fn emit(source: &str) -> (String, Vec<ast::syntax::node::DiagCode>) {
         sem_out.diagnostics.iter().map(|d| d.code).collect();
     let tac = irc::lower(&mut sem_out, source);
     codes.extend(tac.diags.iter().map(|d| d.code));
-    let text = llvme::emit(&tac, &sem_out.tys, &sem_out.defs, &sem_out.interner);
+    let text = llvme::emit(&tac, &sem_out.tys, &sem_out.defs, &mut sem_out.interner);
     (text, codes)
 }
 
@@ -444,5 +444,42 @@ fn extern_pointer_params_emit_ptr_signature() {
     assert!(
         text.contains("declare i64 @c_log(ptr, ptr)"), // : int = i64
         "pointer extern signature missing:\n{text}"
+    );
+}
+
+#[test]
+fn checked_arith_emits_overflow_intrinsic_and_panic_decl() {
+    // M1（Q5）：整型 + - * 发 llvm.*.with.overflow 受检序列 + panic 声明；
+    // 窄位宽（i8 形参 × i8 形参）按 i8 内联
+    let (text, codes) = emit("fun f(x: i8, y: i8): int {\n    return x * y\n}");
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    if !llvm_as_ok(&text) {
+        panic!("LLVM validator rejected:\n{text}");
+    }
+    assert!(
+        text.contains("@llvm.smul.with.overflow.i8") && text.contains("starry_overflow_panic"),
+        "{text}"
+    );
+
+    // 整型除法：守卫在 sdiv 之前（除零/INT_MIN÷-1 不落到硬件异常）
+    let (text, codes) = emit("fun f(x: int): int {\n    return x / 1\n}");
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    if !llvm_as_ok(&text) {
+        panic!("LLVM validator rejected:\n{text}");
+    }
+    assert!(
+        text.contains("sdiv") && text.contains("starry_overflow_panic"),
+        "{text}"
+    );
+
+    // wrapping 算子：裸指令，无受检序列
+    let (text, codes) = emit("fun f(x: int, y: int): int {\n    return x +% y\n}");
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    if !llvm_as_ok(&text) {
+        panic!("LLVM validator rejected:\n{text}");
+    }
+    assert!(
+        text.contains("add i64") && !text.contains("with.overflow"),
+        "{text}"
     );
 }

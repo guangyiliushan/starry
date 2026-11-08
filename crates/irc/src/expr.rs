@@ -399,8 +399,11 @@ fn unescape(ctx: &mut Ctx, s: &str, span: Span) -> String {
 fn binop(op: OperatorKind) -> Option<BinOp> {
     Some(match op {
         OperatorKind::Plus => BinOp::Add,
+        OperatorKind::PlusPercent => BinOp::WrappingAdd,
         OperatorKind::Minus => BinOp::Sub,
+        OperatorKind::MinusPercent => BinOp::WrappingSub,
         OperatorKind::Star => BinOp::Mul,
+        OperatorKind::StarPercent => BinOp::WrappingMul,
         OperatorKind::Slash => BinOp::Div,
         OperatorKind::Percent => BinOp::Rem,
         OperatorKind::EqEq => BinOp::Eq,

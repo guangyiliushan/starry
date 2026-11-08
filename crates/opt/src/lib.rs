@@ -113,6 +113,14 @@ fn domain_of(tys: &TyArena, ty: TyId) -> Option<Domain> {
     })
 }
 
+/// w 位有符号最小值（i128 表示）——除法溢出（INT_MIN / -1）不折叠的判据
+fn min_i128(w: u32) -> i128 {
+    if w >= 128 {
+        i128::MIN
+    } else {
+        -(1i128 << (w - 1))
+    }
+}
 /// 整数按 N 位补码规约（低位截断 + 符号扩展回 i128）——与 LLVM 对 iN
 /// 常量/指令的截断语义一致。折叠结果经它规约后必落在 `ty` 值域内，
 /// 发射端不再出现超位宽字面量。
@@ -196,13 +204,38 @@ fn fold_bin(op: BinOp, l: &Const, r: &Const, dom: Domain) -> Option<Const> {
             // 先按位宽规约操作数：未优化代码在 N 位上看的就是规约后的值
             let (l, r) = (sx(*l, w), sx(*r, w));
             let i = match op {
-                Add => l.wrapping_add(r),
-                Sub => l.wrapping_sub(r),
-                Mul => l.wrapping_mul(r),
-                // 除零不折叠：不发明 trap 语义。判据是规约后的除数——
-                // i8 域里 `x / 256` 的除数规约后是 0，未优化代码同样除零
-                Div if r != 0 => l.wrapping_div(r),
-                Rem if r != 0 => l.wrapping_rem(r),
+                // M1（Q5）：受检算术只在「位宽上不溢出」时折叠——溢出留给
+                // 运行期 trap，折叠成回绕值会改变语义。wrapping 变体
+                // 恒折叠（回绕即语义）。
+                WrappingAdd => l.wrapping_add(r),
+                WrappingSub => l.wrapping_sub(r),
+                WrappingMul => l.wrapping_mul(r),
+                Add => {
+                    // checked_add 抓 w=128 的 i128 真溢出，sx 回环抓窄位宽
+                    let v = l.checked_add(r)?;
+                    if sx(v, w) != v {
+                        return None;
+                    }
+                    v
+                }
+                Sub => {
+                    let v = l.checked_sub(r)?;
+                    if sx(v, w) != v {
+                        return None;
+                    }
+                    v
+                }
+                Mul => {
+                    let v = l.checked_mul(r)?;
+                    if sx(v, w) != v {
+                        return None;
+                    }
+                    v
+                }
+                // 除零/INT_MIN÷-1 不折叠：不发明 trap 语义。判据是规约后的
+                // 除数——i8 域里 `x / 256` 的除数规约后是 0，未优化代码同样除零
+                Div if r != 0 && !(r == -1 && l == min_i128(w)) => l.wrapping_div(r),
+                Rem if r != 0 && !(r == -1 && l == min_i128(w)) => l.wrapping_rem(r),
                 Lt => return Some(Const::Bool(l < r)),
                 Le => return Some(Const::Bool(l <= r)),
                 Gt => return Some(Const::Bool(l > r)),
@@ -805,26 +838,60 @@ mod tests {
     }
 
     #[test]
-    fn fold_add_wraps_at_type_width() {
-        // i32 域回绕，不是 i128 的 4000000000
-        assert_eq!(add32(2_000_000_000, 2_000_000_000), -294_967_296);
+    fn fold_add_checked_overflow_not_folded() {
+        // M1（Q5）：受检加法在 i32 域溢出 → 不折叠（留给运行期 trap），
+        // 不折成回绕值；显式 WrappingAdd 照常折叠回绕
+        assert!(
+            fold_bin(
+                BinOp::Add,
+                &Const::Int(2_000_000_000),
+                &Const::Int(2_000_000_000),
+                Domain::Int(32)
+            )
+            .is_none()
+        );
+        assert_eq!(add32(1, 2), 3);
+        assert_eq!(
+            int(fold_bin(
+                BinOp::WrappingAdd,
+                &Const::Int(2_000_000_000),
+                &Const::Int(2_000_000_000),
+                Domain::Int(32)
+            )),
+            -294_967_296
+        );
     }
 
     #[test]
     fn fold_div_sees_wrapped_operand() {
-        // 回绕后再除：i32 域 -294967296 / 2 = -147483648
-        // （旧的 i128 折叠给出 2000000000，与未优化代码不同值）
-        let sum = Const::Int(add32(2_000_000_000, 2_000_000_000));
+        // 规约后再除：i32 域 2000000000 / 2 = 1000000000
+        // （旧测试用受检溢出值；M1 后改 in-range，窄化断言不变）
+        let sum = Const::Int(add32(1_000_000_000, 1_000_000_000));
         assert_eq!(
             int(fold_bin(BinOp::Div, &sum, &Const::Int(2), Domain::Int(32))),
-            -147_483_648
+            1_000_000_000
+        );
+        // INT_MIN ÷ -1 是 poison → 不折叠（留给运行期 trap）
+        assert!(
+            fold_bin(
+                BinOp::Div,
+                &Const::Int(-2_147_483_648),
+                &Const::Int(-1),
+                Domain::Int(32)
+            )
+            .is_none()
         );
     }
 
     #[test]
     fn fold_compares_narrowed_operands() {
-        // (2000000000 + 2000000000) < 0 在 i32 域为真（回绕成负数）
-        let sum = Const::Int(add32(2_000_000_000, 2_000_000_000));
+        // (2e9 +% 2e9) < 0 在 i32 域为真（显式回绕成负数 -294967296）
+        let sum = Const::Int(int(fold_bin(
+            BinOp::WrappingAdd,
+            &Const::Int(2_000_000_000),
+            &Const::Int(2_000_000_000),
+            Domain::Int(32),
+        )));
         assert!(boolean(fold_bin(
             BinOp::Lt,
             &sum,

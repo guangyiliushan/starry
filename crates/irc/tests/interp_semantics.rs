@@ -110,7 +110,7 @@ fn downstream_gates_on_diags() {
         before,
         "optimize 须在有诊断时不动 TAC"
     );
-    let text = llvme::emit(&tac, &sem_out.tys, &sem_out.defs, &sem_out.interner);
+    let text = llvme::emit(&tac, &sem_out.tys, &sem_out.defs, &mut sem_out.interner);
     assert_eq!(text, "", "llvme 须在有诊断时不发射");
 }
 
@@ -244,4 +244,31 @@ fn tier0_scalar_conformance() {
         let got = run(&src, "probe", &[]);
         assert_eq!(&got, expected, "tier0 conformance for {ty}: {src}");
     }
+}
+
+// M1（Q5）：受检算术溢出/除零 → interp trap；+% -% *% 回绕不 trap
+#[test]
+fn checked_arith_overflows_trap_and_wrapping_wraps() {
+    // i64 形参 +1：MAX 溢出
+    let src = "fun f(x: int): int {\n    return x + 1\n}";
+    assert!(matches!(
+        run_res(src, "f", &[Value::I(i64::MAX)]),
+        Err(InterpError::Trap(_))
+    ));
+    // 窄位宽：i8 × i8 在 i8 域上溢出（两操作数皆窄 → join 不提升）
+    let src8 = "fun f(x: i8, y: i8): int {\n    return x * y\n}";
+    assert!(matches!(
+        run_res(src8, "f", &[Value::I(100), Value::I(100)]),
+        Err(InterpError::Trap(_))
+    ));
+    assert_eq!(run(src8, "f", &[Value::I(10), Value::I(10)]), Value::I(100));
+    // 除零与 INT_MIN / -1
+    let srcd = "fun f(x: int): int {\n    return x / 0\n}";
+    assert!(matches!(
+        run_res(srcd, "f", &[Value::I(1)]),
+        Err(InterpError::Trap(_))
+    ));
+    // wrapping：i64 MAX +% 1 = MIN，不 trap
+    let srcw = "fun f(x: int): int {\n    return x +% 1\n}";
+    assert_eq!(run(srcw, "f", &[Value::I(i64::MAX)]), Value::I(i64::MIN));
 }

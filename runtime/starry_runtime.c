@@ -30,6 +30,12 @@ static void cstr_copy(char *dst, const char *src, SIZE_T n) {
     for (SIZE_T i = 0; i < n; i++) dst[i] = src[i];
 }
 
+static void write_err(const char *s) {
+    HANDLE err = GetStdHandle((DWORD)-12); // STD_ERROR_HANDLE
+    DWORD n;
+    WriteFile(err, s, (DWORD)cstr_len(s), &n, 0);
+}
+
 static void write_str(const char *s) {
     DWORD written = 0;
     HANDLE out = GetStdHandle((DWORD)-11); // STD_OUTPUT_HANDLE
@@ -260,3 +266,24 @@ void starry_print_char(int cp) {
 void starry_print_f64(double v) { write_line(fmt_double(v, 15)); }
 void starry_print_f32(float v) { write_line(fmt_double((double)v, 7)); }
 void starry_print_string(const char *s) { write_line(s); }
+
+/* M1（D2/D4 契约）：受检算术 trap 统一入口——llvme 的受检分支调用。
+ * noreturn；向 stderr 打印区分后的原因 + 函数名（源位置近似），
+ * ExitProcess(134)（trap 约定；无 CRT 用 ExitProcess）。
+ * 不执行 defer/ARC 清理：这是 fatal abort，不是可恢复 panic。
+ * code: 1 add ovf / 2 sub ovf / 3 mul ovf / 4 div by zero /
+ *       5 div ovf (MIN/-1) / 6 rem by zero / 7 rem ovf */
+void starry_overflow_panic(signed char op, const char *fun) {
+    const char *msg = "overflow: +";
+    if (op == 2) msg = "overflow: -";
+    else if (op == 3) msg = "overflow: *";
+    else if (op == 4) msg = "division by zero: /";
+    else if (op == 5) msg = "overflow: /";
+    else if (op == 6) msg = "remainder by zero: %";
+    else if (op == 7) msg = "overflow: %";
+    write_err(msg);
+    write_err(" in ");
+    write_err(fun);
+    write_err("\n");
+    ExitProcess(134u);
+}

@@ -20,8 +20,9 @@ use ast::interner::Interner;
 use irc::tac::TacOutput;
 use sem::{DefArena, TyArena};
 
-/// LLVM IR 文本发射入口（opt-notes 钉死的签名）
-pub fn emit(tac: &TacOutput, tys: &TyArena, defs: &DefArena, interner: &Interner) -> String {
+/// LLVM IR 文本发射入口。`&mut Interner`（M1.5 D2）：trap 消息的函数名
+/// 预 intern 需要可变性；opt-notes 的表示形态契约不变。
+pub fn emit(tac: &TacOutput, tys: &TyArena, defs: &DefArena, interner: &mut Interner) -> String {
     // API 级契约门：有诊断的 TAC 不发射（下游契约同 opt）
     if !tac.diags.is_empty() {
         return String::new();

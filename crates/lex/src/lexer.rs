@@ -164,6 +164,9 @@ impl Lexer {
                 TokenKind::Operator(OperatorKind::QuestionQuestion),
             ),
             // 单字符操作符
+            ("\\+\\%", TokenKind::Operator(OperatorKind::PlusPercent)),
+            ("-\\%", TokenKind::Operator(OperatorKind::MinusPercent)),
+            ("\\*\\%", TokenKind::Operator(OperatorKind::StarPercent)),
             ("\\+", TokenKind::Operator(OperatorKind::Plus)),
             ("-", TokenKind::Operator(OperatorKind::Minus)),
             ("\\*", TokenKind::Operator(OperatorKind::Star)),

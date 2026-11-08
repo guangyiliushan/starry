@@ -6,6 +6,8 @@
 //!
 //! 选型纪律：extern "c" 程序不可 interp（已知局限）、浮点打印文本两侧
 //! 不同源（C fmt_double vs interp 占位）、i128 按 64 位建模——均不入选。
+//! trap 程序（受检溢出/除零）不走本路径——TRAP_CASES 的
+//! interp_and_native_agree_on_traps 单独断言两侧一致 trap。
 //! 无工具链时显式 SKIP（与 build_cli 同纪律）。
 
 use std::path::PathBuf;
@@ -59,7 +61,7 @@ fn both_outputs(case: usize, source: &str) -> Option<(Vec<String>, Vec<String>)>
 
     // 路径 B：native build + run
     let clang = llvm_tool_path("clang")?;
-    let text = llvme::emit(&tac, &sem_out.tys, &sem_out.defs, &sem_out.interner);
+    let text = llvme::emit(&tac, &sem_out.tys, &sem_out.defs, &mut sem_out.interner);
     let dir = std::env::temp_dir().join(format!("starry_diff_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let ll = dir.join("diff.ll");
@@ -95,8 +97,9 @@ fn both_outputs(case: usize, source: &str) -> Option<(Vec<String>, Vec<String>)>
 /// 差分用例：每个都是完整可运行程序（check/irc 零诊断、无 extern、
 /// 无浮点打印、无 i128 依赖——选型纪律见模块头）。
 const CASES: &[&str] = &[
-    // 整型位宽与回绕（字面量定型 → 最小可容纳；算术按 ty 位宽回绕）
-    "fun main() {\n    print(2147483647 + 1)\n    print(3000000000)\n    print(10 as i16)\n    print(-5 as i8)\n    print(7 * 6)\n}",
+    // 整型位宽（字面量定型 → 最小可容纳；M1 后受检算术不溢出、
+    // 回绕走显式 +%（Q5）——溢出程序是 trap，按选型纪律不入 diff）
+    "fun main() {\n    print(2147483647 +% 1)\n    print(2147483646 + 1)\n    print(3000000000)\n    print(10 as i16)\n    print(-5 as i8)\n    print(7 * 6)\n}",
     // 除/余/位运算/移位
     "fun main() {\n    print(7 / 2)\n    print(7 % 2)\n    print(12 & 10)\n    print(12 | 3)\n    print(5 ^ 3)\n    print(1 << 4)\n    print(256 >> 4)\n    print(~0 as i8)\n}",
     // 比较与布尔短路
@@ -126,6 +129,89 @@ const CASES: &[&str] = &[
     // 复合赋值 + 聚合实参快照（var 实参在调用内不改写外部）
     "struct P { x: int }\nfun bump(p: P) : int {\n    return p.x + 1\n}\nfun main() {\n    var s = 1\n    s += 4\n    s *= 3\n    print(s)\n    val p = P(5)\n    print(bump(p))\n    print(p.x)\n}",
 ];
+
+/// M1.5（D2/D4 conformance）：trap 程序两侧必须一致——interp Trap 且 native
+/// exit 134 + stderr 带区分后的原因。溢出正是 interp/native 最该对拍的
+/// 地方（「把溢出移出 diff」被驳回，本类即回应）。
+const TRAP_CASES: &[(&str, &str)] = &[
+    (
+        "add overflow",
+        "fun main() : int {\n    val x = 9223372036854775807\n    return x + 1\n}",
+    ),
+    (
+        "div by zero",
+        "fun main() : int {\n    val x = 1\n    return x / 0\n}",
+    ),
+    (
+        "narrow mul overflow",
+        "fun main() : int {\n    val a: i8 = 100\n    val b: i8 = 100\n    return a * b\n}",
+    ),
+];
+
+#[test]
+fn interp_and_native_agree_on_traps() {
+    for (name, source) in TRAP_CASES {
+        let parsed = parser::parse_source(source).expect("machine parse");
+        let mut sem_out = sem::analyze(parsed);
+        assert!(
+            sem_out.diagnostics.is_empty(),
+            "sem diags in trap case {name}: {:?}",
+            sem_out.diagnostics.first()
+        );
+        let tac = irc::lower(&mut sem_out, source);
+        assert!(tac.diags.is_empty(), "irc diags: {:?}", tac.diags.first());
+        let interp_res = irc::interp::run_named_capturing(
+            &tac,
+            &sem_out.tys,
+            &sem_out.defs,
+            &sem_out.interner,
+            "main",
+            &[],
+        );
+        assert!(
+            matches!(interp_res, Err(irc::interp::InterpError::Trap(_))),
+            "interp did not trap for {name}: {interp_res:?}"
+        );
+        let Some(clang) = llvm_tool_path("clang") else {
+            continue;
+        };
+        let text = llvme::emit(&tac, &sem_out.tys, &sem_out.defs, &mut sem_out.interner);
+        let dir = std::env::temp_dir().join(format!(
+            "starry_diff_trap_{}_{}",
+            std::process::id(),
+            name.replace(" ", "_")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ll = dir.join("t.ll");
+        let c = dir.join("runtime.c");
+        let exe: PathBuf = if cfg!(windows) {
+            dir.join("t.exe")
+        } else {
+            dir.join("t")
+        };
+        std::fs::write(&ll, &text).unwrap();
+        std::fs::write(&c, RUNTIME_C).unwrap();
+        let mut cmd = Command::new(&clang);
+        cmd.arg(&ll).arg(&c);
+        if cfg!(windows) {
+            cmd.arg("-nostdlib").arg("-lkernel32");
+        }
+        let built = cmd.arg("-o").arg(&exe).output().unwrap();
+        assert!(
+            built.status.success(),
+            "clang link: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let run = Command::new(&exe).output().unwrap();
+        assert_eq!(run.status.code(), Some(134), "native trap exit for {name}");
+        let err = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            err.contains(" in main"),
+            "trap stderr lacks fun name for {name}: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
 
 #[test]
 fn interp_and_native_outputs_agree_line_by_line() {

@@ -18,7 +18,7 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | 字符串字面量/转义 | ✅ | ✅ | ✅ | ✅ | ✅ | 插值 chunk span 兼容 |
 | char 字面量 | ✅ | ✅ | ✅ | ✅ | ✅ | UTF-8 码点 |
 | bool / unit / null | ✅ | ✅ | ✅ | ✅ | ✅ | null = Nullable 提升 |
-| 算术/位运算/比较 | ✅ | ✅ | ✅ | ✅ | — | N 位回绕；比较结果 i1 |
+| 算术/位运算/比较 | ✅ | ✅ | ✅ | ✅ | ✅ | checked 默认溢出（stderr panic，exit 134）；wrapping 显式 `+%` `-%` `*%`；比较结果 i1 |
 | 短路布尔 / ! | ✅ | ✅ | ✅ | ✅ | — | Br 链物化 |
 | `as` 数值转换 | ✅ | ✅ | ✅ | ✅ | — | 全有符号 Conv |
 | `print` 内建 | ✅ | ✅ | ✅ | ✅ | ✅ | 标量六类入口（i1/i128 特判） |

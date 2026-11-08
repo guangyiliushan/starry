@@ -177,6 +177,12 @@ pub enum DiagCode {
     SemUnknownMember,
     /// 泛型调用的类型实参个数不符 / 非泛型调用携带类型实参（M7）
     SemTypeArgMismatch,
+    /// 常量整型表达式在结果类型位宽上溢出（M1 D3：独立于字面量值域）
+    SemConstOverflow,
+    /// 常量除零（M1 D3/D4）
+    SemDivisionByZero,
+    /// 常量 INT_MIN / -1 除法溢出（M1 D4）
+    SemDivisionOverflow,
     // ---- intermediate code generation（crates/irc 命名空间）----
     /// sem 已接受但 irc 当前里程碑尚未 lower 的构造（M1 边界）
     IrcUnsupportedLowering,

@@ -16,6 +16,12 @@ pub enum OperatorKind {
     Slash,
     /// %
     Percent,
+    /// +%（wrapping 加；M1 checked 默认溢出的显式回绕算子）
+    PlusPercent,
+    /// -%（wrapping 减）
+    MinusPercent,
+    /// *%（wrapping 乘）
+    StarPercent,
 
     // 比较运算符
     /// ==
@@ -110,6 +116,9 @@ impl fmt::Display for OperatorKind {
             OperatorKind::Star => "*",
             OperatorKind::Slash => "/",
             OperatorKind::Percent => "%",
+            OperatorKind::PlusPercent => "+%",
+            OperatorKind::MinusPercent => "-%",
+            OperatorKind::StarPercent => "*%",
             OperatorKind::EqEq => "==",
             OperatorKind::BangEq => "!=",
             OperatorKind::Lt => "<",
@@ -160,6 +169,9 @@ impl OperatorKind {
             OperatorKind::Star => "*",
             OperatorKind::Slash => "/",
             OperatorKind::Percent => "%",
+            OperatorKind::PlusPercent => "+%",
+            OperatorKind::MinusPercent => "-%",
+            OperatorKind::StarPercent => "*%",
             OperatorKind::EqEq => "==",
             OperatorKind::BangEq => "!=",
             OperatorKind::Lt => "<",

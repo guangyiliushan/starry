@@ -291,7 +291,7 @@ fn compile_source(
         &tac,
         &output.tys,
         &output.defs,
-        &output.interner,
+        &mut output.interner,
     ))
 }
 

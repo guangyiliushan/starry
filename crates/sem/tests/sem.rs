@@ -1346,3 +1346,49 @@ fn generic_rejections_are_stable() {
         DiagCode::SemUnsupportedConstruct,
     );
 }
+
+// ---- M1（Q5）：checked 默认溢出 + 显式 wrapping ----
+
+#[test]
+fn checked_const_overflow_and_wrapping_operators() {
+    // D3：可证明的常量溢出钉独立码 SemConstOverflow（不复用 IntegerOutOfRange）
+    assert_has(
+        "fun f() : int {\n    return 9223372036854775807 + 1\n}",
+        DiagCode::SemConstOverflow,
+    );
+    // 一元负参与常量链：-MAX - 2 越出 i64
+    assert_has(
+        "fun f() : int {\n    return -9223372036854775807 - 2\n}",
+        DiagCode::SemConstOverflow,
+    );
+    // 乘法常量溢出
+    assert_has(
+        "fun f() : int {\n    return 9223372036854775807 * 2\n}",
+        DiagCode::SemConstOverflow,
+    );
+    // D4：常量除零编译期诊断（独立码）
+    assert_has(
+        "fun f(x: int): int {\n    return x + 1 / 0\n}",
+        DiagCode::SemDivisionByZero,
+    );
+    // D3：二元字面量上下文传播——i32 标注使常量加法在 i32 域核查
+    assert_has(
+        "fun f() : int {\n    val x: i32 = 2147483647 + 1\n    return x as int\n}",
+        DiagCode::SemConstOverflow,
+    );
+    assert_clean("fun f() : int {\n    val x: i32 = 2147483646 + 1\n    return x as int\n}");
+    // return 上下文传播：声明 i32 返回型
+    assert_has(
+        "fun f() : i32 {\n    return 2147483647 + 1\n}",
+        DiagCode::SemConstOverflow,
+    );
+    // 界内常量干净；wrapping 算子不诊断
+    assert_clean("fun f() : int {\n    return 9223372036854775806 + 1\n}");
+    assert_clean("fun f() : int {\n    return 9223372036854775807 +% 1\n}");
+    assert_clean("fun f(x: int) : int {\n    return x *% 3\n}");
+    // wrapping 仅整型：字符串连接不吃 +%
+    assert_has(
+        "fun f() : int {\n    return \"a\" +% \"b\"\n}",
+        DiagCode::SemTypeMismatch,
+    );
+}

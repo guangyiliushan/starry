@@ -66,7 +66,9 @@ pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
                     let dty = type_expr(d, st, true);
                     if let Some(t) = &p.ty {
                         let target = st.ty_of_node.get(t.id).copied().unwrap_or(st.tys.error);
+                        retype_binary_literals(d, target, st);
                         retype_integer_literal(d, target, st);
+
                         let dty = st.expr_ty.get(d.id).copied().unwrap_or(dty);
                         if !st.tys.assignable(dty, target) {
                             mismatch(st, d.span);
@@ -238,6 +240,7 @@ fn check_fun(decl_id: NodeId, f: &ast::syntax::decl::FunDecl, fdef: DefId, st: &
             if f.ret.is_some()
                 && let Some(t) = &b.tail
             {
+                retype_binary_literals(t, ret, st);
                 retype_integer_literal(t, ret, st);
             }
             b.tail.as_ref().map(|_| ty)
@@ -245,6 +248,7 @@ fn check_fun(decl_id: NodeId, f: &ast::syntax::decl::FunDecl, fdef: DefId, st: &
         Some(FunctionBody::Expr(e)) => {
             let ty = type_expr(e, st, true);
             if f.ret.is_some() {
+                retype_binary_literals(e, ret, st);
                 retype_integer_literal(e, ret, st);
             }
             Some(st.expr_ty.get(e.id).copied().unwrap_or(ty))
@@ -313,6 +317,7 @@ fn check_binding_pattern(init: &ExprWrap, pat: &PatWrap, init_ty: TyId, st: &mut
                     st.defs.get_mut(def).sig.ty = init_ty;
                 } else {
                     // M1：标注是具体整型且 init 是整数字面量 → 按标注宽度重定型
+                    retype_binary_literals(init, ann, st);
                     retype_integer_literal(init, ann, st);
                     let init_ty = st.expr_ty.get(init.id).copied().unwrap_or(init_ty);
                     if !st.tys.assignable(init_ty, ann) {
@@ -477,6 +482,7 @@ fn type_stmt(s: &StmtWrap, st: &mut SemState) {
             if let Some(v) = value {
                 let vty = type_expr(v, st, true);
                 // M1：return 字面量按返回型重定型
+                retype_binary_literals(v, ret, st);
                 retype_integer_literal(v, ret, st);
                 let vty = st.expr_ty.get(v.id).copied().unwrap_or(vty);
                 if !st.tys.assignable(vty, ret) {
@@ -870,6 +876,44 @@ fn check_borrow(target: &ExprWrap, mutable: bool, st: &mut SemState) {
 }
 
 /// 调用点：绑定标注、构造/函数实参槽、return/尾式。已是 Error 的不再动。
+/// M1（D3）：二元字面量对的上下文传播——`val x: i32 = 2147483647 + 1` 这类
+/// 两端皆整数字面量的算术式，先把操作数重定型到期望类型再定型二元式
+/// （否则默认 i64 先 join，标注/返回/实参上下文够不到，D3 裁定的缺口）。
+/// 在每一处 retype_integer_literal 的调用点之前调用。
+/// 范围：操作数须为裸整数字面量——一元负（`-5 + 1`）与嵌套链不传播
+/// （记入差距：D3 裁定只要求字面量对）。
+fn retype_binary_literals(e: &ExprWrap, target: TyId, st: &mut SemState) {
+    if let ExprKind::Binary { op, lhs, rhs } = &e.kind
+        && matches!(
+            op,
+            OperatorKind::Plus
+                | OperatorKind::Minus
+                | OperatorKind::Star
+                | OperatorKind::Slash
+                | OperatorKind::Percent
+        )
+    {
+        retype_integer_literal(lhs, target, st);
+        retype_integer_literal(rhs, target, st);
+        // 重定型二元节点本身：不递归下钻（下钻会把字面量定型回默认宽
+        // 度，抹掉上面的重定型）；只按操作数现型汇合 + 常量核查
+        let l = st.expr_ty.get(lhs.id).copied().unwrap_or(st.tys.error);
+        let r = st.expr_ty.get(rhs.id).copied().unwrap_or(st.tys.error);
+        if st.tys.is_error(l) || st.tys.is_error(r) {
+            return;
+        }
+        let t = if *op == OperatorKind::Plus && l == st.tys.string && r == st.tys.string {
+            st.tys.string
+        } else {
+            st.tys.join(l, r).unwrap_or(st.tys.error)
+        };
+        if !st.tys.is_error(t) {
+            checked_const_overflow(*op, lhs, rhs, t, e.span, st);
+            st.expr_ty.set(e.id, t);
+        }
+    }
+}
+
 fn retype_integer_literal(e: &ExprWrap, target: TyId, st: &mut SemState) {
     let TyKind::Int(kind) = st.tys.kind(target) else {
         return;
@@ -904,6 +948,163 @@ fn retype_integer_literal(e: &ExprWrap, target: TyId, st: &mut SemState) {
     }
 }
 
+/// M1（Q5/D3）：常量整型表达式求值的三态结果
+enum ConstInt {
+    /// 常量值（在 i128 内精确）
+    Val(i128),
+    /// 不可常量求值（含非常量操作数）——留给运行期
+    NotConst,
+    /// 常量除零（D3/D4 编译期诊断）
+    ZeroDiv,
+    /// 常量 INT_MIN / -1（D4 编译期诊断）
+    MinNegOne,
+}
+
+/// M1（Q5/D3）：常量整型表达式求值——字面量 / 一元负 / 算术链。
+/// 供 checked 的编译期核查；除法零与 MIN/-1 单独成态（诊断码不同）。
+fn const_int_expr(e: &ExprWrap, st: &SemState) -> ConstInt {
+    match &e.kind {
+        ExprKind::Literal(LiteralKind::Integer) => {
+            match parse_integer_literal(&st.text[e.span.start as usize..e.span.end as usize]) {
+                Some(v) => ConstInt::Val(v),
+                None => ConstInt::NotConst,
+            }
+        }
+        ExprKind::Unary {
+            op: OperatorKind::Minus,
+            operand,
+        } => match const_int_expr(operand, st) {
+            ConstInt::Val(v) => match v.checked_neg() {
+                Some(n) => ConstInt::Val(n),
+                None => ConstInt::NotConst,
+            },
+            other => other,
+        },
+        ExprKind::Binary { op, lhs, rhs } => {
+            match (const_int_expr(lhs, st), const_int_expr(rhs, st)) {
+                (ConstInt::Val(l), ConstInt::Val(r)) => eval_arith(*op, l, r),
+                // 一侧不可常量或已含除法错误：错误向上传染（首个错误优先）
+                (ConstInt::ZeroDiv, _) | (_, ConstInt::ZeroDiv) => ConstInt::ZeroDiv,
+                (ConstInt::MinNegOne, _) | (_, ConstInt::MinNegOne) => ConstInt::MinNegOne,
+                _ => ConstInt::NotConst,
+            }
+        }
+        _ => ConstInt::NotConst,
+    }
+}
+
+/// 常量算术求值（两侧已确认为常量值）；/ % 的成态错误在此产出，
+/// + - * 的 i128 真溢出返回 NotConst（位宽判据在 checked_const_overflow）
+fn eval_arith(op: OperatorKind, l: i128, r: i128) -> ConstInt {
+    match op {
+        OperatorKind::Plus => match l.checked_add(r) {
+            Some(v) => ConstInt::Val(v),
+            None => ConstInt::NotConst,
+        },
+        OperatorKind::Minus => match l.checked_sub(r) {
+            Some(v) => ConstInt::Val(v),
+            None => ConstInt::NotConst,
+        },
+        OperatorKind::Star => match l.checked_mul(r) {
+            Some(v) => ConstInt::Val(v),
+            None => ConstInt::NotConst,
+        },
+        OperatorKind::Slash => {
+            if r == 0 {
+                ConstInt::ZeroDiv
+            } else if r == -1 && l == i128::MIN {
+                ConstInt::MinNegOne
+            } else {
+                ConstInt::Val(l / r)
+            }
+        }
+        OperatorKind::Percent => {
+            if r == 0 {
+                ConstInt::ZeroDiv
+            } else if r == -1 && l == i128::MIN {
+                ConstInt::MinNegOne
+            } else {
+                ConstInt::Val(l % r)
+            }
+        }
+        _ => ConstInt::NotConst,
+    }
+}
+
+/// 常量值视图：只有纯值返回 Some（错误态与非常量同视——错误已在更内层钉过）
+fn const_value(e: &ExprWrap, st: &SemState) -> Option<i128> {
+    match const_int_expr(e, st) {
+        ConstInt::Val(v) => Some(v),
+        _ => None,
+    }
+}
+
+/// M1（Q5/D3/D4）：算术两侧皆常量时编译期核查。
+///
+/// `+ - *` 溢出钉 `SemConstOverflow`；`/ 0` 与 `MIN / -1` 分别钉独立码
+/// （D3 裁定：不复用 IntegerOutOfRange——字面量值域与常量算术是两种错误）。
+fn checked_const_overflow(
+    op: OperatorKind,
+    lhs: &ExprWrap,
+    rhs: &ExprWrap,
+    ty: TyId,
+    span: Span,
+    st: &mut SemState,
+) {
+    let w = match st.tys.kind(ty) {
+        TyKind::Int(k) => match k {
+            IntKind::I4 => 4,
+            IntKind::I8 => 8,
+            IntKind::I16 => 16,
+            IntKind::I32 => 32,
+            IntKind::I64 => 64,
+            IntKind::I128 => 128,
+        },
+        _ => return,
+    };
+    let (Some(l), Some(r)) = (const_value(lhs, st), const_value(rhs, st)) else {
+        return;
+    };
+    match op {
+        OperatorKind::Plus | OperatorKind::Minus | OperatorKind::Star => {
+            let v = match op {
+                OperatorKind::Plus => l.checked_add(r),
+                OperatorKind::Minus => l.checked_sub(r),
+                _ => l.checked_mul(r),
+            };
+            let overflow = match v {
+                Some(v) => !fits_signed(v, w),
+                None => true,
+            };
+            if overflow {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemConstOverflow,
+                    span,
+                    "constant arithmetic overflows the result type (wrapping: use +% -% *%)",
+                ));
+            }
+        }
+        OperatorKind::Slash | OperatorKind::Percent => {
+            let diag = if r == 0 {
+                Some((
+                    DiagCode::SemDivisionByZero,
+                    "division by zero in constant expression",
+                ))
+            } else if r == -1 && l == i128::MIN {
+                Some((
+                    DiagCode::SemDivisionOverflow,
+                    "constant division overflows (MIN / -1)",
+                ))
+            } else {
+                None
+            };
+            if let Some((code, msg)) = diag {
+                st.diags.emit(Diagnostic::error(code, span, msg));
+            }
+        }
+        _ => {}
+    }
+}
 fn parse_integer_literal(text: &str) -> Option<i128> {
     let cleaned: String = text.replace('_', "");
     let (digits, radix) = match cleaned.as_str() {
@@ -1242,7 +1443,12 @@ fn type_binary(
                 st.tys.string
             } else {
                 match st.tys.join(l, r) {
-                    Some(t) if st.tys.is_numeric(t) => t,
+                    Some(t) if st.tys.is_numeric(t) => {
+                        // M1（Q5）：常量表达式在目标位宽上可证明的溢出，
+                        // 编译期诊断而非留给运行期 trap
+                        checked_const_overflow(op, lhs, rhs, t, span, st);
+                        t
+                    }
                     _ => {
                         mismatch(st, span);
                         st.tys.error
@@ -1250,8 +1456,30 @@ fn type_binary(
                 }
             }
         }
-        Op::Minus | Op::Star | Op::Slash | Op::Percent => match st.tys.join(l, r) {
-            Some(t) if st.tys.is_numeric(t) => t,
+        Op::Minus | Op::Star => match st.tys.join(l, r) {
+            Some(t) if st.tys.is_numeric(t) => {
+                checked_const_overflow(op, lhs, rhs, t, span, st);
+                t
+            }
+            _ => {
+                mismatch(st, span);
+                st.tys.error
+            }
+        },
+        Op::Slash | Op::Percent => match st.tys.join(l, r) {
+            Some(t) if st.tys.is_numeric(t) => {
+                checked_const_overflow(op, lhs, rhs, t, span, st);
+                t
+            }
+            _ => {
+                mismatch(st, span);
+                st.tys.error
+            }
+        },
+        // M1（Q5）：wrapping 算术——类型规则同受检算子（`+%` 不做字符串连接）
+        Op::PlusPercent | Op::MinusPercent | Op::StarPercent => match st.tys.join(l, r) {
+            // wrapping 仅整型：浮点无回绕语义（避免落入 interp 的 bitop trap）
+            Some(t) if st.tys.is_integral(t) => t,
             _ => {
                 mismatch(st, span);
                 st.tys.error
@@ -1692,6 +1920,7 @@ fn check_call_args(
         }
         let aty = type_expr(&arg.value, st, true);
         // M1：形参是具体整型且实参是整数字面量 → 按形参宽度重定型
+        retype_binary_literals(&arg.value, params[idx].1, st);
         retype_integer_literal(&arg.value, params[idx].1, st);
         slots[idx] = Some(st.expr_ty.get(arg.value.id).copied().unwrap_or(aty));
     }

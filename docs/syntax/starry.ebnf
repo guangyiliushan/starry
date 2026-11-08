@@ -302,8 +302,8 @@ IsOperand := WildcardPattern | BindingPattern | LiteralPattern | RangePattern
 
 RangeExpr := ShiftExpr [ ( ".." | "..=" ) ShiftExpr ] ;
 ShiftExpr := AddExpr { ( "<<" | ">>" ) AddExpr } ;
-AddExpr := MultiplicativeExpr { ( "+" | "-" ) MultiplicativeExpr } ;
-MultiplicativeExpr := CastExpr { ( "*" | "/" | "%" ) CastExpr } ;
+AddExpr := MultiplicativeExpr { ( "+" | "-" | "+%" | "-%" ) MultiplicativeExpr } ;
+MultiplicativeExpr := CastExpr { ( "*" | "/" | "%" | "*%" ) CastExpr } ;
 
 CastExpr := UnaryExpr { ( "as" | "as?" | "as!" ) Type } ;
 UnaryExpr := { UnaryOperator } PostfixExpr ;

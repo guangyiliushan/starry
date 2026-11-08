@@ -44,8 +44,12 @@ pub enum Operand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,
+    /// M1（Q5）：显式回绕（`+%`），不做溢出检查
+    WrappingAdd,
     Sub,
+    WrappingSub,
     Mul,
+    WrappingMul,
     Div,
     Rem,
     Eq,
@@ -305,6 +309,9 @@ fn op_text(op: &Operand, interner: &Interner, out: &mut String) {
 fn binop_text(op: BinOp) -> &'static str {
     match op {
         BinOp::Add => "add",
+        BinOp::WrappingAdd => "wrapping-add",
+        BinOp::WrappingSub => "wrapping-sub",
+        BinOp::WrappingMul => "wrapping-mul",
         BinOp::Sub => "sub",
         BinOp::Mul => "mul",
         BinOp::Div => "div",

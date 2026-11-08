@@ -6,6 +6,17 @@
 纯 std（LLVM IR 以**文本**发射，不用 inkwell/llvm-sys——Cargo.toml 零依赖
 红线不变；`lli`/`llc` 只是外部验证工具，不进 crate）。
 
+## M1（Q5）受检算术的折叠纪律
+
+- 受检 `Add/Sub/Mul` 只在「位宽上不溢出」时折叠：`checked_*` 抓 w=128 的
+  i128 真溢出，`sx` 回环抓窄位宽；溢出一律不折叠（留给运行期 trap），
+  **不折成回绕值**（会改变语义）。
+- `WrappingAdd/Sub/Mul`（`+%`、`-%`、`*%`）恒按回绕折叠。
+- `Div/Rem` 守卫扩到 INT_MIN ÷ -1（poison），除零守卫不变。
+- llvme：整型加减乘发 `llvm.s{add,sub,mul}.with.overflow.<ty>` + 溢出分支
+  （`starry_overflow_panic` + unreachable + 续标签；槽式存储无 phi，无需修补）；
+  除法先守卫后 `sdiv/srem`。
+
 ## 管线位置
 
 ```text

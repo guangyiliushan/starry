@@ -41,6 +41,23 @@ header 16–24B/对象、retain/release 开销、跨线程 atomic 竞争、循�
 release 不可关 ARC、热路径短命 class 不友好。缓解：struct 承担热数据、
 move/borrow 消除、非逃逸栈提升（后置）、v1 线程本地非原子。
 
+## 4.5 spike 基准结论（2026-11-08，drafts/m4-arc-bench-results.md）
+
+5 负载（交错跑 + 逐对差值中位数，clang -O2）：ARC delta over malloc——
+链表 19%、二叉树 7%、**rope 58%**、消息环 15%（class/struct 0.99x）；
+weak 环 ~36ns/op。形式命中阈值 A/B → 触发复审；建议继续 M4（裁定待用户）。
+
+spike 固化进 M4 契约的四条：
+
+- **weak 绝不延长生命周期**——只破循环（D-004 形态：strong 表持有 + weak 环）。
+  语言文档必须写明：strong=0 后 upgrade 按零化语义拒访问。
+- **release 消除**：构造期 `x = retain(n); release(n)` 对在 move 语义下
+  不需要——M4 优化项，WL1 一半 release 属此类，有量化收益预期。
+- **分配单点**：混用分配器（payload 指针当 header 释放）立即堆损坏——
+  正式实现 alloc/dealloc 必须单点进出。
+- **验收基准**：rope 形态与消息环形态进 M4 回归基准，ARC delta 占比
+  列验收项（阈值参照 spike 数字）。
+
 ## 5. 待确认（不进 M4 前不给实现承诺）
 
 - D-003：继承默认 final（建议 Kotlin 式，`open` 才可继承）。

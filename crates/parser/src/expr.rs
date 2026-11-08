@@ -139,7 +139,10 @@ fn binding_power(op: &OperatorKind) -> Option<(u8, u8)> {
         OperatorKind::DotDot | OperatorKind::DotDotEq => Some((17, 18)),
         OperatorKind::Shl | OperatorKind::Shr => Some((19, 20)),
         OperatorKind::Plus | OperatorKind::Minus => Some((21, 22)),
+        // M1 wrapping 算术：与受检对应算子同优先级
+        OperatorKind::PlusPercent | OperatorKind::MinusPercent => Some((21, 22)),
         OperatorKind::Star | OperatorKind::Slash | OperatorKind::Percent => Some((23, 24)),
+        OperatorKind::StarPercent => Some((23, 24)),
         _ => None,
     }
 }

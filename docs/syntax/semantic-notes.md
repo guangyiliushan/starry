@@ -270,6 +270,39 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
 - **泛型（M7 slice 1）**：fun/struct 单态化已落地（见 generic-mono-spike.md）；
   trait bounds/形参默认值/实参推断/泛型 enum 后置（R2 核心 exit 后不写进承诺）。
 
+## checked 溢出与 wrapping 算子（M1.5，Q5 + D1–D5 裁定）
+
+- 整型 `+ - *` **默认受检、所有 build mode 生效**（D5：release 只关 T2
+  generation，不关算术）。sem 编译期核查：常量 `+ - *` 溢出钉
+  **`SemConstOverflow`**（D3：独立于字面量值域码）；常量 `/ 0`、`% 0` 钉
+  **`SemDivisionByZero`**；常量 `MIN / -1` 钉 **`SemDivisionOverflow`**。
+  运行期经 `llvm.sadd/ssub/smul.with.overflow` 序列 trap。
+- **trap 契约（D2/D4）**：`starry_overflow_panic(code, fun)` 声明标
+  `noreturn`（属性组）；向 **stderr** 打印区分后的原因 + 函数名（源位置
+  近似），`ExitProcess(134)`。code 1–7：add/sub/mul 溢出、div by zero、
+  div 溢出、rem by zero、rem 溢出。**不执行 defer/ARC 清理**（fatal abort，
+  非可恢复 panic）；v1 运行时 Windows-only（`GetStdHandle`/`WriteFile`/
+  `ExitProcess`，无 CRT）。
+- 除法受检：除零与 INT_MIN ÷ -1 在 `sdiv/srem` 前显式守卫，两个守卫
+  分支各自携带区分后的 code。
+- 显式 wrapping：**`` +% -% *% ``**（D1 裁定：Zig 官方 wrapping 拼写；
+  `+|` 保留给未来 saturating）——仅整型（不做字符串连接，浮点无回绕
+  语义）；发裸指令，interp 保持回绕。
+- **二元字面量上下文传播（D3）**：`val x: i32 = 2147483647 + 1`、
+  `return …`（声明返回型）、实参位置的「两端皆整数字面量」算术式，先把
+  操作数重定型到期望类型并重定型二元节点（`retype_binary_literals`，
+  六处调用点）——否则默认 i64 先 join，窄上下文够不到。
+- 提升格不变：默认 i64 使「窄域常量对」罕见——运行期窄算术需两操作数
+  皆窄（形参/标注变量），此时按窄位宽受检。
+- **release 语义（D5 裁定，写进 D-011 语义）**：算术 `+ - * / %` 在所有
+  build mode 下恒受检；release 只关 T2 generation 检查（未实现），
+  **不关算术**；性能不足用 `+%` 显式回绕，不改变 `+` 的语义；CI 已加
+  debug/release 双跑断言 trap 行为一致。
+- **i128 状态（M1.5 未清项，已按裁定记录）**：布局仍为「按类型宽槽」
+  （i128 单槽 16B、含 i128 聚合 `[n x i128]`），**Q5 的 2×i64 尚未实施**——
+  反转需 benchmark 证据（2×i64 要先实现才能对拍，鸡生蛋），列为 M1.6 专项
+  待用户定向；interp 仍按 64 位建模 i128（差分对拍排除 i128），同属 M1.6。
+
 ## extern "c" 调用的 unsafe 边界（M6）
 
 - FFI 永远 unchecked：`extern "c"` 函数**只能在 `unsafe` 块内调用**，
@@ -286,5 +319,5 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
 ## 诊断码
 
 全部 `Sem*` 前缀，定义在 `crates/ast/src/syntax/node.rs::DiagCode`，
-23 个（SemUndefinedName … SemUnknownMember、SemTypeArgMismatch）；另有 `Irc*` 2 个属 irc
+26 个（SemUndefinedName … SemUnknownMember、SemTypeArgMismatch、SemConstOverflow、SemDivisionByZero、SemDivisionOverflow）；另有 `Irc*` 2 个属 irc
 阶段（码表同址，见 opt-notes）。解析器码不受影响。

@@ -34,6 +34,26 @@ fn narrow(v: u64, w: u32) -> u64 {
     ((v << s) as i64 >> s) as u64
 }
 
+/// M1（Q5）：i128 值是否在 w 位有符号域内（w ≥ 128 恒真）。
+/// 中间值是 i128（i64 输入的加减乘精确表示），w = 64 也走统一判据
+fn fits_w(v: i128, w: u32) -> bool {
+    if w >= 128 {
+        return true;
+    }
+    let min = -(1i128 << (w - 1));
+    let max = (1i128 << (w - 1)) - 1;
+    (min..=max).contains(&v)
+}
+
+/// w 位有符号最小值（INT_MIN——除法溢出判据）
+fn min_w(w: u32) -> i64 {
+    if w >= 64 {
+        i64::MIN
+    } else {
+        -(1i64 << (w - 1))
+    }
+}
+
 /// 整型位宽；非整型返回 None。i128 按 64 建模（槽是 u64）
 fn int_width(kind: &TyKind) -> Option<u32> {
     Some(match kind {
@@ -453,18 +473,47 @@ impl<'a> Machine<'a> {
                     let w = int_width(kind).unwrap_or(64);
                     let (x, y) = (narrow(a, w) as i64, narrow(b, w) as i64);
                     let raw = match op {
-                        BinOp::Add => x.wrapping_add(y) as u64,
-                        BinOp::Sub => x.wrapping_sub(y) as u64,
-                        BinOp::Mul => x.wrapping_mul(y) as u64,
+                        // M1（Q5）：受检算术在位宽上核查溢出 → trap；
+                        // wrapping 变体（+% -% *%）保持回绕
+                        BinOp::Add | BinOp::WrappingAdd => {
+                            // i128 中间值：i64 输入加减乘不溢 i128，受检判据
+                            // 统一为「结果在 w 位有符号域内」（w = 64 也覆盖）
+                            let v = x as i128 + y as i128;
+                            if !matches!(op, BinOp::WrappingAdd) && !fits_w(v, w) {
+                                return Err(InterpError::Trap("add overflow"));
+                            }
+                            v as i64 as u64
+                        }
+                        BinOp::Sub | BinOp::WrappingSub => {
+                            let v = x as i128 - y as i128;
+                            if !matches!(op, BinOp::WrappingSub) && !fits_w(v, w) {
+                                return Err(InterpError::Trap("sub overflow"));
+                            }
+                            v as i64 as u64
+                        }
+                        BinOp::Mul | BinOp::WrappingMul => {
+                            let v = x as i128 * y as i128;
+                            if !matches!(op, BinOp::WrappingMul) && !fits_w(v, w) {
+                                return Err(InterpError::Trap("mul overflow"));
+                            }
+                            v as i64 as u64
+                        }
                         BinOp::Div => {
                             if y == 0 {
                                 return Err(InterpError::Trap("div by zero"));
+                            }
+                            // INT_MIN / -1 是 LLVM poison → 受检 trap
+                            if y == -1 && x == min_w(w) {
+                                return Err(InterpError::Trap("div overflow"));
                             }
                             x.wrapping_div(y) as u64
                         }
                         BinOp::Rem => {
                             if y == 0 {
                                 return Err(InterpError::Trap("rem by zero"));
+                            }
+                            if y == -1 && x == min_w(w) {
+                                return Err(InterpError::Trap("rem overflow"));
                             }
                             x.wrapping_rem(y) as u64
                         }

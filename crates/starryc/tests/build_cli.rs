@@ -22,7 +22,8 @@ fn clang_available() -> bool {
 }
 
 /// 源码 → 原生可执行 → (stdout, exit code)。None = 无工具链，调用方跳过。
-fn build_and_exec(name: &str, source: &str) -> Option<(String, i32)> {
+/// (stdout, stderr, exit code)。None = 无工具链，调用方跳过。
+fn build_and_exec(name: &str, source: &str) -> Option<(String, String, i32)> {
     if !clang_available() {
         eprintln!("SKIP: starryc build e2e requires clang (PATH or C:\\Program Files\\LLVM\\bin)");
         return None;
@@ -56,16 +57,17 @@ fn build_and_exec(name: &str, source: &str) -> Option<(String, i32)> {
     let run = Command::new(&exe_path).output().unwrap();
     let code = run.status.code().unwrap_or(-1);
     let out = String::from_utf8_lossy(&run.stdout).into_owned();
+    let err = String::from_utf8_lossy(&run.stderr).into_owned();
 
     let _ = std::fs::remove_file(&source_path);
     let _ = std::fs::remove_file(&exe_path);
     let _ = std::fs::remove_dir_all(&dir);
-    Some((out, code))
+    Some((out, err, code))
 }
 
 /// 源码 → 原生可执行 → stdout。返回 None 表示无工具链，调用方跳过。
 fn build_and_run(name: &str, source: &str) -> Option<String> {
-    let (out, code) = build_and_exec(name, source)?;
+    let (out, _err, code) = build_and_exec(name, source)?;
     assert_eq!(code, 0, "run failed with exit {code}");
     Some(out)
 }
@@ -225,7 +227,8 @@ fn materialized_ranges_keep_their_exclusivity() {
 
 #[test]
 fn main_return_value_is_the_process_exit_code() {
-    let Some((out, code)) = build_and_exec("exitcode", "fun main() : int {\n    return 42\n}\n")
+    let Some((out, _err, code)) =
+        build_and_exec("exitcode", "fun main() : int {\n    return 42\n}\n")
     else {
         return;
     };
@@ -701,4 +704,42 @@ fn manifest_srcs_layout_and_naming() {
         return;
     };
     assert_eq!(out, "42\n");
+}
+
+#[test]
+fn checked_overflow_traps_at_runtime_with_message() {
+    // M1（Q5）：+ 默认受检；运行期溢出 → starry_overflow_panic 打印算子名，exit 134
+    let Some((_out, err, code)) = build_and_exec(
+        "ovf_add",
+        "fun main() : int {\n    val x = 9223372036854775807\n    return x + 1\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(code, 134, "code={code} stderr: {err}");
+    assert!(err.contains("overflow: +"), "stderr: {err}");
+}
+
+#[test]
+fn div_by_zero_traps_at_runtime_with_message() {
+    // M1（Q5）D4：除零与 INT_MIN/-1 纳入受检（守卫在 sdiv 之前）
+    let Some((_out, err, code)) = build_and_exec(
+        "ovf_div",
+        "fun main() : int {\n    val x = 1\n    return x / 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(code, 134, "code={code} stderr: {err}");
+    assert!(err.contains("division by zero: /"), "stderr: {err}");
+}
+
+#[test]
+fn wrapping_operators_wrap_at_runtime() {
+    // M1（Q5）：+% *% 显式回绕，不 trap；i64 MAX +% 1 = MIN，i32 乘法回绕 = 0
+    let Some(out) = build_and_run(
+        "wrapping",
+        "fun main() {\n    val x = 9223372036854775807\n    print(x +% 1)\n    val a: i32 = 65536\n    val b: i32 = 65536\n    print(a *% b)\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "-9223372036854775808\n0\n");
 }
