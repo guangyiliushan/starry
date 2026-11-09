@@ -154,6 +154,11 @@ pub(crate) struct SemState {
     /// M5 slice 3：包作用域标记（pkg_scope 创建时记录；可见性校验
     /// 用它判定两个作用域是否同属一个包身份链）
     pub pkg_scopes: Vec<ScopeId>,
+    /// M9 9a：impl 注册表（静态分派按 (trait, type) 查；重复 impl 拒绝）
+    pub impls: Vec<crate::def::TraitImpl>,
+    /// M9 9a：impl 头解析期置位——lower_ty 对 trait 名的拒收
+    /// 跳过（impl Show for P 的 Show 不是 trait 对象标注）
+    pub in_impl_header: bool,
     /// M6：unsafe 块深度——extern "c" 调用要求在 unsafe 上下文中
     ///（language-design：FFI 调用在 unsafe 中）
     pub unsafe_depth: usize,
@@ -223,6 +228,8 @@ impl Sem {
             loops: Vec::new(),
             own_def: None,
             pkg_scopes: Vec::new(),
+            impls: Vec::new(),
+            in_impl_header: false,
             unsafe_depth: 0,
             mono_queue: Vec::new(),
             mono_insts: std::collections::BTreeMap::new(),

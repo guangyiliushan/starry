@@ -57,6 +57,18 @@ pub enum DefKind {
     /// M5 slice 2a: package namespace（member_scope = 包的顶层作用域；
     /// 注册进父包/根，expand_import 首段从根解析）
     PackageNs,
+    /// M9 9a：trait 声明（member_scope = 方法签名 defs；仅静态分派，
+    /// 无默认实现/关联类型/泛型 trait——v1 拒收面见 declare）
+    Trait,
+}
+
+/// M9 9a：impl 注册表条目（静态分派解析用；9b 消费）
+#[derive(Debug, Clone)]
+pub struct TraitImpl {
+    pub trait_def: DefId,
+    pub type_def: DefId,
+    /// 方法名 → impl 方法 def（签名已与 trait 核对一致）
+    pub methods: Vec<(Symbol, DefId)>,
 }
 
 /// M5 slice 3：顶层声明可见性（Kotlin 式；protected 为 class 成员专用，
@@ -200,6 +212,15 @@ impl ScopeArena {
     /// 插入；返回被顶掉的旧定义（同名重复 → 调用方诊断 SemDuplicateDef）
     pub fn insert(&mut self, scope: ScopeId, name: Symbol, def: DefId) -> Option<DefId> {
         self.scopes[scope.0 as usize].names.insert(name, def)
+    }
+
+    /// M9 9a：作用域内全部名→def（impl 覆盖核对用）
+    pub fn entries(&self, scope: ScopeId) -> Vec<(Symbol, DefId)> {
+        self.scopes[scope.0 as usize]
+            .names
+            .iter()
+            .map(|(n, d)| (*n, *d))
+            .collect()
     }
 
     pub fn lookup_local(&self, scope: ScopeId, name: Symbol) -> Option<DefId> {

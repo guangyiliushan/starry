@@ -1557,3 +1557,45 @@ fn generic_inference_slice2_semantics() {
         DiagCode::SemTypeMismatch,
     );
 }
+
+#[test]
+fn trait_impl_slice9a_semantics() {
+    // trait + impl declarations accepted; Self in signatures
+    assert_clean(
+        "trait Show {\n    fun show(): string\n}\nstruct Point(val x: int)\nimpl Show for Point {\n    fun show(): string {\n        return \"p\"\n    }\n}\nfun main(): int {\n    return 0\n}",
+    );
+    // Self in trait signature unifies with the impl type
+    assert_clean(
+        "trait Eq {\n    fun equals(other: Self): bool\n}\nstruct P(val v: int)\nimpl Eq for P {\n    fun equals(other: P): bool {\n        return self.v == other.v\n    }\n}",
+    );
+    // signature mismatch rejected
+    assert_has(
+        "trait Show {\n    fun show(): string\n}\nstruct P(val v: int)\nimpl Show for P {\n    fun show(): int {\n        return 1\n    }\n}",
+        DiagCode::SemTypeMismatch,
+    );
+    // missing trait method rejected
+    assert_has(
+        "trait Show {\n    fun show(): string\n}\nstruct P(val v: int)\nimpl Show for P {\n}",
+        DiagCode::SemUnknownMember,
+    );
+    // extra impl method rejected
+    assert_has(
+        "trait Show {\n    fun show(): string\n}\nstruct P(val v: int)\nimpl Show for P {\n    fun show(): string {\n        return \"a\"\n    }\n    fun extra(): int {\n        return 1\n    }\n}",
+        DiagCode::SemUnknownMember,
+    );
+    // duplicate impl rejected
+    assert_has(
+        "trait Show {\n    fun show(): string\n}\nstruct P(val v: int)\nimpl Show for P {\n    fun show(): string {\n        return \"a\"\n    }\n}\nimpl Show for P {\n    fun show(): string {\n        return \"b\"\n    }\n}",
+        DiagCode::SemDuplicateDef,
+    );
+    // trait as a type annotation rejected (Q6: static dispatch only)
+    assert_has(
+        "trait Show {\n    fun show(): string\n}\nfun main(): int {\n    val x: Show = 1\n    return 0\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // generic trait / associated type / default impl rejected
+    assert_has(
+        "trait T<T> {\n    fun f(x: T): T\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
