@@ -980,6 +980,7 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
             st.impls.push(crate::def::TraitImpl {
                 trait_def: tdef,
                 type_def: tydef,
+                span: decl.span,
                 methods,
             });
         }

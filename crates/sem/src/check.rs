@@ -119,6 +119,20 @@ pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
                     }
                 }
             }
+            // M9 9b：impl 方法体核查（覆盖纪律；self 类型经 resolve 已注入 sig.ty）
+            DeclKind::Impl(i) => {
+                let Some(entry) = st.impls.iter().find(|im| im.span == item.span).cloned() else {
+                    continue;
+                };
+                for member in &i.members {
+                    if let ast::syntax::decl::ClassMember::Declaration(d) = member
+                        && let DeclKind::Fun(f) = &d.kind
+                        && let Some((_, mdef)) = entry.methods.iter().find(|(n, _)| *n == f.name)
+                    {
+                        check_fun(d.id, f, *mdef, st);
+                    }
+                }
+            }
             DeclKind::Binding(b) => check_top_binding(b, st),
             _ => {}
         }
@@ -2031,12 +2045,58 @@ fn type_call(
                                 return ret;
                             }
                             None => {
-                                unsupported(
-                                    st,
-                                    callee.span,
-                                    "method calls are not supported in semantic v1",
-                                );
-                                st.tys.error
+                                // M9 9b：trait impl 静态分派——按
+                                // (基类型 def, 方法名) 查注册表；唯一命中
+                                // 即分派目标（self 由 irc 注入）；多命中 = 歧义
+                                let tdef = match st.tys.kind(base_ty) {
+                                    TyKind::Named(d, _) => Some(*d),
+                                    _ => None,
+                                };
+                                let candidates: Vec<DefId> = match tdef {
+                                    Some(d) => st
+                                        .impls
+                                        .iter()
+                                        .filter(|im| im.type_def == d)
+                                        .filter_map(|im| {
+                                            im.methods
+                                                .iter()
+                                                .find(|(n, _)| *n == *name)
+                                                .map(|(_, md)| *md)
+                                        })
+                                        .collect(),
+                                    None => Vec::new(),
+                                };
+                                match candidates.as_slice() {
+                                    [m] => {
+                                        let params = st.defs.get(*m).sig.params.clone();
+                                        let defaults = st.defs.get(*m).sig.param_defaults.clone();
+                                        check_call_args(args, &params, &defaults, span, st);
+                                        let ret = st.defs.get(*m).sig.ret;
+                                        st.expr_def.set(callee.id, *m);
+                                        st.expr_ty.set(callee.id, st.tys.unit);
+                                        return ret;
+                                    }
+                                    [] => {
+                                        unsupported(
+                                            st,
+                                            callee.span,
+                                            "method calls are not supported in semantic v1",
+                                        );
+                                        st.tys.error
+                                    }
+                                    _ => {
+                                        st.diags.emit(Diagnostic::error(
+                                            DiagCode::SemUnsupportedConstruct,
+                                            callee.span,
+                                            format!(
+                                                "ambiguous method `{}`: multiple trait impls provide it",
+                                                st.interner.resolve(*name)
+                                            ),
+                                        ));
+                                        type_all_args(args, st);
+                                        st.tys.error
+                                    }
+                                }
                             }
                         }
                     }

@@ -60,6 +60,23 @@ pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
                     }
                 }
             }
+            // M9 9b：impl 方法体解析——self = impl 目标类型
+            //（静态分派挂钩；与 class 成员同纪律）
+            DeclKind::Impl(i) => {
+                let Some(entry) = st.impls.iter().find(|im| im.span == item.span).cloned() else {
+                    continue;
+                };
+                let self_name = st.interner.intern("self");
+                let self_ty = st.tys.builtin_named(entry.type_def);
+                for member in &i.members {
+                    if let ClassMember::Declaration(d) = member
+                        && let DeclKind::Fun(f) = &d.kind
+                        && let Some((_, mdef)) = entry.methods.iter().find(|(n, _)| *n == f.name)
+                    {
+                        resolve_method(d.id, f, *mdef, self_name, self_ty, st);
+                    }
+                }
+            }
             DeclKind::Struct(s) => {
                 // M3/M5 2a：主构造默认值在所属包作用域解析
                 let dscope = item_scope(i, st).unwrap_or(root);

@@ -53,6 +53,7 @@ pub fn lower(sem: &mut SemanticOutput, source: &str) -> TacOutput {
         ty_of_node,
         decl_def,
         scopes,
+        impls,
         ..
     } = sem;
     let i8_ty = tys.intern(TyKind::Int(IntKind::I8));
@@ -69,6 +70,7 @@ pub fn lower(sem: &mut SemanticOutput, source: &str) -> TacOutput {
         decl_def,
         scopes,
         interner,
+        impls,
     };
     lower::run(&mut sr, source, i8_ty)
 }

@@ -28,7 +28,7 @@ use ast::interner::Interner;
 use ast::syntax::ParseOutput;
 use ast::syntax::node::{DiagCollector, Diagnostic, NodeId, SourceFile, Span};
 
-pub use def::{Def, DefArena, DefId, DefKind, DefSig, ScopeArena, ScopeId};
+pub use def::{Def, DefArena, DefId, DefKind, DefSig, ScopeArena, ScopeId, TraitImpl};
 pub use ty::{FloatKind, IntKind, TyArena, TyId, TyKind};
 
 /// break/continue/return 的已解析目标
@@ -105,6 +105,8 @@ pub struct SemanticOutput {
     /// M4 slice 2b：作用域 arena 只读导出——irc 的 deinit/成员查找需要
     /// member_scope 查名（SemanticOutput 整体消费期有效）
     pub scopes: ScopeArena,
+    /// M9 9b：impl 注册表导出（irc 的 impl 方法体 lowering 用）
+    pub impls: Vec<def::TraitImpl>,
 }
 
 /// 语义分析入口；parser 诊断原样保留在前，语义诊断附加在后
@@ -274,6 +276,7 @@ impl Sem {
             ty_of_node: self.st.ty_of_node,
             decl_def: self.st.decl_def,
             scopes: self.st.scopes,
+            impls: self.st.impls,
         }
     }
 }

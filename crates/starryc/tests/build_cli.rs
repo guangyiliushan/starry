@@ -981,3 +981,16 @@ fn function_values_end_to_end() {
     assert_eq!(out, "");
     assert_eq!(code, 84);
 }
+
+#[test]
+fn trait_static_dispatch_end_to_end() {
+    // M9 9b: trait method calls resolve statically to the single impl
+    // for the receiver type (self injected like class methods).
+    let Some(out) = build_and_run(
+        "trait_dispatch",
+        "trait Show {\n    fun show(): string\n}\ntrait Num {\n    fun double(): int\n}\nstruct Point(val x: int, val y: int)\nimpl Show for Point {\n    fun show(): string {\n        return \"point\"\n    }\n}\nimpl Num for Point {\n    fun double(): int {\n        return (self.x + self.y) * 2\n    }\n}\nfun main() {\n    val p = Point(20, 22)\n    print(p.show())\n    print(p.double())\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "point\n84\n");
+}

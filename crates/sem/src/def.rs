@@ -67,6 +67,8 @@ pub enum DefKind {
 pub struct TraitImpl {
     pub trait_def: DefId,
     pub type_def: DefId,
+    /// impl 声明 span（resolve/check 按 AST 项回找注册表条目）
+    pub span: Span,
     /// 方法名 → impl 方法 def（签名已与 trait 核对一致）
     pub methods: Vec<(Symbol, DefId)>,
 }

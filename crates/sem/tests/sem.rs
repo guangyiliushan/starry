@@ -1599,3 +1599,25 @@ fn trait_impl_slice9a_semantics() {
         DiagCode::SemUnsupportedConstruct,
     );
 }
+
+#[test]
+fn trait_dispatch_slice9b_semantics() {
+    // static dispatch accepted (typed in 9a battery; here the call path)
+    assert_clean(
+        "trait Show {\n    fun show(): string\n}\nstruct P(val v: int)\nimpl Show for P {\n    fun show(): string {\n        return \"p\"\n    }\n}\nfun main(): int {\n    val p = P(1)\n    val s = p.show()\n    print(s)\n    return 0\n}",
+    );
+    // inherent (class) method wins over trait method (Q1 priority)
+    assert_clean(
+        "trait T {\n    fun who(): int\n}\nclass C(val v: int) {\n    fun who(): int {\n        return self.v\n    }\n}\nimpl T for C {\n    fun who(): int {\n        return 99\n    }\n}\nfun main(): int {\n    val c = C(7)\n    return c.who()\n}",
+    );
+    // ambiguous trait methods rejected
+    assert_has(
+        "trait A {\n    fun who(): int\n}\ntrait B {\n    fun who(): int\n}\nstruct P(val v: int)\nimpl A for P {\n    fun who(): int {\n        return 1\n    }\n}\nimpl B for P {\n    fun who(): int {\n        return 2\n    }\n}\nfun main(): int {\n    val p = P(0)\n    return p.who()\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // no impl: still the stable method-calls diagnostic
+    assert_has(
+        "struct P(val v: int)\nfun main(): int {\n    val p = P(0)\n    return p.nope()\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}

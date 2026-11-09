@@ -35,6 +35,8 @@ pub(crate) struct SemRef<'a> {
     pub decl_def: &'a [Option<DefId>],
     pub scopes: &'a sem::ScopeArena,
     pub interner: &'a mut Interner,
+    /// M9 9b：impl 注册表（impl 方法体 lowering 用）
+    pub impls: &'a [sem::TraitImpl],
 }
 
 /// 值的存放处：Temp = 不可变局部（SSA 式单赋值，例外：短路布尔/in
@@ -283,6 +285,32 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
                 }
                 _ => {}
             }
+        }
+    }
+    // M9 9b：impl 方法体的 lowering（静态分派目标；self = 首参注入
+    // 与 class 方法同机制——调用点经 expr_def 指向这些 def）
+    for item in &ast.items {
+        let DeclKind::Impl(im) = &item.kind else {
+            continue;
+        };
+        let Some(entry) = sem.impls.iter().find(|e| e.span == item.span).cloned() else {
+            continue;
+        };
+        for member in &im.members {
+            let ClassMember::Declaration(d) = member else {
+                continue;
+            };
+            let DeclKind::Fun(f) = &d.kind else {
+                continue;
+            };
+            let Some((_, mdef)) = entry.methods.iter().find(|(n, _)| *n == f.name) else {
+                continue;
+            };
+            let mut ctx = Ctx::new(sem, source, i8_ty, &globals, &skipped);
+            // self 注入成员 lowering（与 class 方法同机制）
+            ctx.lower_member_fun(f, *mdef);
+            out.diags.append(&mut ctx.diags);
+            out.funs.push(ctx.fun);
         }
     }
     reorder_globals(&mut out, sem.defs);
@@ -579,6 +607,17 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 && item.span == span
             {
                 return Some(decl);
+            }
+            // M9 9b：impl 成员函数（嵌套声明，span 匹配成员节点）
+            if let DeclKind::Impl(im) = &item.kind {
+                for m in &im.members {
+                    if let ClassMember::Declaration(d) = m
+                        && let DeclKind::Fun(decl) = &d.kind
+                        && d.span == span
+                    {
+                        return Some(decl);
+                    }
+                }
             }
         }
         None
