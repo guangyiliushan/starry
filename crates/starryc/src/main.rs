@@ -467,53 +467,71 @@ fn parse_str_list(v: &str) -> Result<Vec<String>, String> {
 }
 
 /// 递归收集 dir 下全部 .starry（调用方排序去重，保证确定性）
-fn collect_starry(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+fn collect_starry(
+    dir: &Path,
+    src_root: &Path,
+    out: &mut Vec<(PathBuf, PathBuf)>,
+) -> Result<(), String> {
     let entries =
         std::fs::read_dir(dir).map_err(|e| format!("无法读取源目录 {}: {e}", dir.display()))?;
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
-            collect_starry(&p, out)?;
+            collect_starry(&p, src_root, out)?;
         } else if p.extension().and_then(|e| e.to_str()) == Some("starry") {
-            out.push(p);
+            out.push((p, src_root.to_path_buf()));
         }
     }
     Ok(())
 }
 
-/// 合并源集：每个文件一段，记录 (路径, 起始偏移, 原文) 供诊断归属
+/// 合并源集：每个文件一段，记录 (路径, 起始偏移, 原文, 注入前缀长)
+/// 供诊断归属（M5 slice 2a：目录默认包前缀注入会平移段内 span）
 struct SourceSet {
     merged: String,
-    files: Vec<(PathBuf, u32, String)>,
+    files: Vec<(PathBuf, u32, String, u32)>,
 }
 
-fn strip_package_header(text: &str) -> String {
-    let lead = text.len() - text.trim_start_matches([' ', '\t', '\r', '\n']).len();
-    let trimmed = &text[lead..];
-    if let Some(rest) = trimmed.strip_prefix("package ") {
-        let line_len = rest.find('\n').map(|i| i + 1).unwrap_or(rest.len());
-        let consumed = lead + "package ".len() + line_len;
-        // 空白填充保持偏移/行列稳定
-        let mut out = String::with_capacity(text.len());
-        for c in text[..consumed].chars() {
-            out.push(if c == '\n' { '\n' } else { ' ' });
-        }
-        out.push_str(&text[consumed..]);
-        out
+fn dir_package(f: &Path, src_root: &Path) -> Option<String> {
+    let rel = f.parent()?.strip_prefix(src_root).ok()?;
+    let parts: Vec<String> = rel
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    if parts.is_empty() {
+        None
     } else {
-        text.to_string()
+        Some(parts.join("."))
     }
 }
 
-fn merge_sources(files: &[PathBuf]) -> Result<SourceSet, String> {
+fn has_package_header(text: &str) -> bool {
+    let lead = text.len() - text.trim_start_matches([' ', '\t', '\r', '\n']).len();
+    text[lead..].starts_with("package ")
+}
+
+fn merge_sources(files: &[(PathBuf, PathBuf)]) -> Result<SourceSet, String> {
     let mut merged = String::new();
     let mut table = Vec::new();
-    for f in files {
+    for (f, src_root) in files {
         let text =
             std::fs::read_to_string(f).map_err(|e| format!("无法读取 {}: {e}", f.display()))?;
-        let stripped = strip_package_header(&text);
-        table.push((f.clone(), merged.len() as u32, text));
-        merged.push_str(&stripped);
+        let (body, delta) = if has_package_header(&text) {
+            (text.clone(), 0)
+        } else {
+            match dir_package(f, src_root) {
+                Some(pkg) => {
+                    let prefix = format!("package {pkg}\n");
+                    (format!("{prefix}{text}"), prefix.len() as u32)
+                }
+                None => (text.clone(), 0),
+            }
+        };
+        table.push((f.clone(), merged.len() as u32, text, delta));
+        merged.push_str(&body);
         merged.push('\n');
     }
     Ok(SourceSet {
@@ -521,7 +539,6 @@ fn merge_sources(files: &[PathBuf]) -> Result<SourceSet, String> {
         files: table,
     })
 }
-
 /// 诊断渲染：按 span 偏移定位原文件，打 `file:line:col`
 fn print_set_diags(set: &SourceSet, diags: &[ast::syntax::node::Diagnostic]) {
     for d in diags {
@@ -529,10 +546,10 @@ fn print_set_diags(set: &SourceSet, diags: &[ast::syntax::node::Diagnostic]) {
         let idx = set
             .files
             .iter()
-            .rposition(|(_, base, _)| (*base as usize) <= pos)
+            .rposition(|(_, base, _, _)| (*base as usize) <= pos)
             .unwrap_or(0);
-        let (path, base, text) = &set.files[idx];
-        let (line, col) = line_col(text, pos - *base as usize);
+        let (path, base, text, delta) = &set.files[idx];
+        let (line, col) = line_col(text, pos - *base as usize - *delta as usize);
         eprintln!(
             "{}:{line}:{col}: {:?}: {}",
             path.display(),
@@ -573,9 +590,10 @@ fn resolve_build_input(path: &str) -> Result<BuildInput, String> {
         } else {
             manifest.srcs.clone()
         };
-        let mut files = Vec::new();
+        let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
         for s in &srcs {
-            collect_starry(&root.join(s), &mut files)?;
+            let sr = root.join(s);
+            collect_starry(&sr, &sr, &mut files)?;
         }
         files.sort();
         files.dedup();

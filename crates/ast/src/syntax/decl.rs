@@ -15,6 +15,9 @@ pub struct DeclNode {
 #[derive(Debug, Clone)]
 pub enum DeclKind {
     Import(ImportDecl),
+    /// M5 slice 2a: package segment marker（合并源中每文件一个；
+    /// 首段亦镜像 SourceFile.package，sem 按序跟踪当前包）
+    PackageSeg(crate::syntax::node::Path),
     Extern(ExternDecl),
     Fun(FunDecl),
     Binding(BindingDecl),

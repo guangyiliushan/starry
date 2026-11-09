@@ -131,6 +131,14 @@ impl<'src> ParseSession<'src> {
         self.cursor.skip_nl();
         let package = self.parse_named_prefix(ast::token::HardKeyword::Package)?;
         let mut items = Vec::new();
+        // M5 slice 2a：首段 package 亦以段 item 形式入列（sem 按序跟踪）
+        if let Some(p0) = package.clone() {
+            items.push(ast::syntax::decl::DeclNode {
+                id: self.next_node()?,
+                span: ast::token::Span::new(0, 0),
+                kind: ast::syntax::decl::DeclKind::PackageSeg(p0),
+            });
+        }
         let mut seen_top_level = false;
         while !self.cursor.is_eof() {
             if self.cursor.check(&TokenKind::Nl) {
@@ -138,6 +146,17 @@ impl<'src> ParseSession<'src> {
                 continue;
             }
             let item = match self.cursor.peek().kind {
+                TokenKind::Keyword(ast::token::HardKeyword::Package) => {
+                    // M5 slice 2a：后续 package 头 = 新包段起点（import 段内规则随段重置）
+                    seen_top_level = false;
+                    let seg = self.parse_named_prefix(ast::token::HardKeyword::Package)?;
+                    let sp = seg.as_ref().map(|_| self.cursor.previous_span());
+                    Ok(ast::syntax::decl::DeclNode {
+                        id: self.next_node()?,
+                        span: sp.unwrap_or_else(|| self.cursor.previous_span()),
+                        kind: ast::syntax::decl::DeclKind::PackageSeg(seg.unwrap()),
+                    })
+                }
                 TokenKind::Keyword(ast::token::HardKeyword::Import) => {
                     let import_span = self.cursor.peek().span;
                     if seen_top_level {

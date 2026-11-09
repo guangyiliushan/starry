@@ -664,8 +664,8 @@ fn build_dir_and_run(name: &str, files: &[(&str, &str)], manifest: Option<&str>)
 }
 
 #[test]
-fn multi_file_build_merges_root_scope() {
-    // M5 切片 1：多文件合并根作用域——跨文件调用、package 头剥离共存
+fn multi_file_build_cross_package_import() {
+    // M5 slice 2a：包段 + 显式 import——跨包调用须 import（merge-root 已废弃）
     let Some(out) = build_dir_and_run(
         "merge",
         &[
@@ -675,7 +675,7 @@ fn multi_file_build_merges_root_scope() {
             ),
             (
                 "main.starry",
-                "package demo.app\n\nfun main() {\n    print(double(21))\n}\n",
+                "package demo.app\nimport demo.core.double\n\nfun main() {\n    print(double(21))\n}\n",
             ),
         ],
         None,
@@ -890,4 +890,29 @@ fn weak_upgrade_end_to_end() {
         return;
     };
     assert_eq!(out, "0\n1\n2\n1\n1\n1\n2\n1\n");
+}
+
+#[test]
+fn directory_default_package_with_import() {
+    // M5 slice 2a: headerless files get their package from the directory
+    // (src/util -> package util); cross-package use requires import.
+    let toml = "name = \"m5dir\"\nsrcs = [\"src\"]";
+    let Some(out) = build_dir_and_run(
+        "m5dir",
+        &[
+            (
+                "src/util/helper.starry",
+                "class Helper(val v: int) {\n    fun plus1(): int {\n        return self.v + 1\n    }\n}\n",
+            ),
+            (
+                "src/app/main.starry",
+                "import util.Helper\n\nfun main() {\n    val h = Helper(41)\n    print(h.plus1())\n}\n",
+            ),
+            ("starry.toml", toml),
+        ],
+        Some(toml),
+    ) else {
+        return;
+    };
+    assert_eq!(out, "42\n");
 }

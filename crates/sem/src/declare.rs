@@ -21,10 +21,81 @@ const BUILTINS: &[&str] = &[
 pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
     register_builtins(st);
     let root = st.scopes.root();
+    // M5 slice 2a：按序跟踪当前包段；顶层声明进包作用域（无段 = 根）
+    let mut cur = root;
+    let mut pkgs: std::collections::HashMap<String, ScopeId> = std::collections::HashMap::new();
     for (i, item) in ast.items.iter().enumerate() {
-        declare_one(item, i, root, st);
+        if let DeclKind::PackageSeg(path) = &item.kind {
+            cur = pkg_scope(path, root, &mut pkgs, st);
+            st.decl_def.push(None); // 保持 decl_def 与 items 1:1
+            continue;
+        }
+        declare_one(item, i, cur, st);
     }
     lower_top_level_sigs(ast, st);
+}
+
+/// M5 slice 2a：取（必要时建）dotted 包路径的作用域。每段注册 PackageNs
+/// def（member_scope = 该包顶层作用域），末段作用域即声明目标。
+fn pkg_scope(
+    path: &ast::syntax::node::Path,
+    root: ScopeId,
+    pkgs: &mut std::collections::HashMap<String, ScopeId>,
+    st: &mut SemState,
+) -> ScopeId {
+    let key: Vec<String> = path
+        .segments
+        .iter()
+        .map(|s| st.interner.resolve(s.name).to_string())
+        .collect();
+    if let Some(s) = pkgs.get(&key.join(".")) {
+        return *s;
+    }
+    let mut cur = root;
+    let mut acc = String::new();
+    for seg in &path.segments {
+        if !acc.is_empty() {
+            acc.push('.');
+        }
+        acc.push_str(st.interner.resolve(seg.name));
+        if let Some(&cached) = pkgs.get(&acc) {
+            cur = cached;
+            continue;
+        }
+        let scope = st.scopes.new_scope(Some(cur));
+        let def = st.defs.push(Def {
+            kind: DefKind::PackageNs,
+            name: seg.name,
+            scope: cur,
+            span: seg.span,
+            sig: DefSig::new(st.tys.unit, st.tys.unknown),
+            resolving: false,
+            alias_of: None,
+            alias_resolved: None,
+            member_scope: Some(scope),
+            external: false,
+            ty_params: 0,
+            decl: None,
+        });
+        if let Some(old) = st.scopes.insert(cur, seg.name, def) {
+            st.scopes.insert(cur, seg.name, old);
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemDuplicateDef,
+                seg.span,
+                format!(
+                    "duplicate definition of `{}`",
+                    st.interner.resolve(seg.name)
+                ),
+            ));
+            // 复用既有 def 的作用域，保持同包同名合并
+            cur = st.defs.get(old).member_scope.unwrap_or(cur);
+            pkgs.insert(acc.clone(), cur);
+            continue;
+        }
+        cur = scope;
+        pkgs.insert(acc.clone(), cur);
+    }
+    cur
 }
 
 /// M7 增量入口：只处理克隆追加的 items[st.items_done..]。
@@ -195,6 +266,8 @@ fn reject_generic_extras(
 }
 fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState) {
     match &decl.kind {
+        // M5 slice 2a：段标记在 run() 主循环消费（保持 decl_def 1:1），此处无操作
+        DeclKind::PackageSeg(_) => {}
         DeclKind::Import(i) => {
             if let ImportKind::Qualified { path, suffix } = &i.kind {
                 let segments: Vec<Symbol> = path.segments.iter().map(|s| s.name).collect();
@@ -401,20 +474,32 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                 ));
             }
             let def = add_def(st, scope, t.name, decl.span, DefKind::TypeAlias);
+            *st.decl_def.last_mut().expect("decl_def slot") = Some(def);
             st.defs.get_mut(def).alias_of = Some(t.ty.clone());
         }
-        DeclKind::Extern(e) => match &e.body {
-            ExternBody::Fun(sig) => {
-                let def = add_def(st, scope, sig.name, decl.span, DefKind::Fun);
-                st.defs.get_mut(def).external = true;
-            }
-            ExternBody::Block { members } | ExternBody::Namespace { members, .. } => {
-                for sig in members {
+        DeclKind::Extern(e) => {
+            // M5 slice 2a：decl_def 填首个成员 def（签名 lower 经它取包作用域）
+            let mut first = None;
+            match &e.body {
+                ExternBody::Fun(sig) => {
                     let def = add_def(st, scope, sig.name, decl.span, DefKind::Fun);
                     st.defs.get_mut(def).external = true;
+                    first = Some(def);
+                }
+                ExternBody::Block { members } | ExternBody::Namespace { members, .. } => {
+                    for sig in members {
+                        let def = add_def(st, scope, sig.name, decl.span, DefKind::Fun);
+                        st.defs.get_mut(def).external = true;
+                        if first.is_none() {
+                            first = Some(def);
+                        }
+                    }
                 }
             }
-        },
+            if let Some(d) = first {
+                *st.decl_def.last_mut().expect("decl_def slot") = Some(d);
+            }
+        }
         DeclKind::Union(u) => {
             if !u.type_params.is_empty() {
                 st.diags.emit(Diagnostic::error(
@@ -538,18 +623,19 @@ fn declare_binding_name(b: &BindingDecl, scope: ScopeId, span: Span, st: &mut Se
 
 fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
     let root = st.scopes.root();
-    for item in &ast.items {
+    for (i, item) in ast.items.iter().enumerate() {
+        // M5 slice 2a: def via decl_def side-chain (name lookup from root
+        // misses decls living in package scopes); dsc = declaring package scope
+        let item_def = st.decl_def.get(i).copied().flatten();
         match &item.kind {
             DeclKind::Fun(f) => {
-                let def = match st.scopes.lookup_local(root, f.name) {
-                    Some(d) => d,
-                    None => continue,
-                };
+                let Some(def) = item_def else { continue };
+                let dsc = st.defs.get(def).scope;
                 let (params, ret) = if f.type_params.is_empty() {
                     (
-                        lower_params(st, root, &f.params, item.span),
+                        lower_params(st, dsc, &f.params, item.span),
                         match &f.ret {
-                            Some(t) => lower_ty(st, root, t),
+                            Some(t) => lower_ty(st, dsc, t),
                             None => st.tys.unit,
                         },
                     )
@@ -572,15 +658,13 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                 sig.param_defaults = defaults;
             }
             DeclKind::Struct(s) => {
-                let def = match st.scopes.lookup_local(root, s.name) {
-                    Some(d) => d,
-                    None => continue,
-                };
+                let Some(def) = item_def else { continue };
+                let dsc = st.defs.get(def).scope;
                 // M7：泛型 struct 的字段类型 lower 进类型形参作用域（T → Param）
                 let sscope = if s.type_params.is_empty() {
                     root
                 } else {
-                    type_param_scope(st, root, &s.type_params)
+                    type_param_scope(st, dsc, &s.type_params)
                 };
                 // M3 主构造：头 val/var 参数类型（引用字段拒绝同纪律）+ body 字段
                 let mut fields: Vec<(Symbol, TyId)> = Vec::new();
@@ -640,10 +724,8 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                 }
             }
             DeclKind::Enum(e) => {
-                let def = match st.scopes.lookup_local(root, e.name) {
-                    Some(d) => d,
-                    None => continue,
-                };
+                let Some(def) = item_def else { continue };
+                let dsc = st.defs.get(def).scope;
                 // 形参名保留：命名实参构造（Shape.Circle(radius = 2.0)）依赖它
                 let variants: Vec<(Symbol, Vec<(Symbol, TyId)>)> = e
                     .variants
@@ -652,25 +734,30 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                         let args = v
                             .args
                             .iter()
-                            .map(|a| (a.name, lower_variant_arg(st, root, a, item.span)))
+                            .map(|a| (a.name, lower_variant_arg(st, dsc, a, item.span)))
                             .collect();
                         (v.name, args)
                     })
                     .collect();
                 st.defs.get_mut(def).sig.variants = variants;
             }
-            DeclKind::TypeAlias(t) => {
+            DeclKind::TypeAlias(_t) => {
                 // 急切 lower：值位置（F.A / O.Some(1)）不经 lower_ty，
                 // 惰性会让 alias_resolved 缺席、成员解析失败；循环守卫仍在 lower_ty
-                if let Some(def) = st.scopes.lookup_local(root, t.name) {
-                    alias_target(st, root, def, item.span);
+                if let Some(def) = item_def {
+                    let dsc = st.defs.get(def).scope;
+                    alias_target(st, dsc, def, item.span);
                 }
             }
             DeclKind::Binding(b) => {
                 if let Some(t) = &b.ty {
-                    let ty = lower_ty(st, root, t);
-                    if let ast::syntax::pat::PatKind::Binding { name, .. } = &b.pattern.kind
-                        && let Some(def) = st.scopes.lookup_local(root, *name)
+                    // 顶层绑定的 def 经 pat_binding_def 侧链取（declare_binding_name
+                    // 不填 decl_def 槽）；标注类型 lower 进所属包作用域
+                    let bdef = st.pat_binding_def.get(b.pattern.id).copied().or(item_def);
+                    let dsc = bdef.map(|d| st.defs.get(d).scope).unwrap_or(root);
+                    let ty = lower_ty(st, dsc, t);
+                    if let ast::syntax::pat::PatKind::Binding { .. } = &b.pattern.kind
+                        && let Some(def) = bdef
                     {
                         st.defs.get_mut(def).sig.ty = ty;
                     }
@@ -679,10 +766,8 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
             DeclKind::Class(c) => {
                 // M4 slice 1：头字段签名 lower（payload 槽全 i64——i128/聚合
                 // 字段与默认值在 slice 1 拒收，保字段寻址的 8B 槽模型）
-                let class_def = match st.scopes.lookup_local(root, c.name) {
-                    Some(d) => d,
-                    None => continue,
-                };
+                let Some(class_def) = item_def else { continue };
+                let dsc = st.defs.get(class_def).scope;
                 let mut fields: Vec<(Symbol, TyId)> = Vec::new();
                 if let Some(pc) = &c.primary_ctor {
                     for p in &pc.params {
@@ -708,7 +793,7 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                             ));
                             continue;
                         };
-                        let ty = lower_ty(st, root, ann);
+                        let ty = lower_ty(st, dsc, ann);
                         if !class_field_ok(&st.tys, ty) {
                             st.diags.emit(Diagnostic::error(
                                 DiagCode::SemUnsupportedConstruct,
@@ -724,7 +809,7 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                 // 头构造参数（全量，含仅构造参数）进 sig.params——class_ctor
                 // 的槽机与 sem 的实参核查都读它
                 if let Some(pc) = &c.primary_ctor {
-                    let params = lower_params(st, root, &pc.params, item.span);
+                    let params = lower_params(st, dsc, &pc.params, item.span);
                     let defaults: Vec<bool> =
                         pc.params.iter().map(|p| p.default.is_some()).collect();
                     let sig = &mut st.defs.get_mut(class_def).sig;
@@ -739,9 +824,9 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                         && let DeclKind::Fun(f) = &d.kind
                         && let Some(fd) = st.scopes.lookup_local(ms, f.name)
                     {
-                        let params = lower_params(st, root, &f.params, d.span);
+                        let params = lower_params(st, dsc, &f.params, d.span);
                         let ret = match &f.ret {
-                            Some(t) => lower_ty(st, root, t),
+                            Some(t) => lower_ty(st, dsc, t),
                             None => st.tys.unit,
                         };
                         let defaults: Vec<bool> =
@@ -754,6 +839,8 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                 }
             }
             DeclKind::Extern(e) => {
+                let Some(ed) = item_def else { continue };
+                let dsc = st.defs.get(ed).scope;
                 let sigs: Vec<&FunSignature> = match &e.body {
                     ExternBody::Fun(s) => vec![s],
                     ExternBody::Block { members } | ExternBody::Namespace { members, .. } => {
@@ -761,10 +848,12 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                     }
                 };
                 for sig in sigs {
-                    if let Some(def) = st.scopes.lookup_local(root, sig.name) {
-                        let params = lower_params(st, root, &sig.params, item.span);
+                    // Fun 体的 def = extern 声明自身（注册在包作用域）；
+                    // Block/Namespace 成员注册在同一作用域下（declare 逐名 add_def）
+                    if let Some(def) = st.scopes.lookup_local(dsc, sig.name) {
+                        let params = lower_params(st, dsc, &sig.params, item.span);
                         let ret = match &sig.ret {
-                            Some(t) => lower_ty(st, root, t),
+                            Some(t) => lower_ty(st, dsc, t),
                             None => st.tys.unit,
                         };
                         // extern "c" 走真实 C ABI：i128 标量形参/返回值在本

@@ -54,6 +54,9 @@ pub enum DefKind {
     ImportNs {
         segments: Vec<Symbol>,
     },
+    /// M5 slice 2a: package namespace（member_scope = 包的顶层作用域；
+    /// 注册进父包/根，expand_import 首段从根解析）
+    PackageNs,
 }
 
 /// 定义签名槽（各 kind 按需取用；单一结构避免按 kind 分型的抽象膨胀）

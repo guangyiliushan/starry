@@ -80,7 +80,12 @@ fn package_prefix_parses_into_root_slot() {
     let package = output.ast.package.as_ref().unwrap();
     assert_eq!(output.interner.resolve(package.segments[0].name), "app");
     assert_eq!(output.interner.resolve(package.segments[1].name), "core");
-    assert_eq!(output.ast.items.len(), 1);
+    // M5 slice 2a：首段 package 亦以 PackageSeg item 入列（items[0]）
+    assert_eq!(output.ast.items.len(), 2);
+    assert!(matches!(
+        output.ast.items[0].kind,
+        ast::syntax::decl::DeclKind::PackageSeg(_)
+    ));
 }
 
 #[test]
@@ -298,7 +303,7 @@ fn aggregate_declarations_parse_without_placeholders() {
     }
     assert!(output.diagnostics.is_empty(), "{:#?}", output.diagnostics);
     assert!(output.ast.package.is_some());
-    assert_eq!(output.ast.items.len(), 11);
+    assert_eq!(output.ast.items.len(), 12);
 }
 
 #[test]

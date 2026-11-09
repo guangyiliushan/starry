@@ -60,7 +60,7 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | 字符串相等 | ✅ | ✅ | ✅ | ✅ | ✅ | `starry_str_eq` |
 | `extern "c"` FFI | ✅ | ✅ | ✅ | ✅ | — | extern 调用须 `unsafe` 块（M6）；`build -- <clang 参数>` 链接；i128 标量 ABI 拒收 |
 | main 返回值=退出码 | ✅ | ✅ | ✅ | ✅ | — | int trunc/sext、bool zext |
-| 模块系统（M5 切片 1） | ✅ | ✅ | ✅ | ✅ | — | starry.toml(name/srcs) + 多文件合并根作用域；package 头剥离；诊断按偏移归属原文件 |
+| 模块系统（M5 slice 2a） | ✅ | ✅ | ✅ | ✅ | — | package 段（显式头覆盖目录默认）+ 包命名空间 + `import a.b` 跨包解析；同包互见、跨包须 import；merge-root 废弃（R5） |
 
 ## 未实现（稳定诊断层）
 

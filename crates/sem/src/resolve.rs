@@ -61,21 +61,28 @@ pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
                 }
             }
             DeclKind::Struct(s) => {
-                // M3：主构造默认值表达式在根作用域解析（与函数默认实参同纪律）
+                // M3/M5 2a：主构造默认值在所属包作用域解析
+                let dscope = item_scope(i, st).unwrap_or(root);
                 for p in &s.primary_ctor {
                     if let Some(d) = &p.default {
-                        resolve_expr(d, st, root);
+                        resolve_expr(d, st, dscope);
                     }
                 }
             }
             DeclKind::Binding(b) => {
                 if let Some(init) = &b.init {
-                    resolve_expr(init, st, root);
+                    resolve_expr(init, st, item_scope(i, st).unwrap_or(root));
                 }
             }
             _ => {}
         }
     }
+}
+
+/// M5 slice 2a：item 的声明作用域（= 所属包作用域；无 def 返回 None）
+fn item_scope(i: usize, st: &SemState) -> Option<ScopeId> {
+    let d = st.decl_def.get(i).copied().flatten()?;
+    Some(st.defs.get(d).scope)
 }
 
 fn zero_span() -> Span {
@@ -84,8 +91,9 @@ fn zero_span() -> Span {
 
 /// M4 slice 2b：建 self 参数 def 的作用域（成员函数与 deinit 共用）
 fn self_scope(class_def: DefId, self_name: Symbol, self_ty: TyId, st: &mut SemState) -> ScopeId {
-    let root = st.scopes.root();
-    let sscope = st.scopes.new_scope(Some(root));
+    // M5 slice 2a：self 作用域父级 = class 所属包作用域（包名/import 可见）
+    let parent = st.defs.get(class_def).scope;
+    let sscope = st.scopes.new_scope(Some(parent));
     let unit = st.tys.unit;
     let self_def = st.defs.push(Def {
         kind: DefKind::Param,
@@ -138,9 +146,13 @@ fn resolve_deinit(block: &Block, mdef: DefId, self_name: Symbol, self_ty: TyId, 
 }
 
 fn resolve_fun(decl_id: NodeId, f: &FunDecl, fdef: DefId, st: &mut SemState) {
-    let root = st.scopes.root();
-    // M7：泛型 fun 的 pscope 挂在类型形参作用域下（member_scope 复用）
-    let parent = st.defs.get(fdef).member_scope.unwrap_or(root);
+    // M7：泛型 fun 的 pscope 挂在类型形参作用域下（member_scope 复用）；
+    // M5 slice 2a：非泛型回退 = fun 所属包作用域（内建在根，链可达）
+    let parent = st
+        .defs
+        .get(fdef)
+        .member_scope
+        .unwrap_or_else(|| st.defs.get(fdef).scope);
     resolve_fun_with_parent(decl_id, f, fdef, parent, st);
 }
 
@@ -152,7 +164,7 @@ fn resolve_fun_with_parent(
     parent: ScopeId,
     st: &mut SemState,
 ) {
-    let root = st.scopes.root();
+    let root = st.defs.get(fdef).scope; // M5 2a：默认实参在所属包作用域解析
     // 参数作用域：参数 defs 的 ty 已在 declare 期 lower 进 fun sig。
     let sig_params = st.defs.get(fdef).sig.params.clone();
     let pscope = st.scopes.new_scope(Some(parent));

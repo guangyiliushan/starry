@@ -2443,6 +2443,8 @@ fn def_value_ty(def: DefId, st: &mut SemState) -> TyId {
             st.tys.intern(TyKind::TypeObject(def))
         }
         DefKind::EnumVariant { parent, .. } => st.tys.builtin_named(parent),
+        // M5 slice 2a：包命名空间在值/类型位置使用 = 误用（import 路径经 expand_import 处理）
+        DefKind::PackageNs => st.tys.error,
         // 别名在值位置归一到目标：TypeObject(alias_resolved)，
         // 成员访问/模式路径/构造经目标 DefId 统一解析（type_call 的
         // TypeAlias 臂仅兜未 lower 的别名）
