@@ -76,6 +76,9 @@ pub enum Vis {
 pub struct DefSig {
     /// M5 slice 3：顶层声明可见性（默认 Pub）
     pub vis: Vis,
+    /// M7 slice 2：类型形参默认值（declare 期在类型形参作用域 lower；
+    /// 与 type_params 对齐；未提供的为 None）
+    pub tp_defaults: Vec<Option<TyId>>,
     pub params: Vec<(Symbol, TyId)>,
     pub ret: TyId,
     pub ty: TyId,
@@ -90,6 +93,7 @@ impl DefSig {
     pub fn new(unit: TyId, error: TyId) -> Self {
         Self {
             vis: Vis::Pub,
+            tp_defaults: Vec::new(),
             params: Vec::new(),
             ret: unit,
             ty: error,

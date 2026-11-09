@@ -951,3 +951,18 @@ fn namespace_import_and_circular_import_end_to_end() {
     };
     assert_eq!(out, "42\n");
 }
+
+#[test]
+fn generic_call_site_inference_and_defaults_end_to_end() {
+    // M7 slice 2: omitted type args are inferred from value args
+    // (structural unification); unbound params fall back to declared
+    // defaults. Also covers the mono-clone lowering fix (generic
+    // fun instantiations now reach native code).
+    let Some(out) = build_and_run(
+        "generic_infer",
+        "fun id<T>(x: T): T {\n    return x\n}\nfun addTwice<T>(x: T, y: T): T {\n    return x + y\n}\nstruct Box<T>(val v: T)\nfun main(): int {\n    val a = id(42)\n    val b = addTwice(1, 2)\n    val c = Box(4)\n    print(a)\n    print(b)\n    print(c.v)\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "42\n3\n4\n");
+}

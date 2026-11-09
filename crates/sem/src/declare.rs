@@ -421,9 +421,11 @@ fn reject_generic_extras(
     st: &mut SemState,
     what: &str,
 ) {
+    // M7 slice 2：类型形参默认值已落地（调用点推断的兜底）；
+    // bounds/variance/where 仍拒收（bounds 依赖 trait，M9 前）
     let fancy = type_params
         .iter()
-        .any(|tp| tp.variance.is_some() || !tp.bounds.is_empty() || tp.default.is_some());
+        .any(|tp| tp.variance.is_some() || !tp.bounds.is_empty());
     if fancy {
         st.diags.emit(Diagnostic::error(
             DiagCode::SemUnsupportedConstruct,
@@ -468,6 +470,14 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                 // 经 member_scope 作 pscope 祖先）共用；M7 单态化克隆各建一份
                 let tscope = type_param_scope(st, scope, &f.type_params);
                 st.defs.get_mut(def).member_scope = Some(tscope);
+                // M7 slice 2：类型形参默认值 lower 进签名（tscope 内
+                // 可引用早先形参，落成 TyKind::Param 由调用点代入）
+                let tp_defaults: Vec<Option<TyId>> = f
+                    .type_params
+                    .iter()
+                    .map(|tp| tp.default.as_ref().map(|d| lower_ty(st, tscope, d)))
+                    .collect();
+                st.defs.get_mut(def).sig.tp_defaults = tp_defaults;
             }
         }
         DeclKind::Binding(b) => {
@@ -831,6 +841,13 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                 } else {
                     type_param_scope(st, dsc, &s.type_params)
                 };
+                // M7 slice 2：类型形参默认值 lower 进签名（同 fun 纪律）
+                let tp_defaults: Vec<Option<TyId>> = s
+                    .type_params
+                    .iter()
+                    .map(|tp| tp.default.as_ref().map(|d| lower_ty(st, sscope, d)))
+                    .collect();
+                st.defs.get_mut(def).sig.tp_defaults = tp_defaults;
                 // M3 主构造：头 val/var 参数类型（引用字段拒绝同纪律）+ body 字段
                 let mut fields: Vec<(Symbol, TyId)> = Vec::new();
                 for p in &s.primary_ctor {

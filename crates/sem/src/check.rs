@@ -1747,6 +1747,142 @@ fn type_print_call(callee: &ExprWrap, args: &[CallArg], span: Span, st: &mut Sem
 
 /// 调用定型：callee 先定型（coverage 需要）；位置实参按序入槽，
 /// 命名实参按名入槽，默认值补位，最后逐槽 assignable 核查
+/// M7 slice 2：调用点类型实参推断（type_args 省略时）。
+/// 实参**恰好定型一次**（coverage 纪律）：命名/位置入槽、dup/缺省核查、
+/// 与含 Param 标记的形参统一、未绑定兜底默认值，最后按代入后形参做
+/// assignable 核查。诊断已发时返回 None。
+fn infer_call_targs(
+    st: &mut SemState,
+    want: usize,
+    params: &[(Symbol, TyId)],
+    param_defaults: &[bool],
+    tp_defaults: &[Option<TyId>],
+    args: &[CallArg],
+    span: Span,
+) -> Option<Vec<TyId>> {
+    let mut bindings: Vec<Option<TyId>> = vec![None; want];
+    // (实参类型, 实参 span) 按形参槽位记录
+    let mut slots: Vec<Option<(TyId, Span)>> = vec![None; params.len()];
+    let mut bad = false;
+    for (i, a) in args.iter().enumerate() {
+        let aty = type_expr(&a.value, st, true);
+        let pidx = match a.name {
+            Some(n) => params.iter().position(|(pn, _)| *pn == n),
+            None => Some(i),
+        };
+        let Some(pi) = pidx else {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnknownParam,
+                a.value.span,
+                "named argument has no matching parameter",
+            ));
+            bad = true;
+            continue;
+        };
+        if pi >= params.len() {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemArityMismatch,
+                span,
+                "too many arguments",
+            ));
+            bad = true;
+            continue;
+        }
+        if slots[pi].is_some() {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemArityMismatch,
+                span,
+                "duplicate argument for one parameter",
+            ));
+            bad = true;
+            continue;
+        }
+        slots[pi] = Some((aty, a.value.span));
+        unify_param(st, params[pi].1, aty, &mut bindings);
+    }
+    for (j, slot) in slots.iter().enumerate() {
+        if slot.is_none() && !param_defaults.get(j).copied().unwrap_or(false) {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemArityMismatch,
+                span,
+                format!(
+                    "missing argument for `{}`",
+                    st.interner.resolve(params[j].0)
+                ),
+            ));
+            bad = true;
+        }
+    }
+    for (i, b) in bindings.iter_mut().enumerate() {
+        if b.is_none()
+            && let Some(d) = tp_defaults.get(i).copied().flatten()
+        {
+            *b = Some(d);
+        }
+    }
+    if bindings.iter().any(|b| b.is_none()) {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemTypeArgMismatch,
+            span,
+            "cannot infer all type arguments; specify them explicitly or add type parameter defaults",
+        ));
+        bad = true;
+    }
+    if bad {
+        return None;
+    }
+    let targs: Vec<TyId> = bindings
+        .into_iter()
+        .map(|b| b.expect("checked above"))
+        .collect();
+    // 代入后 assignable 核查（实参已定型，不重定型）
+    for (j, slot) in slots.iter().enumerate() {
+        if let Some((aty, aspan)) = slot {
+            let sub = st.tys.subst(params[j].1, &targs);
+            if !st.tys.assignable(*aty, sub) {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemTypeMismatch,
+                    *aspan,
+                    "argument type does not match the inferred instantiation",
+                ));
+            }
+        }
+    }
+    Some(targs)
+}
+
+/// M7 slice 2：形参类型（含 TyKind::Param 标记）与实参类型的结构统一。
+/// 冲突保留首个绑定（兜底由代入后 assignable 核查报告）。
+fn unify_param(st: &SemState, pty: TyId, aty: TyId, bindings: &mut [Option<TyId>]) {
+    match (st.tys.kind(pty).clone(), st.tys.kind(aty).clone()) {
+        (TyKind::Param(i), _) => {
+            let i = i as usize;
+            if i < bindings.len() && bindings[i].is_none() {
+                bindings[i] = Some(aty);
+            }
+        }
+        (TyKind::Named(pd, pa), TyKind::Named(ad, aa)) if pd == ad && pa.len() == aa.len() => {
+            for (x, y) in pa.iter().zip(aa.iter()) {
+                unify_param(st, *x, *y, bindings);
+            }
+        }
+        (TyKind::Nullable(p), TyKind::Nullable(a)) => unify_param(st, p, a, bindings),
+        (TyKind::Array(p, _), TyKind::Array(a, _)) => unify_param(st, p, a, bindings),
+        (TyKind::Tuple(ps), TyKind::Tuple(as_)) if ps.len() == as_.len() => {
+            for (x, y) in ps.iter().zip(as_.iter()) {
+                unify_param(st, *x, *y, bindings);
+            }
+        }
+        (TyKind::Ref { inner: p, .. }, TyKind::Ref { inner: a, .. }) => {
+            unify_param(st, p, a, bindings);
+        }
+        (TyKind::Pointer { inner: p, .. }, TyKind::Pointer { inner: a, .. }) => {
+            unify_param(st, p, a, bindings);
+        }
+        (TyKind::Range(p), TyKind::Range(a)) => unify_param(st, p, a, bindings),
+        _ => {}
+    }
+}
 fn type_call(
     callee: &ExprWrap,
     type_args: &[TypeArg],
@@ -1973,21 +2109,50 @@ fn type_call(
                 // M7：泛型 struct 构造——实例化 spec def，实参按代入后 sig 核查
                 if st.defs.get(named).ty_params > 0 {
                     let want = st.defs.get(named).ty_params as usize;
-                    if targs.len() != want {
-                        st.diags.emit(Diagnostic::error(
-                            DiagCode::SemTypeArgMismatch,
-                            span,
-                            format!(
-                                "generic struct expects {want} type argument(s), got {}",
-                                targs.len()
-                            ),
-                        ));
-                        type_all_args(args, st);
-                        return st.tys.error;
-                    }
+                    // M7 slice 2：type_args 省略时从构造实参推断
+                    let targs = if type_args.is_empty() {
+                        let sig = &st.defs.get(named).sig;
+                        let (params, pdefaults, tpdefs) = if !sig.params.is_empty() {
+                            (
+                                sig.params.clone(),
+                                sig.param_defaults.clone(),
+                                sig.tp_defaults.clone(),
+                            )
+                        } else {
+                            (
+                                sig.fields.clone(),
+                                vec![false; sig.fields.len()],
+                                sig.tp_defaults.clone(),
+                            )
+                        };
+                        let Some(t) =
+                            infer_call_targs(st, want, &params, &pdefaults, &tpdefs, args, span)
+                        else {
+                            return st.tys.error;
+                        };
+                        t
+                    } else {
+                        if targs.len() != want {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemTypeArgMismatch,
+                                span,
+                                format!(
+                                    "generic struct expects {want} type argument(s), got {}",
+                                    targs.len()
+                                ),
+                            ));
+                            type_all_args(args, st);
+                            return st.tys.error;
+                        }
+                        targs
+                    };
                     let spec = crate::mono::instantiate(st, named, &targs);
                     // irc 的 call 分派按 expr_def 找构造目标（克隆 spec）
                     st.expr_def.set(callee.id, spec);
+                    if type_args.is_empty() {
+                        // M7 slice 2：推断路径实参已定型核查；不重定型
+                        return st.tys.builtin_named(spec);
+                    }
                     let sig = &st.defs.get(spec).sig;
                     if !sig.params.is_empty() {
                         // M3 主构造：参数槽机（含仅构造参数与默认值）
@@ -2073,21 +2238,42 @@ fn type_call(
         // （irc 按它 lower 克隆体），实参按代入后形参核查
         if st.defs.get(def).ty_params > 0 {
             let want = st.defs.get(def).ty_params as usize;
-            if targs.len() != want {
-                st.diags.emit(Diagnostic::error(
-                    DiagCode::SemTypeArgMismatch,
-                    span,
-                    format!(
-                        "generic function expects {want} type argument(s), got {}",
-                        targs.len()
-                    ),
-                ));
-                type_all_args(args, st);
-                return st.tys.error;
-            }
+            // M7 slice 2：type_args 省略时从实参类型推断（失败已诊断）
+            let targs = if type_args.is_empty() {
+                let sig = &st.defs.get(def).sig;
+                let (params, pdefaults, tpdefs) = (
+                    sig.params.clone(),
+                    sig.param_defaults.clone(),
+                    sig.tp_defaults.clone(),
+                );
+                let Some(t) = infer_call_targs(st, want, &params, &pdefaults, &tpdefs, args, span)
+                else {
+                    return st.tys.error;
+                };
+                t
+            } else {
+                if targs.len() != want {
+                    st.diags.emit(Diagnostic::error(
+                        DiagCode::SemTypeArgMismatch,
+                        span,
+                        format!(
+                            "generic function expects {want} type argument(s), got {}",
+                            targs.len()
+                        ),
+                    ));
+                    type_all_args(args, st);
+                    return st.tys.error;
+                }
+                targs
+            };
             let spec = crate::mono::instantiate(st, def, &targs);
             st.expr_def.set(callee.id, spec);
             let (params, ret, defaults) = crate::mono::subst_params(st, def, &targs);
+            // M7 slice 2：推断路径的实参已定型并核查（coverage 纪律），
+            // 仅显式实参路径走 check_call_args
+            if type_args.is_empty() {
+                return ret;
+            }
             check_call_args(args, &params, &defaults, span, st);
             return ret;
         }

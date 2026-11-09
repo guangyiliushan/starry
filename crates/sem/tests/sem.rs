@@ -1256,11 +1256,8 @@ fn generic_fun_instantiation_types_and_repeats() {
 
 #[test]
 fn generic_fun_type_args_are_required_and_counted() {
-    // 缺类型实参：v1 不做推断，显式必需
-    assert_has(
-        "fun id<T>(v: T) : T {\n    return v\n}\nfun main() : int {\n    return id(1)\n}",
-        DiagCode::SemTypeArgMismatch,
-    );
+    // M7 slice 2：缺类型实参改为调用点推断（id(1) 推断 T=int）
+    assert_clean("fun id<T>(v: T) : T {\n    return v\n}\nfun main() : int {\n    return id(1)\n}");
     // 个数不符
     assert_has(
         "fun id<T>(v: T) : T {\n    return v\n}\nfun main() : int {\n    return id<int, int>(1)\n}",
@@ -1536,5 +1533,27 @@ fn visibility_slice3_semantics() {
     assert_has(
         "protected fun p(): int {\n    return 4\n}\nfun main(): int {\n    return 0\n}",
         DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn generic_inference_slice2_semantics() {
+    // inferred + explicit + default-fallback all accepted
+    assert_clean(
+        "fun id<T>(x: T): T {\n    return x\n}\nfun def<T = int>(x: T): T {\n    return x\n}\nfun main(): int {\n    val a = id(42)\n    val b = id<int>(7)\n    val c = def(9)\n    return a + b + c\n}",
+    );
+    // struct ctor inference
+    assert_clean(
+        "struct Box<T>(val v: T)\nfun main(): int {\n    val b = Box(3)\n    return b.v\n}",
+    );
+    // uninferable without default (T not mentioned in params): rejected
+    assert_has(
+        "fun f<T>(x: int): int {\n    return x\n}\nfun main(): int {\n    return f(1)\n}",
+        DiagCode::SemTypeArgMismatch,
+    );
+    // inferred instantiation mismatch: arg type vs inferred param
+    assert_has(
+        "fun id<T>(x: T): T {\n    return x\n}\nfun main(): int {\n    val s = id(\"a\")\n    return s\n}",
+        DiagCode::SemTypeMismatch,
     );
 }

@@ -230,15 +230,17 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
     // M7：泛型原件无 expr_ty（sem 不检查），只 lower 实例化克隆；
     // def 经 decl_def 侧链取（克隆 def 与原件同 span，span 反查会撞车）
     for (i, item) in ast.items.iter().enumerate() {
-        let DeclKind::Fun(f) = &item.kind else {
+        let DeclKind::Fun(_f) = &item.kind else {
             continue;
         };
-        if !f.type_params.is_empty() {
-            continue;
-        }
         let Some(def) = sem.decl_def.get(i).copied().flatten() else {
             continue;
         };
+        // M7 修复：跳过泛型原件按 DEF 判定——单态化克隆的 AST 仍带
+        // 原 type_params，曾致克隆被跳过、调用悬空（预存 bug）
+        if sem.defs.get(def).ty_params > 0 {
+            continue;
+        }
         let mut ctx = Ctx::new(sem, source, i8_ty, &globals, &skipped);
         ctx.lower_fun(def);
         out.diags.append(&mut ctx.diags);
