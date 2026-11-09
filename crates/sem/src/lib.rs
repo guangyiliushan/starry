@@ -151,6 +151,9 @@ pub(crate) struct SemState {
     pub funs: Vec<FunFrame>,
     pub loops: Vec<LoopFrame>,
     pub own_def: Option<DefId>,
+    /// M5 slice 3：包作用域标记（pkg_scope 创建时记录；可见性校验
+    /// 用它判定两个作用域是否同属一个包身份链）
+    pub pkg_scopes: Vec<ScopeId>,
     /// M6：unsafe 块深度——extern "c" 调用要求在 unsafe 上下文中
     ///（language-design：FFI 调用在 unsafe 中）
     pub unsafe_depth: usize,
@@ -219,6 +222,7 @@ impl Sem {
             funs: Vec::new(),
             loops: Vec::new(),
             own_def: None,
+            pkg_scopes: Vec::new(),
             unsafe_depth: 0,
             mono_queue: Vec::new(),
             mono_insts: std::collections::BTreeMap::new(),

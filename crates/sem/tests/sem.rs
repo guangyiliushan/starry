@@ -1507,3 +1507,34 @@ fn weak_upgrade_slice4b_semantics() {
         DiagCode::SemUnsupportedConstruct,
     );
 }
+
+#[test]
+fn visibility_slice3_semantics() {
+    // default public: same-package and cross-package import both fine
+    assert_clean(
+        "package util\nfun f(): int {\n    return 1\n}\npackage app\nimport util.f\nfun main(): int {\n    return f()\n}",
+    );
+    // internal: same-package use fine
+    assert_clean(
+        "package util\ninternal fun g(): int {\n    return 2\n}\nfun useit(): int {\n    return g()\n}\npackage app\nfun main(): int {\n    return 0\n}",
+    );
+    // internal: cross-package import rejected
+    assert_has(
+        "package util\ninternal fun g(): int {\n    return 2\n}\npackage app\nimport util.g\nfun main(): int {\n    return g()\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // private: same-segment use fine
+    assert_clean(
+        "package app\nprivate fun h(): int {\n    return 3\n}\nfun main(): int {\n    return h()\n}",
+    );
+    // private: cross-segment (same package) rejected
+    assert_has(
+        "package app\nprivate fun h(): int {\n    return 3\n}\npackage app\nfun other(): int {\n    return h()\n}",
+        DiagCode::SemUndefinedName,
+    );
+    // protected: top-level rejected
+    assert_has(
+        "protected fun p(): int {\n    return 4\n}\nfun main(): int {\n    return 0\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}

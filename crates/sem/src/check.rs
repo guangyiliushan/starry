@@ -1370,7 +1370,19 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
                 && let Some(bdef) = st.expr_def.get(base.id).copied()
                 && matches!(st.defs.get(bdef).kind, DefKind::PackageNs)
             {
+                let use_scope = st.node_scope.get(e.id).copied().unwrap_or(st.scopes.root());
                 return match member_lookup(st, bdef, *name) {
+                    Some(mdef) if !crate::declare::vis_allows(st, mdef, use_scope) => {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnsupportedConstruct,
+                            e.span,
+                            format!(
+                                "`{}` is not visible here (internal to another package)",
+                                st.interner.resolve(st.defs.get(mdef).name)
+                            ),
+                        ));
+                        st.tys.error
+                    }
                     Some(mdef) => {
                         st.expr_def.set(e.id, mdef);
                         def_value_ty(mdef, st)
@@ -1757,7 +1769,24 @@ fn type_call(
     {
         // coverage 纪律：base 表达式必须定型（即便其值类型是 error）
         let _base_ty = type_expr(base, st, true);
+        let use_scope = st
+            .node_scope
+            .get(callee.id)
+            .copied()
+            .unwrap_or(st.scopes.root());
         return match member_lookup(st, bdef, *name) {
+            Some(mdef) if !crate::declare::vis_allows(st, mdef, use_scope) => {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    callee.span,
+                    format!(
+                        "`{}` is not visible here (internal to another package)",
+                        st.interner.resolve(st.defs.get(mdef).name)
+                    ),
+                ));
+                type_all_args(args, st);
+                st.tys.error
+            }
             Some(mdef) => {
                 st.expr_def.set(callee.id, mdef);
                 let ty = def_value_ty(mdef, st);

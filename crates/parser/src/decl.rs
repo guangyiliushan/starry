@@ -435,15 +435,22 @@ fn parse_top_level_inner(session: &mut ParseSession<'_>) -> Result<DeclNode, Par
     {
         return parse_extern(session, start);
     }
+    // M5 slice 3：修饰词解析前捕获真实检查点（内联 session.checkpoint()
+    // 只捕获当前位置——曾致回卷 no-op、顶层修饰词静默丢失）
+    let cp = session.checkpoint();
     let modifiers = parse_modifier_list(session)?;
     match session.cursor.peek().kind {
         TokenKind::Keyword(HardKeyword::Fun) => complete_decl!(session, start, {
+            // M5 slice 3：parse_fun_signature 自读修饰词——回卷到检查点
+            // 重解析（与 val/var 臂同模式），否则 438 行的修饰词被丢弃、
+            // FunDecl.modifiers 恒空（private/internal 可见性失语的根因）
+            session.rollback(&cp);
             let fun = parse_fun_decl(session)?;
             DeclKind::Fun(fun)
         }),
         TokenKind::Keyword(HardKeyword::Val) | TokenKind::Keyword(HardKeyword::Var) => {
-            // parse_binding_decl re-reads val/var after parsing modifiers above.
-            session.cursor.rollback(&session.checkpoint().0);
+            // parse_binding_decl 重新自读修饰词与 val/var（回卷到真实检查点）
+            session.rollback(&cp);
             parse_binding_decl(session)
         }
         TokenKind::Keyword(HardKeyword::Class) => complete_decl!(session, start, {

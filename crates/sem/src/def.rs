@@ -59,9 +59,23 @@ pub enum DefKind {
     PackageNs,
 }
 
+/// M5 slice 3：顶层声明可见性（Kotlin 式；protected 为 class 成员专用，
+/// 顶层使用稳定拒收）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vis {
+    /// 默认：包内可见 + 跨包可 import
+    Pub,
+    /// 包私有：仅同包可见（绑定包身份，D-009）
+    Internal,
+    /// 文件私有：仅同段（文件）可见
+    Private,
+}
+
 /// 定义签名槽（各 kind 按需取用；单一结构避免按 kind 分型的抽象膨胀）
 #[derive(Debug, Clone)]
 pub struct DefSig {
+    /// M5 slice 3：顶层声明可见性（默认 Pub）
+    pub vis: Vis,
     pub params: Vec<(Symbol, TyId)>,
     pub ret: TyId,
     pub ty: TyId,
@@ -75,6 +89,7 @@ pub struct DefSig {
 impl DefSig {
     pub fn new(unit: TyId, error: TyId) -> Self {
         Self {
+            vis: Vis::Pub,
             params: Vec::new(),
             ret: unit,
             ty: error,

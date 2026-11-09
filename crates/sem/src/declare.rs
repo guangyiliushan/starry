@@ -21,8 +21,10 @@ const BUILTINS: &[&str] = &[
 pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
     register_builtins(st);
     let root = st.scopes.root();
-    // M5 slice 2a：按序跟踪当前包段；顶层声明进包作用域（无段 = 根）
+    // M5 slice 2a/3：按序跟踪当前包段与文件段；顶层声明注册进文件段，
+    // 非 private 镜像进包作用域（跨文件可见；private 仅同文件）
     let mut cur = root;
+    let mut seg = root;
     let mut pkgs: std::collections::HashMap<String, ScopeId> = std::collections::HashMap::new();
     // M5 slice 2b：import 延后到全部真实声明之后注册——同包本地定义
     // 恒优先于导入别名（同包自导入、跨文件同名合法化）；导入互撞仍诊断
@@ -30,15 +32,19 @@ pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
     for (i, item) in ast.items.iter().enumerate() {
         if let DeclKind::PackageSeg(path) = &item.kind {
             cur = pkg_scope(path, root, &mut pkgs, st);
+            seg = st.scopes.new_scope(Some(cur)); // M5 slice 3：文件段
             st.decl_def.push(None); // 保持 decl_def 与 items 1:1
             continue;
         }
         if matches!(item.kind, DeclKind::Import(_)) {
             st.decl_def.push(None);
-            pending_imports.push((cur, item));
+            // M5 slice 3：导入别名注册进文件段作用域（逐文件隔离；
+            // 包级共享会让两个文件 import 同名互撞）
+            pending_imports.push((seg, item));
             continue;
         }
-        declare_one(item, i, cur, st);
+        let vis = vis_of(item, st);
+        declare_one(item, i, seg, cur, vis, st);
     }
     for (scope, item) in pending_imports {
         register_import(scope, item, st);
@@ -64,14 +70,69 @@ fn register_import(scope: ScopeId, decl: &DeclNode, st: &mut SemState) {
         if matches!(suffix, ImportSuffix::Star) {
             return;
         }
-        if let Some(old) = st.scopes.lookup_local(scope, name)
-            && !matches!(st.defs.get(old).kind, DefKind::ImportNs { .. })
+        // 链上（文件段 → 包 → 根）真实定义恒优先于导入别名
+        let mut s = Some(scope);
+        while let Some(x) = s {
+            if let Some(d) = st.scopes.lookup_local(x, name)
+                && !matches!(st.defs.get(d).kind, DefKind::ImportNs { .. })
+            {
+                return;
+            }
+            s = st.scopes.parent_of(x);
+        }
+        // M5 slice 3：internal 目标跨包拒收（急切解析目标做可见性判定）
+        let root = st.scopes.root();
+        let mut target = lookup_local_no_import(st, root, segments[0]);
+        for seg in &segments[1..] {
+            target = target.and_then(|d| member_lookup(st, d, *seg));
+        }
+        if let Some(t) = target
+            && !vis_allows(st, t, scope)
         {
-            return; // 本地定义优先于导入
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                decl.span,
+                format!(
+                    "`{}` is not visible here (internal to another package)",
+                    st.interner.resolve(st.defs.get(t).name)
+                ),
+            ));
+            return;
         }
         add_def(st, scope, name, decl.span, DefKind::ImportNs { segments });
     }
     // Native import：v1 注册别名名（调用解析为 unsupported）
+}
+
+/// M5 slice 3：作用域的包身份链（祖先中的包作用域，根→叶序）
+pub(crate) fn pkg_chain(st: &SemState, scope: crate::def::ScopeId) -> Vec<crate::def::ScopeId> {
+    let mut v = Vec::new();
+    let mut cur = Some(scope);
+    while let Some(s) = cur {
+        if st.pkg_scopes.contains(&s) {
+            v.push(s);
+        }
+        cur = st.scopes.parent_of(s);
+    }
+    v
+}
+
+/// M5 slice 3：两个作用域是否同属一个包身份链
+pub(crate) fn same_pkg(st: &SemState, a: crate::def::ScopeId, b: crate::def::ScopeId) -> bool {
+    pkg_chain(st, a) == pkg_chain(st, b)
+}
+
+/// M5 slice 3：internal 目标的跨包使用拒收判定（true = 允许）
+pub(crate) fn vis_allows(st: &SemState, def: DefId, use_scope: crate::def::ScopeId) -> bool {
+    match st.defs.get(def).sig.vis {
+        crate::def::Vis::Pub => true,
+        crate::def::Vis::Internal => same_pkg(st, st.defs.get(def).scope, use_scope),
+        crate::def::Vis::Private => {
+            // private 注册在文件段作用域：仅同段解析链可达（链上自然拒收）；
+            // 经命名空间/导入命中属契约破缺，按同包口径放行诊断兜底
+            same_pkg(st, st.defs.get(def).scope, use_scope)
+        }
+    }
 }
 
 /// M5 slice 2a：取（必要时建）dotted 包路径的作用域。每段注册 PackageNs
@@ -102,6 +163,7 @@ fn pkg_scope(
             continue;
         }
         let scope = st.scopes.new_scope(Some(cur));
+        st.pkg_scopes.push(scope);
         let def = st.defs.push(Def {
             kind: DefKind::PackageNs,
             name: seg.name,
@@ -147,14 +209,90 @@ pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
         if i < st.decl_def.len() {
             continue;
         }
-        declare_one(item, i, root, st);
+        let _ = (item, i, root);
     }
 }
 
 /// 逐项声明：先占 decl_def 槽（与 items 1:1 对齐），再登记名字
-fn declare_one(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState) {
+fn declare_one(
+    decl: &DeclNode,
+    index: usize,
+    seg: ScopeId,
+    pkg: ScopeId,
+    vis: crate::def::Vis,
+    st: &mut SemState,
+) {
     st.decl_def.push(None);
-    declare_decl(decl, index, scope, st);
+    declare_decl(decl, index, seg, st);
+    // M5 slice 3：非 private 声明镜像进包作用域（同包跨文件可见）；
+    // 镜像撞名 = 同包公开同名，报 SemDuplicateDef
+    if vis != crate::def::Vis::Private && seg != pkg {
+        let def = st
+            .decl_def
+            .last()
+            .copied()
+            .flatten()
+            .or_else(|| top_binding_def(decl, st));
+        if let Some(def) = def {
+            st.defs.get_mut(def).sig.vis = vis;
+            if let Some(old) = st.scopes.insert(pkg, st.defs.get(def).name, def) {
+                st.scopes.insert(pkg, st.defs.get(def).name, old);
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemDuplicateDef,
+                    decl.span,
+                    format!(
+                        "duplicate definition of `{}`",
+                        st.interner.resolve(st.defs.get(def).name)
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+/// M5 slice 3：顶层绑定的 def 经 pat_binding_def 侧链（declare_binding_name
+/// 不填 decl_def 槽）
+fn top_binding_def(decl: &DeclNode, st: &SemState) -> Option<DefId> {
+    let DeclKind::Binding(b) = &decl.kind else {
+        return None;
+    };
+    st.pat_binding_def.get(b.pattern.id).copied()
+}
+
+/// M5 slice 3：顶层声明可见性提取（首个可见性修饰词胜出；protected
+/// 为 class 成员专用，顶层使用稳定拒收后按 Internal 处理）
+fn vis_of(decl: &DeclNode, st: &mut SemState) -> crate::def::Vis {
+    use ast::token::ModifierWord;
+    let mods: &[ast::syntax::modifier::Modifier] = match &decl.kind {
+        DeclKind::Fun(f) => &f.modifiers.modifiers,
+        DeclKind::Binding(b) => &b.modifiers.modifiers,
+        DeclKind::Class(c) => &c.modifiers.modifiers,
+        DeclKind::Struct(s) => &s.modifiers.modifiers,
+        DeclKind::Enum(e) => &e.modifiers.modifiers,
+        DeclKind::TypeAlias(t) => &t.modifiers.modifiers,
+        DeclKind::Extern(e) => match &e.body {
+            ExternBody::Fun(sig) => &sig.modifiers.modifiers,
+            _ => &[],
+        },
+        _ => &[],
+    };
+    for m in mods {
+        match m.word {
+            ModifierWord::Private => return crate::def::Vis::Private,
+            ModifierWord::Internal => return crate::def::Vis::Internal,
+            ModifierWord::Public => return crate::def::Vis::Pub,
+            ModifierWord::Protected => {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    decl.span,
+                    "`protected` is only supported on class members (not top-level declarations)",
+                ));
+                return crate::def::Vis::Internal;
+            }
+            _ => {}
+        }
+    }
+    crate::def::Vis::Pub
 }
 
 fn register_builtins(st: &mut SemState) {
