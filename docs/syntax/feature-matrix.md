@@ -23,7 +23,7 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | `as` 数值转换 | ✅ | ✅ | ✅ | ✅ | — | 全有符号 Conv |
 | `print` 内建 | ✅ | ✅ | ✅ | ✅ | ✅ | 标量六类入口（i1/i128 特判） |
 | 具名/默认/命名实参 | ✅ | ✅ | ✅ | ✅ | — | 默认值调用点重放 |
-| 函数值类型 `(int) -> int` | ✅ | 🟡 | ❌ | — | — | sem 定型 ✅；**调用 lowering 未实现**（irc 稳定诊断） |
+| 函数值类型 `(int, int) -> int` | ✅ | ✅ | ✅ | ✅ | — | M8 slice 1：具名函数作值（传递/绑定/返回）+ 经形参间接调用全链路 |
 
 ## 数据布局（Feature Group 1）
 
@@ -68,10 +68,10 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 |---|---|---|
 | class/ARC（M4 切片 1–4b，Plan C 所有权闭环） | ✅ | 构造/字段/方法/deinit/weak var + upgrade 读取（?P）/可空 class/形参+0/返回+1 统一/重赋值所有权/语句级 +1 临时释放（`stmt_temps`，full-expression 纪律）；继承、二级构造后置 || trait/impl/aspect/provide | sem | 跳过清单 |
 | 泛型 bounds/variance/where、泛型 enum | sem | bounds 依赖 trait（M9 前）；泛型 enum 后置。已落地：fun/struct 单态化、显式/推断类型实参、类型形参默认值 |
-| lambda 定型、方法调用、spawn/async/await、宏展开、grow | sem | 跳过清单 |
+| lambda 定型（捕获语义待裁定）、spawn/async/await、宏展开、grow | sem | 跳过清单 |
 | 指针 `*const T` / `*mut T`（T2 thin） | ✅ | D-007 / M2 已落地：类型+FFI+`&x`/`*p`+StorePtr；T2 checked pointer 后置 M10（Q7） |
 | 引用 `&T` / `&mut T`（T1） | 🟡 | D-007 / M2：类型 + `&x`/`*p` 落地；v1 保守借用（R6：局部名/不逃逸/全局拒借/不可变只读）；重叠 &mut/区间追踪后置 M10 前专项 |
-| 聚合顶层全局、函数值调用 | irc | `IrcUnsupportedLowering` |
+| 聚合顶层全局 | irc | `IrcUnsupportedLowering` |
 | extern 程序 interp 验证 | interp | `UnknownFun` trap（已知局限） |
 | i128 位宽语义 | interp | 按 64 位建模（已知局限） |
 

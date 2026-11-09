@@ -31,6 +31,8 @@ pub enum Const {
     Str(Symbol),
     /// unit 值（无副作用表达式的占位结果）
     Unit,
+    /// M8 slice 1：函数引用（顶层 fun 作为值；lower 为函数指针）
+    Fun(sem::DefId),
 }
 
 /// 操作数
@@ -82,6 +84,8 @@ pub enum Callee {
     Def(DefId),
     Extern(DefId),
     Runtime(RuntimeFn),
+    /// M8 slice 1：函数值间接调用——pending 首参为函数指针
+    Indirect,
 }
 
 /// 运行时入口（v1：字符串化、拼接与 print；名字由 llvme 映射为
@@ -320,6 +324,9 @@ fn op_text(op: &Operand, interner: &Interner, out: &mut String) {
         Operand::Const(Const::Float(v)) => {
             let _ = write!(out, "{v}");
         }
+        Operand::Const(Const::Fun(_)) => {
+            let _ = write!(out, "@fn"); // M8 slice 1: 文本占位（语义在 llvm 层）
+        }
         Operand::Const(Const::Bool(b)) => {
             let _ = write!(out, "{b}");
         }
@@ -518,6 +525,7 @@ impl TacOutput {
                 }
                 let name = match callee {
                     Callee::Def(d) => interner.resolve(defs.get(*d).name).to_string(),
+                    Callee::Indirect => "indirect".to_string(),
                     Callee::Extern(d) => {
                         format!("extern {}", interner.resolve(defs.get(*d).name))
                     }

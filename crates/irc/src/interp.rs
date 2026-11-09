@@ -393,6 +393,8 @@ impl<'a> Machine<'a> {
                 Const::Null | Const::Unit => 0,
                 // 字符串常量：查预 intern 的侧表（构建期已全量收集）
                 Const::Str(sym) => self.str_ids.get(sym).copied().unwrap_or(0),
+                // M8 slice 1：函数引用 = DefId 编码（间接调用时解码）
+                Const::Fun(d) => d.0 as u64,
             },
         }
     }
@@ -689,6 +691,28 @@ impl<'a> Machine<'a> {
                         let mut s = self.strings[(a.max(1) - 1) as usize].clone();
                         s.push_str(&self.strings[(b.max(1) - 1) as usize]);
                         self.str_id(&s)
+                    }
+                    // M8 slice 1：函数值间接调用——args[0] 为函数指针
+                    // （DefId 编码），其余为实参
+                    Callee::Indirect => {
+                        let fid = args.first().map(|(v, _)| *v).unwrap_or(0) as u32;
+                        let def = sem::DefId(fid);
+                        let callee_fun = self
+                            .tac
+                            .funs
+                            .iter()
+                            .find(|f| f.def == def)
+                            .ok_or(InterpError::UnknownFun(format!("indirect def {fid}")))?;
+                        let decoded: Vec<Value> = callee_fun
+                            .params
+                            .iter()
+                            .zip(args.iter().skip(1))
+                            .map(|((_, pty), (v, _))| self.decode(*v, *pty))
+                            .collect();
+                        match self.exec_nested(callee_fun, &decoded, depth)? {
+                            Some((rv, _)) => rv,
+                            None => 0,
+                        }
                     }
                     Callee::Def(def) => {
                         let callee_fun = self

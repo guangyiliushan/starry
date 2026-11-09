@@ -145,6 +145,12 @@ fn ident(ctx: &mut Ctx, name: ast::interner::Symbol, span: Span, id: NodeId) -> 
         Some((place, ty)) if weak => weak_upgrade_read(ctx, place, ty, span, id),
         Some((place, ty)) => read_place(ctx, place, ty, span),
         None => {
+            // M8 slice 1：顶层 fun 名在值位置 = 函数引用常量
+            if let Some(def) = ctx.sem.expr_def.get(id).copied()
+                && matches!(ctx.sem.defs.get(def).kind, DefKind::Fun)
+            {
+                return Operand::Const(crate::tac::Const::Fun(def));
+            }
             if ctx.unsupported_globals.contains(&name) {
                 // 声明点已报 unsupported；使用点给同码稳定诊断（不再落契约
                 // 破缺断言），返回哑基址避免级联（未初始化读取无害——诊断
@@ -1332,6 +1338,50 @@ pub(crate) fn lower_expr_as(ctx: &mut Ctx, e: &ExprWrap, to: TyId) -> Operand {
     }
 }
 
+/// M8 slice 1：函数值调用——callee 是持有 (..)->.. 值的形参/绑定。
+/// 首 pending 实参为函数指针，llvme 发间接调用。
+fn fn_value_call(
+    ctx: &mut Ctx,
+    e: &ExprWrap,
+    callee: &ExprWrap,
+    args: &[ast::syntax::expr::CallArg],
+) -> Operand {
+    let (ps, ret) = match ctx.sem.tys.kind(ctx.expr_ty(callee)).clone() {
+        TyKind::Fn(ps, r) => (ps, r),
+        _ => {
+            ctx.diag(callee.span, "函数值调用目标非函数类型（sem 契约破缺）");
+            return Operand::Const(Const::Unit);
+        }
+    };
+    if args.len() != ps.len() {
+        ctx.diag(e.span, "函数值调用 arity 不符（sem 契约破缺）");
+    }
+    if args.iter().any(|a| a.name.is_some()) {
+        ctx.diag(e.span, "函数值调用不支持命名实参（sem 已拒）");
+    }
+    let fty = ctx.expr_ty(callee);
+    let fop = lower_expr(ctx, callee);
+    ctx.emit(Instr::Param { a: fop, ty: fty });
+    for (i, arg) in args.iter().enumerate() {
+        let to = ps.get(i).copied().unwrap_or(ctx.sem.tys.unit);
+        let v = lower_expr_as(ctx, &arg.value, to);
+        ctx.emit(Instr::Param { a: v, ty: to });
+    }
+    let dst = if ctx.is_unit(ret) {
+        None
+    } else {
+        Some(ctx.temp())
+    };
+    ctx.emit(Instr::Call {
+        dst,
+        callee: Callee::Indirect,
+        ty: ret,
+    });
+    match dst {
+        Some(d) => Operand::Temp(d),
+        None => Operand::Const(Const::Unit),
+    }
+}
 fn call(
     ctx: &mut Ctx,
     e: &ExprWrap,
@@ -1385,6 +1435,10 @@ fn call(
         }
         DefKind::Fun => {}
         _ => {
+            // M8 slice 1：形参/绑定持有的函数值 → 间接调用
+            if matches!(ctx.sem.tys.kind(ctx.expr_ty(callee)), TyKind::Fn(..)) {
+                return fn_value_call(ctx, e, callee, args);
+            }
             ctx.diag(e.span, "该调用目标无 lowering 路径（sem 契约破缺）");
             return Operand::Const(Const::Unit);
         }

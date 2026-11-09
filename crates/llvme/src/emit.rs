@@ -491,6 +491,8 @@ impl<'e, 'l> FnEmit<'e, 'l> {
             }
             Const::Null => "0".into(),
             Const::Unit => "0".into(),
+            // M8 slice 1：函数引用 = 全局函数指针
+            Const::Fun(d) => fun_name(self.lc, *d),
             Const::Str(sym) => {
                 let id = self.g.str_id(*sym);
                 self.g.used_strs.insert(id);
@@ -1066,6 +1068,25 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                 .collect();
             let mut is_str_eq = false;
             let (callee_name, ret) = match callee {
+                // M8 slice 1：函数值间接调用——args[0] 为函数指针
+                // （"ptr %tN"），去掉类型前缀放在被调位；
+                // 形参签名由其余 pending 的 pty 携带
+                Callee::Indirect => {
+                    if args.is_empty() {
+                        let _ =
+                            writeln!(e.out, "  ; ERROR: indirect call without a function pointer");
+                        ("@starry_indirect_missing".to_string(), "void".to_string())
+                    } else {
+                        let target = args.remove(0);
+                        let target_val = target.strip_prefix("ptr ").unwrap_or(&target).to_string();
+                        let ret = if class_of(e.lc.tys, e.lc.defs, *ty) == TyClass::Agg {
+                            "ptr".to_string()
+                        } else {
+                            scalar_ty(e.lc.tys, e.lc.defs, *ty)
+                        };
+                        (target_val, ret)
+                    }
+                }
                 Callee::Def(d) => {
                     let ret = if class_of(e.lc.tys, e.lc.defs, *ty) == TyClass::Agg {
                         "ptr".to_string()

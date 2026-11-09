@@ -966,3 +966,18 @@ fn generic_call_site_inference_and_defaults_end_to_end() {
     };
     assert_eq!(out, "42\n3\n4\n");
 }
+
+#[test]
+fn function_values_end_to_end() {
+    // M8 slice 1: named funs as first-class values — pass as argument,
+    // bind to locals, return from functions, and call through
+    // parameters (indirect call).
+    let Some((out, _err, code)) = build_and_exec(
+        "fn_values",
+        "fun add(a: int, b: int): int {\n    return a + b\n}\nfun mul(a: int, b: int): int {\n    return a * b\n}\nfun pick(useAdd: bool): (int, int) -> int {\n    if (useAdd) {\n        return add\n    }\n    return mul\n}\nfun apply(f: (int, int) -> int, x: int, y: int): int {\n    return f(x, y)\n}\nfun main(): int {\n    val f = add\n    val g = pick(false)\n    return apply(f, 20, 22) + apply(g, 3, 14)\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "");
+    assert_eq!(code, 84);
+}
