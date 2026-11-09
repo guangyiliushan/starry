@@ -916,3 +916,38 @@ fn directory_default_package_with_import() {
     };
     assert_eq!(out, "42\n");
 }
+
+#[test]
+fn namespace_import_and_circular_import_end_to_end() {
+    // M5 slice 2b: `import util` brings the namespace; qualified access
+    // `util.Helper(...)` resolves through the PackageNs def. Circular
+    // imports (util -> app -> util) are harmless in the single-instance
+    // model; same-package self-import no longer clashes with locals.
+    let toml = "name = \"m5ns\"\nsrcs = [\"src\"]";
+    let Some(out) = build_dir_and_run(
+        "m5ns",
+        &[
+            (
+                "src/util/helper.starry",
+                "import app.shared\n\nclass Helper(val v: int) {\n    fun plus1(): int {\n        return self.v + shared()\n    }\n}\n",
+            ),
+            (
+                "src/util/selfimport.starry",
+                "import util.Helper\n\nfun unused(): int {\n    return 0\n}\n",
+            ),
+            (
+                "src/app/shared.starry",
+                "fun shared(): int {\n    return 1\n}\n",
+            ),
+            (
+                "src/app/main.starry",
+                "import util\n\nfun main() {\n    val h = util.Helper(41)\n    print(h.plus1())\n}\n",
+            ),
+            ("starry.toml", toml),
+        ],
+        Some(toml),
+    ) else {
+        return;
+    };
+    assert_eq!(out, "42\n");
+}

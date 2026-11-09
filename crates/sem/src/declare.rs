@@ -24,15 +24,54 @@ pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
     // M5 slice 2a：按序跟踪当前包段；顶层声明进包作用域（无段 = 根）
     let mut cur = root;
     let mut pkgs: std::collections::HashMap<String, ScopeId> = std::collections::HashMap::new();
+    // M5 slice 2b：import 延后到全部真实声明之后注册——同包本地定义
+    // 恒优先于导入别名（同包自导入、跨文件同名合法化）；导入互撞仍诊断
+    let mut pending_imports: Vec<(ScopeId, &DeclNode)> = Vec::new();
     for (i, item) in ast.items.iter().enumerate() {
         if let DeclKind::PackageSeg(path) = &item.kind {
             cur = pkg_scope(path, root, &mut pkgs, st);
             st.decl_def.push(None); // 保持 decl_def 与 items 1:1
             continue;
         }
+        if matches!(item.kind, DeclKind::Import(_)) {
+            st.decl_def.push(None);
+            pending_imports.push((cur, item));
+            continue;
+        }
         declare_one(item, i, cur, st);
     }
+    for (scope, item) in pending_imports {
+        register_import(scope, item, st);
+    }
     lower_top_level_sigs(ast, st);
+}
+
+/// M5 slice 2b：注册导入别名。同名真实定义已占位（本地优先）则跳过；
+/// 既有导入别名则维持 SemDuplicateDef。
+fn register_import(scope: ScopeId, decl: &DeclNode, st: &mut SemState) {
+    let DeclKind::Import(i) = &decl.kind else {
+        return;
+    };
+    if let ImportKind::Qualified { path, suffix } = &i.kind {
+        let segments: Vec<Symbol> = path.segments.iter().map(|s| s.name).collect();
+        let name = match suffix {
+            ImportSuffix::Alias(a) => *a,
+            _ => match segments.last() {
+                Some(s) => *s,
+                None => return,
+            },
+        };
+        if matches!(suffix, ImportSuffix::Star) {
+            return;
+        }
+        if let Some(old) = st.scopes.lookup_local(scope, name)
+            && !matches!(st.defs.get(old).kind, DefKind::ImportNs { .. })
+        {
+            return; // 本地定义优先于导入
+        }
+        add_def(st, scope, name, decl.span, DefKind::ImportNs { segments });
+    }
+    // Native import：v1 注册别名名（调用解析为 unsupported）
 }
 
 /// M5 slice 2a：取（必要时建）dotted 包路径的作用域。每段注册 PackageNs
@@ -268,21 +307,9 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
     match &decl.kind {
         // M5 slice 2a：段标记在 run() 主循环消费（保持 decl_def 1:1），此处无操作
         DeclKind::PackageSeg(_) => {}
-        DeclKind::Import(i) => {
-            if let ImportKind::Qualified { path, suffix } = &i.kind {
-                let segments: Vec<Symbol> = path.segments.iter().map(|s| s.name).collect();
-                let name = match suffix {
-                    ImportSuffix::Alias(a) => *a,
-                    _ => match segments.last() {
-                        Some(s) => *s,
-                        None => return,
-                    },
-                };
-                if !matches!(suffix, ImportSuffix::Star) {
-                    add_def(st, scope, name, decl.span, DefKind::ImportNs { segments });
-                }
-            }
-            // Native import：v1 注册别名名（调用解析为 unsupported）
+        DeclKind::Import(_i) => {
+            // M5 slice 2b：导入别名在 run() 第二遍注册（本地定义优先）；
+            // 此处无操作（Native import 仍由调用点报 unsupported）
         }
         DeclKind::Fun(f) => {
             let def = add_def(st, scope, f.name, decl.span, DefKind::Fun);

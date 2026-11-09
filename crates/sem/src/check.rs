@@ -1363,6 +1363,28 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             }
         }
         ExprKind::Member { base, name, safe } => {
+            // M5 slice 2b：命名空间限定访问——base 解析为 PackageNs
+            //（`import util` 后 `util.Helper` / `a.b.C`）按成员名解析
+            // 并写 expr_def，类型走 def_value_ty（class 构造器等）
+            if !*safe
+                && let Some(bdef) = st.expr_def.get(base.id).copied()
+                && matches!(st.defs.get(bdef).kind, DefKind::PackageNs)
+            {
+                return match member_lookup(st, bdef, *name) {
+                    Some(mdef) => {
+                        st.expr_def.set(e.id, mdef);
+                        def_value_ty(mdef, st)
+                    }
+                    None => {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnknownMember,
+                            e.span,
+                            format!("unknown member `{}`", st.interner.resolve(*name)),
+                        ));
+                        st.tys.error
+                    }
+                };
+            }
             // M4 slice 4b (Plan C)：经 weak 的 `?.` 安全访问放行
             //（base 读取即 upgrade，定型 ?P）；非安全 `.` 仍拒（需显式 !!）
             if !*safe
@@ -1724,6 +1746,75 @@ fn type_call(
         && matches!(st.defs.get(def).kind, DefKind::BuiltinPrint)
     {
         return type_print_call(callee, args, span, st);
+    }
+    // M5 slice 2b：命名空间限定调用（`import util` 后 `util.Helper(...)`）——
+    // base 解析为 PackageNs 时按成员解析并写 expr_def，类型走 def_value_ty
+    //（class 构造器 = TypeObject，落到下游统一 ctor 核查）
+    if let ExprKind::Member { base, name, safe } = &callee.kind
+        && !*safe
+        && let Some(bdef) = st.expr_def.get(base.id).copied()
+        && matches!(st.defs.get(bdef).kind, DefKind::PackageNs)
+    {
+        // coverage 纪律：base 表达式必须定型（即便其值类型是 error）
+        let _base_ty = type_expr(base, st, true);
+        return match member_lookup(st, bdef, *name) {
+            Some(mdef) => {
+                st.expr_def.set(callee.id, mdef);
+                let ty = def_value_ty(mdef, st);
+                if st.tys.is_error(ty) {
+                    type_all_args(args, st);
+                    return st.tys.error;
+                }
+                st.expr_ty.set(callee.id, ty);
+                match st.tys.kind(ty).clone() {
+                    TyKind::TypeObject(named) => {
+                        // 与下游 TypeObject 臂同纪律：构造器实参核查
+                        if !matches!(st.defs.get(named).kind, DefKind::Struct | DefKind::Class) {
+                            type_all_args(args, st);
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemTypeMismatch,
+                                callee.span,
+                                "this type name is not callable",
+                            ));
+                            return st.tys.error;
+                        }
+                        let (params, defaults) = {
+                            let sig = &st.defs.get(named).sig;
+                            (sig.params.clone(), sig.param_defaults.clone())
+                        };
+                        check_call_args(args, &params, &defaults, span, st);
+                        st.tys.builtin_named(named)
+                    }
+                    TyKind::Fn(_, ret) => {
+                        // 形参名经 def 签名取（TyKind::Fn 只有类型序）
+                        let (params, defaults) = {
+                            let sig = &st.defs.get(mdef).sig;
+                            (sig.params.clone(), sig.param_defaults.clone())
+                        };
+                        check_call_args(args, &params, &defaults, span, st);
+                        ret
+                    }
+                    _ => {
+                        type_all_args(args, st);
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemTypeMismatch,
+                            callee.span,
+                            "namespace member is not callable",
+                        ));
+                        st.tys.error
+                    }
+                }
+            }
+            None => {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnknownMember,
+                    callee.span,
+                    format!("unknown member `{}`", st.interner.resolve(*name)),
+                ));
+                type_all_args(args, st);
+                st.tys.error
+            }
+        };
     }
     // Member 目标的定型与消歧一次完成：字段（含函数字段）/枚举变体查得到，
     // 查不到即方法调用（由此处报「不支持」，不让 member_field_ty 发 unknown-field 误导）
