@@ -43,7 +43,7 @@ hard in In global
 hard where Where global
 hard mut Mut global
 
-# 14 modifier words, recognized only in a modifier list.
+# 15 modifier words, recognized only in a modifier list.
 modifier public Public modifier
 modifier private Private modifier
 modifier protected Protected modifier
@@ -58,6 +58,7 @@ modifier inline Inline modifier
 modifier operator OperatorWord modifier
 modifier infix Infix modifier
 modifier vararg Vararg modifier
+modifier weak Weak modifier
 
 # 31 slot words, recognized only in their named parser slot.
 slot actor Actor declaration_or_spawn

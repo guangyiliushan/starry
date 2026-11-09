@@ -58,6 +58,7 @@ IDENTIFIER : [A-Za-z_][A-Za-z0-9_]*;
 // modifier: OperatorWord = 'operator' in modifier
 // modifier: Infix = 'infix' in modifier
 // modifier: Vararg = 'vararg' in modifier
+// modifier: Weak = 'weak' in modifier
 // slot: Actor = 'actor' in declaration_or_spawn
 // slot: Aspect = 'aspect' in declaration
 // slot: Provide = 'provide' in declaration

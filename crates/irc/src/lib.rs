@@ -52,6 +52,7 @@ pub fn lower(sem: &mut SemanticOutput, source: &str) -> TacOutput {
         pat_binding_def,
         ty_of_node,
         decl_def,
+        scopes,
         ..
     } = sem;
     let i8_ty = tys.intern(TyKind::Int(IntKind::I8));
@@ -66,6 +67,7 @@ pub fn lower(sem: &mut SemanticOutput, source: &str) -> TacOutput {
         pat_binding_def,
         ty_of_node,
         decl_def,
+        scopes,
         interner,
     };
     lower::run(&mut sr, source, i8_ty)

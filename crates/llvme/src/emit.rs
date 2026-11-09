@@ -20,7 +20,7 @@ use irc::layout::scalar_slots;
 use irc::tac::{
     BinOp, Callee, Const, FunBody, Instr, Operand, RuntimeFn, TacOutput, TempId, Term, UnOp,
 };
-use sem::{DefArena, DefId, FloatKind, IntKind, TyArena, TyId, TyKind};
+use sem::{DefArena, DefId, DefKind, FloatKind, IntKind, TyArena, TyId, TyKind};
 
 use crate::ty::{Lc, TyClass, class_of, float_lit, fun_name, scalar_ty};
 
@@ -65,7 +65,7 @@ pub fn emit_module(
     let mut globals = String::new();
     for global in &tac.globals {
         let name = fun_name(&lc, global.def);
-        let storage_ty = if scalar_ty(lc.tys, global.ty) == "i8*" {
+        let storage_ty = if scalar_ty(lc.tys, lc.defs, global.ty) == "i8*" {
             "i8*"
         } else if contains_i128(&lc, global.ty) {
             "i128"
@@ -250,6 +250,12 @@ fn temp_max(fun: &FunBody) -> u32 {
                 Instr::LoadPtr { dst, ptr, .. } => {
                     max = max.max(dst.0).max(ptr.0);
                 }
+                Instr::OffsetPtr { dst, base, .. } => {
+                    max = max.max(dst.0).max(base.0);
+                }
+                Instr::AllocClass { dst, .. } => {
+                    max = max.max(dst.0);
+                }
                 Instr::StorePtr { ptr, src, .. } => {
                     max = max.max(ptr.0);
                     see_op(src, &mut max);
@@ -290,7 +296,7 @@ fn classify(lc: &Lc, fun: &FunBody) -> Vec<Storage> {
     let mut ptr: Vec<Option<u32>> = vec![None; n];
     let mut wide: Vec<bool> = vec![false; n];
     for (t, ty) in &fun.params {
-        if class_of(lc.tys, *ty) == TyClass::Agg {
+        if class_of(lc.tys, lc.defs, *ty) == TyClass::Agg {
             ptr[t.0 as usize] = Some(scalar_slots(lc, *ty).max(1) as u32);
         }
         if contains_i128(lc, *ty) {
@@ -333,7 +339,11 @@ fn classify(lc: &Lc, fun: &FunBody) -> Vec<Storage> {
                         req[base.0 as usize] = req[base.0 as usize].max(*k as usize + 1);
                     }
                 }
-                Instr::AddrOf { .. } | Instr::LoadPtr { .. } | Instr::StorePtr { .. } => {}
+                Instr::AddrOf { .. }
+                | Instr::LoadPtr { .. }
+                | Instr::StorePtr { .. }
+                | Instr::OffsetPtr { .. }
+                | Instr::AllocClass { .. } => {}
                 Instr::LoadGlobal { dst, ty, .. } => mark(*dst, *ty, &mut wide),
                 Instr::StoreGlobal { src, ty, .. } => {
                     if let Operand::Temp(t) = src {
@@ -347,7 +357,7 @@ fn classify(lc: &Lc, fun: &FunBody) -> Vec<Storage> {
                 }
                 Instr::Call { dst, ty, .. } => {
                     if let Some(d) = dst
-                        && class_of(lc.tys, *ty) == TyClass::Agg
+                        && class_of(lc.tys, lc.defs, *ty) == TyClass::Agg
                     {
                         // 聚合返回值在调用方分配块并整体拷入：callee 的
                         // 返回值只是 callee 栈槽地址，直接持有会悬垂。
@@ -362,7 +372,7 @@ fn classify(lc: &Lc, fun: &FunBody) -> Vec<Storage> {
             ty,
         } = &b.term
         {
-            if class_of(lc.tys, *ty) == TyClass::Agg {
+            if class_of(lc.tys, lc.defs, *ty) == TyClass::Agg {
                 req[t.0 as usize] = req[t.0 as usize].max(scalar_slots(lc, *ty));
             }
             mark(*t, *ty, &mut wide);
@@ -417,7 +427,7 @@ impl<'e, 'l> FnEmit<'e, 'l> {
         };
         let n = st.slots();
         let i = self.op_val(idx, self.lc.tys.default_int);
-        let ity = scalar_ty(self.lc.tys, self.lc.tys.default_int);
+        let ity = scalar_ty(self.lc.tys, self.lc.defs, self.lc.tys.default_int);
         let gep = self.fresh();
         let _ = writeln!(
             self.out,
@@ -431,7 +441,7 @@ impl<'e, 'l> FnEmit<'e, 'l> {
     fn op_val(&mut self, op: &Operand, ty: TyId) -> String {
         match op {
             Operand::Temp(t) => {
-                if class_of(self.lc.tys, ty) == TyClass::Agg {
+                if class_of(self.lc.tys, self.lc.defs, ty) == TyClass::Agg {
                     // 聚合值 = 其块/指针的地址
                     match self.st[t.0 as usize] {
                         Storage::PtrCell(_) | Storage::WidePtrCell(_) => {
@@ -444,7 +454,7 @@ impl<'e, 'l> FnEmit<'e, 'l> {
                         _ => format!("%t{}.slot", t.0),
                     }
                 } else {
-                    let lty = scalar_ty(self.lc.tys, ty);
+                    let lty = scalar_ty(self.lc.tys, self.lc.defs, ty);
                     let v = self.fresh();
                     let _ = writeln!(self.out, "  {} = load {}, ptr %t{}.slot", v, lty, t.0);
                     v
@@ -456,14 +466,29 @@ impl<'e, 'l> FnEmit<'e, 'l> {
 
     fn const_val(&mut self, c: &Const, ty: TyId) -> String {
         match c {
-            Const::Int(v) => format!("{v}"),
+            Const::Int(v) => {
+                // M4 slice 4a: ptr-typed target (class value | nullable class payload) 0 renders null
+                if *v == 0 && scalar_ty(self.lc.tys, self.lc.defs, ty) == "ptr" {
+                    "null".to_string()
+                } else {
+                    format!("{v}")
+                }
+            }
             Const::Float(v) => float_lit(
                 *v,
                 matches!(self.lc.tys.kind(ty), TyKind::Float(FloatKind::F32)),
             ),
             Const::Bool(b) => format!("{b}"),
             // 裸指针的 null = LLVM null（整数 0 作 ptr 操作数非法）
-            Const::Null if matches!(self.lc.tys.kind(ty), TyKind::Pointer { .. }) => "null".into(),
+            Const::Null
+                if matches!(self.lc.tys.kind(ty), TyKind::Pointer { .. })
+                    || matches!(
+                        self.lc.tys.kind(ty),
+                        TyKind::Named(d, _) if matches!(self.lc.defs.get(*d).kind, DefKind::Class)
+                    ) =>
+            {
+                "null".into()
+            }
             Const::Null => "0".into(),
             Const::Unit => "0".into(),
             Const::Str(sym) => {
@@ -482,7 +507,7 @@ impl<'e, 'l> FnEmit<'e, 'l> {
                 let _ = writeln!(self.out, "  store ptr {}, ptr %t{}.slot", val, t.0);
             }
             _ => {
-                let lty = scalar_ty(self.lc.tys, ty);
+                let lty = scalar_ty(self.lc.tys, self.lc.defs, ty);
                 let _ = writeln!(self.out, "  store {} {}, ptr %t{}.slot", lty, val, t.0);
             }
         }
@@ -507,19 +532,19 @@ fn emit_fun(lc: &Lc, g: &mut Global, fun: &FunBody, body: &mut String) {
 
 fn emit_fun_named(lc: &Lc, g: &mut Global, fun: &FunBody, body: &mut String, name: String) {
     let st = classify(lc, fun);
-    let ret_ty = if class_of(lc.tys, fun.ret) == TyClass::Agg {
+    let ret_ty = if class_of(lc.tys, lc.defs, fun.ret) == TyClass::Agg {
         "ptr".to_string()
     } else {
-        scalar_ty(lc.tys, fun.ret)
+        scalar_ty(lc.tys, lc.defs, fun.ret)
     };
     let params: Vec<String> = fun
         .params
         .iter()
         .map(|(t, ty)| {
-            let pty = if class_of(lc.tys, *ty) == TyClass::Agg {
+            let pty = if class_of(lc.tys, lc.defs, *ty) == TyClass::Agg {
                 "ptr".to_string()
             } else {
-                scalar_ty(lc.tys, *ty)
+                scalar_ty(lc.tys, lc.defs, *ty)
             };
             format!("{} %t{}", pty, t.0)
         })
@@ -563,10 +588,10 @@ fn emit_fun_named(lc: &Lc, g: &mut Global, fun: &FunBody, body: &mut String, nam
     }
     // 形参是 %tN 值；存入各自槽
     for (t, ty) in &fun.params {
-        if class_of(lc.tys, *ty) == TyClass::Agg {
+        if class_of(lc.tys, lc.defs, *ty) == TyClass::Agg {
             let _ = writeln!(e.out, "  store ptr %t{}, ptr %t{}.slot", t.0, t.0);
         } else {
-            let lty = scalar_ty(lc.tys, *ty);
+            let lty = scalar_ty(lc.tys, lc.defs, *ty);
             let _ = writeln!(e.out, "  store {} %t{}, ptr %t{}.slot", lty, t.0, t.0);
         }
     }
@@ -613,7 +638,7 @@ fn emit_panic(e: &mut FnEmit, code: i8) {
 }
 
 fn emit_checked_arith(e: &mut FnEmit, dst: TempId, op: BinOp, ty: TyId, lv: &str, rv: &str) {
-    let tname = scalar_ty(e.lc.tys, ty);
+    let tname = scalar_ty(e.lc.tys, e.lc.defs, ty);
     let intrinsic = match op {
         BinOp::Add => "llvm.sadd.with.overflow",
         BinOp::Sub => "llvm.ssub.with.overflow",
@@ -657,7 +682,7 @@ fn emit_checked_arith(e: &mut FnEmit, dst: TempId, op: BinOp, ty: TyId, lv: &str
 /// M1（Q5）：受检整型除法——sdiv/srem 前显式守卫除零与 INT_MIN ÷ -1
 /// （LLVM 对两者是 poison/硬件异常，统一为可读的 overflow panic）
 fn emit_checked_div(e: &mut FnEmit, dst: TempId, op: BinOp, ty: TyId, lv: &str, rv: &str) {
-    let tname = scalar_ty(e.lc.tys, ty);
+    let tname = scalar_ty(e.lc.tys, e.lc.defs, ty);
     e.g.runtime_decls
         .entry("starry_overflow_panic".into())
         .or_insert(("void".into(), "i8, ptr".into()));
@@ -719,7 +744,7 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                 emit_checked_div(e, *dst, *op, *ty, &lv, &rv);
                 return;
             }
-            let tname = scalar_ty(e.lc.tys, *ty);
+            let tname = scalar_ty(e.lc.tys, e.lc.defs, *ty);
             let mnemonic = match op {
                 BinOp::Add => {
                     if is_float {
@@ -830,14 +855,19 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
             match op {
                 UnOp::Neg => {
                     if matches!(e.lc.tys.kind(*ty), TyKind::Float(_)) {
-                        let _ =
-                            writeln!(e.out, "  {} = fneg {} {}", v, scalar_ty(e.lc.tys, *ty), av);
+                        let _ = writeln!(
+                            e.out,
+                            "  {} = fneg {} {}",
+                            v,
+                            scalar_ty(e.lc.tys, e.lc.defs, *ty),
+                            av
+                        );
                     } else {
                         let _ = writeln!(
                             e.out,
                             "  {} = sub {} 0, {}",
                             v,
-                            scalar_ty(e.lc.tys, *ty),
+                            scalar_ty(e.lc.tys, e.lc.defs, *ty),
                             av
                         );
                     }
@@ -850,7 +880,7 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                         e.out,
                         "  {} = xor {} {}, -1",
                         v,
-                        scalar_ty(e.lc.tys, *ty),
+                        scalar_ty(e.lc.tys, e.lc.defs, *ty),
                         av
                     );
                 }
@@ -875,15 +905,15 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                         "  {} = {} {} {} to {}",
                         v,
                         k,
-                        scalar_ty(e.lc.tys, *from),
+                        scalar_ty(e.lc.tys, e.lc.defs, *from),
                         av,
-                        scalar_ty(e.lc.tys, *ty)
+                        scalar_ty(e.lc.tys, e.lc.defs, *ty)
                     );
                 }
             }
             e.store_val(*dst, *ty, v);
         }
-        Instr::Copy { dst, src, ty } if class_of(e.lc.tys, *ty) == TyClass::Scalar => {
+        Instr::Copy { dst, src, ty } if class_of(e.lc.tys, e.lc.defs, *ty) == TyClass::Scalar => {
             let v = e.op_val(src, *ty);
             e.store_val(*dst, *ty, v);
         }
@@ -925,7 +955,7 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
         }
         // M2 取址：base 的 alloca 地址本身就是 ptr 值
         Instr::AddrOf { dst, base, ty } => {
-            let lty = scalar_ty(e.lc.tys, *ty);
+            let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
             let _ = writeln!(
                 e.out,
                 "  store {} %t{}.slot, ptr %t{}.slot",
@@ -936,7 +966,7 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
         Instr::LoadPtr { dst, ptr, ty } => {
             let p = e.fresh();
             let _ = writeln!(e.out, "  {} = load ptr, ptr %t{}.slot", p, ptr.0);
-            let lty = scalar_ty(e.lc.tys, *ty);
+            let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
             let v = e.fresh();
             let _ = writeln!(e.out, "  {} = load {}, ptr {}", v, lty, p);
             let _ = writeln!(e.out, "  store {} {}, ptr %t{}.slot", lty, v, dst.0);
@@ -945,13 +975,45 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
         Instr::StorePtr { ptr, src, ty } => {
             let p = e.fresh();
             let _ = writeln!(e.out, "  {} = load ptr, ptr %t{}.slot", p, ptr.0);
-            let lty = scalar_ty(e.lc.tys, *ty);
+            let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
             let v = e.op_val(src, *ty);
             let _ = writeln!(e.out, "  store {} {}, ptr {}", lty, v, p);
         }
+        // M4 slice 2b: class alloc -- deinit fn ptr (or null) goes to header meta
+        Instr::AllocClass {
+            dst, bytes, deinit, ..
+        } => {
+            e.g.runtime_decls
+                .entry("starry_alloc_object".into())
+                .or_insert(("ptr".into(), "i64, ptr".into()));
+            let d = match deinit {
+                Some(d) => fun_name(e.lc, *d),
+                None => "null".to_string(),
+            };
+            let v = e.fresh();
+            let _ = writeln!(
+                e.out,
+                "  {} = call ptr @starry_alloc_object(i64 {}, ptr {})",
+                v, bytes, d
+            );
+            let _ = writeln!(e.out, "  store ptr {}, ptr %t{}.slot", v, dst.0);
+        } // M4 slice 1: object field addressing (GEP i8, const byte offset)
+        Instr::OffsetPtr {
+            dst, base, bytes, ..
+        } => {
+            let p = e.fresh();
+            let _ = writeln!(e.out, "  {} = load ptr, ptr %t{}.slot", p, base.0);
+            let v = e.fresh();
+            let _ = writeln!(
+                e.out,
+                "  {} = getelementptr i8, ptr {}, i64 {}",
+                v, p, bytes
+            );
+            let _ = writeln!(e.out, "  store ptr {}, ptr %t{}.slot", v, dst.0);
+        }
         Instr::Load { dst, base, idx, ty } => {
             let addr = e.slot_addr(*base, idx);
-            let lty = scalar_ty(e.lc.tys, *ty);
+            let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
             let v = e.fresh();
             let _ = writeln!(e.out, "  {} = load {}, ptr {}", v, lty, addr);
             e.store_val(*dst, *ty, v);
@@ -959,11 +1021,11 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
         Instr::Store { base, idx, src, ty } => {
             let addr = e.slot_addr(*base, idx);
             let v = e.op_val(src, *ty);
-            let lty = scalar_ty(e.lc.tys, *ty);
+            let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
             let _ = writeln!(e.out, "  store {} {}, ptr {}", lty, v, addr);
         }
         Instr::LoadGlobal { dst, global, ty } => {
-            let lty = scalar_ty(e.lc.tys, *ty);
+            let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
             let v = e.fresh();
             let _ = writeln!(
                 e.out,
@@ -976,7 +1038,7 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
         }
         Instr::StoreGlobal { global, src, ty } => {
             let v = e.op_val(src, *ty);
-            let lty = scalar_ty(e.lc.tys, *ty);
+            let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
             let _ = writeln!(
                 e.out,
                 "  store {} {}, ptr {}",
@@ -989,10 +1051,10 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
             // 纯声明：alloca 已在入口按分类发出
         }
         Instr::Param { a, ty } => {
-            let pty = if class_of(e.lc.tys, *ty) == TyClass::Agg {
+            let pty = if class_of(e.lc.tys, e.lc.defs, *ty) == TyClass::Agg {
                 "ptr".to_string()
             } else {
-                scalar_ty(e.lc.tys, *ty)
+                scalar_ty(e.lc.tys, e.lc.defs, *ty)
             };
             let v = e.op_val(a, *ty);
             pending.push((v, pty));
@@ -1005,30 +1067,30 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
             let mut is_str_eq = false;
             let (callee_name, ret) = match callee {
                 Callee::Def(d) => {
-                    let ret = if class_of(e.lc.tys, *ty) == TyClass::Agg {
+                    let ret = if class_of(e.lc.tys, e.lc.defs, *ty) == TyClass::Agg {
                         "ptr".to_string()
                     } else {
-                        scalar_ty(e.lc.tys, *ty)
+                        scalar_ty(e.lc.tys, e.lc.defs, *ty)
                     };
                     (fun_name(e.lc, *d), ret)
                 }
                 Callee::Extern(d) => {
                     let (name, ret_ty, params) = {
                         let def = e.lc.defs.get(*d);
-                        let ret_ty = if class_of(e.lc.tys, def.sig.ret) == TyClass::Agg {
+                        let ret_ty = if class_of(e.lc.tys, e.lc.defs, def.sig.ret) == TyClass::Agg {
                             "ptr".to_string()
                         } else {
-                            scalar_ty(e.lc.tys, def.sig.ret)
+                            scalar_ty(e.lc.tys, e.lc.defs, def.sig.ret)
                         };
                         let params: Vec<String> = def
                             .sig
                             .params
                             .iter()
                             .map(|(_, pty)| {
-                                if class_of(e.lc.tys, *pty) == TyClass::Agg {
+                                if class_of(e.lc.tys, e.lc.defs, *pty) == TyClass::Agg {
                                     "ptr".to_string()
                                 } else {
-                                    scalar_ty(e.lc.tys, *pty)
+                                    scalar_ty(e.lc.tys, e.lc.defs, *pty)
                                 }
                             })
                             .collect();
@@ -1112,6 +1174,36 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                         (format!("@{name}"), "void".to_string())
                     }
                 }
+                Callee::Runtime(RuntimeFn::Retain) => {
+                    e.g.runtime_decls
+                        .entry("starry_retain".into())
+                        .or_insert(("ptr".into(), "ptr".into()));
+                    ("@starry_retain".to_string(), "ptr".to_string())
+                }
+                Callee::Runtime(RuntimeFn::Release) => {
+                    e.g.runtime_decls
+                        .entry("starry_release".into())
+                        .or_insert(("void".into(), "ptr".into()));
+                    ("@starry_release".to_string(), "void".to_string())
+                }
+                Callee::Runtime(RuntimeFn::WeakRetain) => {
+                    e.g.runtime_decls
+                        .entry("starry_weak_retain".into())
+                        .or_insert(("ptr".into(), "ptr".into()));
+                    ("@starry_weak_retain".to_string(), "ptr".to_string())
+                }
+                Callee::Runtime(RuntimeFn::WeakDrop) => {
+                    e.g.runtime_decls
+                        .entry("starry_weak_drop".into())
+                        .or_insert(("void".into(), "ptr".into()));
+                    ("@starry_weak_drop".to_string(), "void".to_string())
+                }
+                Callee::Runtime(RuntimeFn::WeakUpgrade) => {
+                    e.g.runtime_decls
+                        .entry("starry_weak_upgrade".into())
+                        .or_insert(("ptr".into(), "ptr".into()));
+                    ("@starry_weak_upgrade".to_string(), "ptr".to_string())
+                }
                 Callee::Runtime(RuntimeFn::PrintChar) => {
                     e.g.runtime_decls
                         .entry("starry_print_char".into())
@@ -1138,7 +1230,7 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                         e.store_val(*d, e.lc.tys.bool_, c);
                     }
                 } else if let Some(d) = dst {
-                    if class_of(e.lc.tys, *ty) == TyClass::Agg {
+                    if class_of(e.lc.tys, e.lc.defs, *ty) == TyClass::Agg {
                         // 聚合返回值：callee 栈槽 → 调用方块（逐槽拷贝）
                         let n = scalar_slots(e.lc, *ty).max(1);
                         let elem = if contains_i128(e.lc, *ty) {
@@ -1257,12 +1349,17 @@ fn emit_term(e: &mut FnEmit, term: &Term) {
         }
         Term::Ret { value, ty } => match value {
             Some(v) => {
-                if class_of(e.lc.tys, *ty) == TyClass::Agg {
+                if class_of(e.lc.tys, e.lc.defs, *ty) == TyClass::Agg {
                     let p = e.op_val(v, *ty);
                     let _ = writeln!(e.out, "  ret ptr {}", p);
                 } else {
                     let val = e.op_val(v, *ty);
-                    let _ = writeln!(e.out, "  ret {} {}", scalar_ty(e.lc.tys, *ty), val);
+                    let _ = writeln!(
+                        e.out,
+                        "  ret {} {}",
+                        scalar_ty(e.lc.tys, e.lc.defs, *ty),
+                        val
+                    );
                 }
             }
             None => {
@@ -1281,21 +1378,21 @@ fn emit_main_wrapper(lc: &Lc, tac: &TacOutput, body: &mut String) {
         if lc.interner.resolve(def.name) != "main" || !fun.params.is_empty() {
             continue;
         }
-        let ret = if class_of(lc.tys, fun.ret) == TyClass::Agg {
+        let ret = if class_of(lc.tys, lc.defs, fun.ret) == TyClass::Agg {
             "ptr".to_string()
         } else {
-            scalar_ty(lc.tys, fun.ret)
+            scalar_ty(lc.tys, lc.defs, fun.ret)
         };
         let _ = writeln!(body, "define i32 @main() {{");
         let mut next_global_temp = 0usize;
         for global in &tac.globals {
             if global.init.is_some() {
-                let gty = if scalar_ty(lc.tys, global.ty) == "i8*" {
+                let gty = if scalar_ty(lc.tys, lc.defs, global.ty) == "i8*" {
                     "i8*".to_string()
                 } else if contains_i128(lc, global.ty) {
                     "i128".to_string()
                 } else {
-                    scalar_ty(lc.tys, global.ty)
+                    scalar_ty(lc.tys, lc.defs, global.ty)
                 };
                 let init = format!("@__starry_init_global.{}", global.def.0);
                 let v = format!("%u{next_global_temp}");
@@ -1318,7 +1415,7 @@ fn emit_main_wrapper(lc: &Lc, tac: &TacOutput, body: &mut String) {
                 let _ = writeln!(body, "  ret i32 0");
             }
             TyKind::Int(_) => {
-                let sty = scalar_ty(lc.tys, fun.ret);
+                let sty = scalar_ty(lc.tys, lc.defs, fun.ret);
                 let r = format!("%u{next_global_temp}");
                 next_global_temp += 1;
                 let _ = writeln!(body, "  {} = call {} {}()", r, sty, fun_name(lc, fun.def));

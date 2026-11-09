@@ -6,6 +6,7 @@ typedef void *HANDLE;
 
 __declspec(dllimport) HANDLE GetProcessHeap(void);
 __declspec(dllimport) void *HeapAlloc(HANDLE, DWORD, SIZE_T);
+__declspec(dllimport) int HeapFree(HANDLE, DWORD, void *);
 __declspec(dllimport) HANDLE GetStdHandle(DWORD);
 __declspec(dllimport) int WriteFile(HANDLE, const void *, DWORD, DWORD *, void *);
 __declspec(dllimport) void ExitProcess(unsigned int);
@@ -286,4 +287,65 @@ void starry_overflow_panic(signed char op, const char *fun) {
     write_err(fun);
     write_err("\n");
     ExitProcess(134u);
+}
+/* M4 slice 1：class 对象 + ARC 头（R3 线程本地非原子）。
+ * header 布局定案 24B：strong / weak / meta(deinit 派发，slice 2 启用)。
+ * payload 紧跟 header；字段槽全 i64（i128 class 字段 slice 1 拒收）。 */
+typedef struct StarryArcHdr {
+    long long strong;
+    long long weak;
+    void *meta;
+} StarryArcHdr;
+
+void *starry_alloc_object(unsigned long long payload_bytes, void (*deinit)(void *)) {
+    StarryArcHdr *h = (StarryArcHdr *)HeapAlloc(GetProcessHeap(), 0, sizeof(StarryArcHdr) + payload_bytes);
+    h->strong = 1;
+    h->weak = 0;
+    h->meta = (void *)deinit;
+    return h + 1;
+}
+
+void *starry_retain(void *p) {
+    if (p) ((StarryArcHdr *)p - 1)->strong++;
+    return p;
+}
+
+void starry_release(void *p) {
+    StarryArcHdr *h;
+    if (!p) return;
+    h = (StarryArcHdr *)p - 1;
+    if (--h->strong == 0) {
+        /* M4 slice 2b：meta = deinit 函数指针（构造时塞入）；末引用先
+         * 回调再释放（weak 侧 slice 3：weak>0 时 header 延迟释放） */
+        if (h->meta) (*(void (*)(void *))h->meta)(p);
+        if (h->weak == 0) HeapFree(GetProcessHeap(), 0, h);
+    }
+}
+
+/* M4 slice 3：weak var——weak++ / weak--（strong==0 && weak==0 时释放） */
+/* M4 slice 4b (Plan C): weak upgrade——strong>0 时 strong++ 并返回对象；
+ * strong==0（已释放）返回 null；不碰 weak 计数。读取语义 = ?P（+1 临时值，
+ * 绑定/返回转移，语句末 release；参照 Clang ARC objc_loadWeakRetained）。 */
+void *starry_weak_upgrade(void *p) {
+    StarryArcHdr *h;
+    if (!p) return 0;
+    h = (StarryArcHdr *)p - 1;
+    if (h->strong == 0) return 0;
+    h->strong++;
+    return p;
+}
+
+void *starry_weak_retain(void *p) {
+    StarryArcHdr *h;
+    if (!p) return p;
+    h = (StarryArcHdr *)p - 1;
+    h->weak++;
+    return p;
+}
+
+void starry_weak_drop(void *p) {
+    StarryArcHdr *h;
+    if (!p) return;
+    h = (StarryArcHdr *)p - 1;
+    if (--h->weak == 0 && h->strong == 0) HeapFree(GetProcessHeap(), 0, h);
 }

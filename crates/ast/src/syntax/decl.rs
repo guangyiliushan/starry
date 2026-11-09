@@ -170,6 +170,8 @@ pub enum ClassMember {
     Constructor(Box<ConstructorDecl>),
     Accessor(Box<AccessorDecl>),
     Init(Block),
+    /// M4 slice 2b：`deinit { }`——末引用释放时经 header meta 派发（R4）
+    Deinit(Block),
 }
 
 #[derive(Debug, Clone)]

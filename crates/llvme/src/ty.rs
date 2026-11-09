@@ -9,7 +9,7 @@
 
 use ast::interner::Interner;
 use irc::layout::LayoutView;
-use sem::{FloatKind, IntKind, TyArena, TyId, TyKind};
+use sem::{DefArena, DefKind, FloatKind, IntKind, TyArena, TyId, TyKind};
 
 /// llvme 侧的 LayoutView 实现（irc::layout 的跨 crate 消费端）
 pub struct Lc<'a> {
@@ -33,7 +33,7 @@ impl<'a> LayoutView for Lc<'a> {
 }
 
 /// 标量的 LLVM 类型名；聚合调用点用 `agg_ty`
-pub fn scalar_ty(tys: &TyArena, ty: TyId) -> String {
+pub fn scalar_ty(tys: &TyArena, defs: &DefArena, ty: TyId) -> String {
     match tys.kind(ty) {
         TyKind::Int(IntKind::I4) => "i4".into(),
         TyKind::Int(IntKind::I8) => "i8".into(),
@@ -49,6 +49,8 @@ pub fn scalar_ty(tys: &TyArena, ty: TyId) -> String {
         // 引用/裸指针值 = 地址；不透明指针风格（LLVM 15+）
         TyKind::Ref { .. } => "ptr".into(),
         TyKind::Pointer { .. } => "ptr".into(),
+        // M4 slice 1: class value = object ptr (header lives on the heap)
+        TyKind::Named(def, _) if matches!(defs.get(*def).kind, DefKind::Class) => "ptr".into(),
         TyKind::Unit => "void".into(),
         TyKind::Null => "i64".into(),
         // 聚合出现在标量位 = 契约破缺（irc 已门禁），兜底 i64
@@ -63,7 +65,7 @@ pub enum TyClass {
     Agg,
 }
 
-pub fn class_of(tys: &TyArena, ty: TyId) -> TyClass {
+pub fn class_of(tys: &TyArena, defs: &DefArena, ty: TyId) -> TyClass {
     match tys.kind(ty) {
         TyKind::Int(_)
         | TyKind::Float(_)
@@ -74,6 +76,8 @@ pub fn class_of(tys: &TyArena, ty: TyId) -> TyClass {
         | TyKind::Null
         | TyKind::Ref { .. }
         | TyKind::Pointer { .. } => TyClass::Scalar,
+        // M4 slice 1: class value = scalarized object ptr (not inline agg)
+        TyKind::Named(def, _) if matches!(defs.get(*def).kind, DefKind::Class) => TyClass::Scalar,
         _ => TyClass::Agg,
     }
 }

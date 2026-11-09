@@ -743,3 +743,151 @@ fn wrapping_operators_wrap_at_runtime() {
     };
     assert_eq!(out, "-9223372036854775808\n0\n");
 }
+
+#[test]
+fn class_arc_end_to_end_native() {
+    // M4 slice 1：class 构造/字段/复制 retain/隐式 release 全链路原生跑
+    let Some(out) = build_and_run(
+        "class_arc",
+        "class P(val x: int, var y: int)\nfun main() {\n    val a = P(1, 2)\n    val b = a\n    b.y = 9\n    print(a.x + b.y)\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "10\n");
+}
+
+#[test]
+fn class_reference_equality_is_pointer_compare() {
+    // M4 slice 2a：引用相等 = 指针比较——同对象 true，同值不同对象 false
+    let Some(out) = build_and_run(
+        "class_eq",
+        "class P(val x: int)\nfun main() {\n    val a = P(1)\n    val b = a\n    val c = P(1)\n    print(a == b)\n    print(a == c)\n    print(a != c)\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "true\nfalse\ntrue\n");
+}
+
+#[test]
+fn class_methods_and_deinit_end_to_end() {
+    // M4 slice 2b：方法静态分派 + 共享引用 + 隐式 release 触发 deinit
+    let Some(out) = build_and_run(
+        "class_methods",
+        "class Counter(var count: int) {\n    fun bump() : int {\n        self.count += 1\n        return self.count\n    }\n    deinit {\n        print(self.count)\n    }\n}\nfun main() {\n    val a = Counter(10)\n    print(a.bump())\n    print(a.bump())\n    val b = a\n    print(b.bump())\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "11\n12\n13\n13\n");
+}
+
+#[test]
+fn weak_var_does_not_extend_lifetime() {
+    // M4 slice 3：weak 不延长生命周期——两对象的 deinit 都触发（若错为
+    // retain，对象永不释放、deinit 不打印）。drop 逆序：b 先（2），a 后（1）
+    let Some(out) = build_and_run(
+        "class_weak",
+        "class Node(var name: int) {\n    deinit {\n        print(self.name)\n    }\n}\nfun main() {\n    val a = Node(1)\n    val b = Node(2)\n    weak var wa = a\n    weak var wb = b\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "2\n1\n");
+}
+
+#[test]
+fn nullable_class_ownership_end_to_end() {
+    // M4 slice 4a: nullable class bindings share class ownership discipline.
+    // pa retains (deinit of the shared object fires once at if-exit);
+    // ctor-into-nullable skips retain (deinit fires once at main exit);
+    // null literal init retains nothing (release of null is a runtime no-op).
+    let Some(out) = build_and_run(
+        "class_nullable_own",
+        "class Point(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun main(): int {\n    if (true) {\n        val a = Point(1)\n        val pa: Point? = a\n        print(pa!!.x)\n    }\n    print(99)\n    val pn: Point? = Point(3)\n    print(98)\n    val pnull: Point? = null\n    print(97)\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "1\n1\n99\n98\n97\n3\n");
+}
+
+#[test]
+fn nullable_class_safe_ops_end_to_end() {
+    // M4 slice 4a: == null / != null, !!, ?. (payload = object ptr),
+    // and ?? elvis over nullable class.
+    let Some(out) = build_and_run(
+        "class_nullable_ops",
+        "class Point(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun main(): int {\n    val a = Point(5)\n    val pa: Point? = a\n    val v: int? = pa?.x\n    print(v!!)\n    val pn: Point? = null\n    val d: int? = pn?.x\n    if (d == null) {\n        print(88)\n    }\n    if (pa != null) {\n        print(77)\n    }\n    val q = pa ?? Point(7)\n    print(q.x)\n    val r = pn ?? Point(9)\n    print(r.x)\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "5\n88\n77\n5\n9\n9\n5\n");
+}
+
+#[test]
+fn class_params_and_returns_end_to_end() {
+    // M4 slice 4c: +0 borrowed params, +1 owned returns. deinit fires
+    // exactly once per object: a (main binding), b (+1 return binding),
+    // c (ctor-into-param binding inside callee, released at callee exit).
+    let Some(out) = build_and_run(
+        "class_params_returns",
+        "class P(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun getx(p: P): int {\n    return p.x\n}\nfun make(v: int): P {\n    return P(v)\n}\nfun twice(p: P): int {\n    val local = p\n    return local.x + p.x\n}\nfun main(): int {\n    val a = P(1)\n    print(getx(a))\n    val b = make(2)\n    print(b.x)\n    print(twice(a))\n    print(a.x)\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "1\n2\n2\n1\n2\n1\n");
+}
+
+#[test]
+fn nullable_class_params_returns_end_to_end() {
+    // M4 slice 4c: ?P params and returns over the flag+payload ABI.
+    let Some(out) = build_and_run(
+        "class_nullable_params_returns",
+        "class P(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun maybe(v: int): P? {\n    if (v > 0) {\n        return P(v)\n    }\n    return null\n}\nfun readx(p: P?): int {\n    if (p != null) {\n        return p!!.x\n    }\n    return 0\n}\nfun main(): int {\n    val a = maybe(5)\n    print(readx(a))\n    val b = maybe(-1)\n    print(readx(b))\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "5\n0\n5\n");
+}
+
+#[test]
+fn class_reassignment_ownership_end_to_end() {
+    // M4 slice 4d: reassignment releases the old payload and retains a
+    // borrowed rhs, keeping the one-reference-per-var invariant.
+    // Deinit order: 1 (b = a releases P(1)), 2 (b = P(3) releases P(2)),
+    // 3 (main exit). Self-assignment is a no-op.
+    let Some(out) = build_and_run(
+        "class_reassign",
+        "class P(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun main(): int {\n    var b = P(1)\n    if (true) {\n        val a = P(2)\n        b = a\n        print(b.x)\n    }\n    print(b.x)\n    b = P(3)\n    b = b\n    print(b.x)\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "1\n2\n2\n2\n3\n3\n");
+}
+
+#[test]
+fn plus1_return_and_temporaries_end_to_end() {
+    // M4 slice 4b (Plan C): unified +1 returns and full-expression temp
+    // release. Bare ctor call and member access on a temp both fire
+    // deinit right after their statement; the id() passthrough retains
+    // the borrowed param so the caller-side object stays alive.
+    let Some(out) = build_and_run(
+        "class_plus1_temps",
+        "class Bare(val v: int) {\n    deinit {\n        print(self.v)\n    }\n}\nfun make(): Bare {\n    return Bare(7)\n}\nfun id(p: Bare): Bare {\n    return p\n}\nfun main(): int {\n    make()\n    print(1)\n    print(make().v)\n    val a = Bare(3)\n    if (true) {\n        val b = id(a)\n        print(b.v)\n    }\n    print(a.v)\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "7\n1\n7\n7\n3\n3\n3\n");
+}
+
+#[test]
+fn weak_upgrade_end_to_end() {
+    // M4 slice 4b (Plan C): weak read = upgrade to ?P. Alive target reads
+    // work via !!/?. ??; a ctor-initialized weak var releases at the
+    // statement end (weak holds no strong ref), so upgrade yields null.
+    // Every object deinits exactly once (count balance).
+    let Some(out) = build_and_run(
+        "class_weak_upgrade",
+        "class P(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun main(): int {\n    var i = 0\n    while i < 100000 {\n        weak var w = P(i)\n        val t = w\n        if (t != null) {\n            print(t!!.x)\n        }\n        i += 100000\n    }\n    val a = P(1)\n    weak var wa = a\n    val b = P(2)\n    weak var wb = b\n    print(wa!!.x)\n    print(wb!!.x)\n    val na = wa\n    print(na!!.x)\n    val v: int? = wa?.x\n    print(v!!)\n    val fb = wa ?? P(5)\n    print(fb.x)\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "0\n1\n2\n1\n1\n1\n2\n1\n");
+}

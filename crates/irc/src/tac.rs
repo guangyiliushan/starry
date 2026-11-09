@@ -96,6 +96,16 @@ pub enum RuntimeFn {
     StrConcat,
     /// (string, string) → bool（内容比较；`==`/`!=` 与字符串模式共用）
     StrEq,
+    /// M4 slice 1: ARC retain (ptr -> ptr)
+    Retain,
+    /// M4 slice 1: ARC release (ptr -> void; frees on last)
+    Release,
+    /// M4 slice 3: ARC weak retain (ptr -> ptr; weak++)
+    WeakRetain,
+    /// M4 slice 3: ARC weak drop (ptr -> void; weak--, frees when both 0)
+    WeakDrop,
+    /// M4 slice 4b (Plan C): weak upgrade (ptr -> ptr|null; strong++ if alive)
+    WeakUpgrade,
     /// print(标量)：源类型由前置 Param 指令的 ty 携带，返回 unit
     Print,
     /// print(char)：按字符编码写出
@@ -164,6 +174,21 @@ pub enum Instr {
     StorePtr {
         ptr: TempId,
         src: Operand,
+        ty: TyId,
+    },
+    /// M4 slice 2b: class object alloc (payload bytes + optional deinit fn ptr)
+    AllocClass {
+        dst: TempId,
+        bytes: i64,
+        deinit: Option<DefId>,
+        ty: TyId,
+    },
+    /// M4 slice 1: field addressing inside an object: dst = base + bytes (GEP i8).
+    /// class payload follows the 24B ARC header; bytes = 24 + slot*8
+    OffsetPtr {
+        dst: TempId,
+        base: TempId,
+        bytes: i64,
         ty: TyId,
     },
     /// 聚合基址声明：dst 是 count 个槽的块基址。当前由数组填充
@@ -465,6 +490,20 @@ impl TacOutput {
                 op_text(src, interner, out);
                 let _ = writeln!(out);
             }
+            Instr::AllocClass {
+                dst, bytes, deinit, ..
+            } => {
+                let _ = write!(out, "%t{} = allocclass {}", dst.0, bytes);
+                if let Some(d) = deinit {
+                    let _ = write!(out, " deinit.{}", d.0);
+                }
+                let _ = writeln!(out);
+            }
+            Instr::OffsetPtr {
+                dst, base, bytes, ..
+            } => {
+                let _ = writeln!(out, "%t{} = offsetptr %t{}, {}", dst.0, base.0, bytes);
+            }
             Instr::Slot { dst, count } => {
                 let _ = write!(out, "%t{} = slot [{}]", dst.0, count);
             }
@@ -488,6 +527,11 @@ impl TacOutput {
                     Callee::Runtime(RuntimeFn::StrEq) => "starry_str_eq".to_string(),
                     Callee::Runtime(RuntimeFn::Print) => "starry_print".to_string(),
                     Callee::Runtime(RuntimeFn::PrintChar) => "starry_print_char".to_string(),
+                    Callee::Runtime(RuntimeFn::Retain) => "starry_retain".to_string(),
+                    Callee::Runtime(RuntimeFn::Release) => "starry_release".to_string(),
+                    Callee::Runtime(RuntimeFn::WeakRetain) => "starry_weak_retain".to_string(),
+                    Callee::Runtime(RuntimeFn::WeakDrop) => "starry_weak_drop".to_string(),
+                    Callee::Runtime(RuntimeFn::WeakUpgrade) => "starry_weak_upgrade".to_string(),
                 };
                 let _ = write!(
                     out,

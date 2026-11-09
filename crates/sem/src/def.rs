@@ -23,6 +23,8 @@ pub enum DefKind {
     Fun,
     LocalBinding {
         mutable: bool,
+        /// M4 slice 3：`weak var` 弱引用绑定（破循环；读取/重赋值 slice 4）
+        weak: bool,
     },
     Param,
     Struct,

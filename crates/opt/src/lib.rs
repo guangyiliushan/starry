@@ -366,6 +366,7 @@ fn copy_fun(fun: &mut FunBody) -> bool {
                 Instr::Un { a, .. } => subst(a, &map, &mut changed),
                 Instr::Copy { src, .. } => subst(src, &map, &mut changed),
                 Instr::Load { idx, .. } => subst(idx, &map, &mut changed),
+                Instr::OffsetPtr { .. } | Instr::AllocClass { .. } => {}
                 Instr::Store { idx, src, .. } => {
                     subst(idx, &map, &mut changed);
                     subst(src, &map, &mut changed);
@@ -564,6 +565,12 @@ fn dce_fun(fun: &mut FunBody) -> bool {
                 Instr::Load { base, idx, .. } => {
                     used.insert(*base);
                     mark(idx, &mut used);
+                }
+                Instr::OffsetPtr { base, .. } => {
+                    used.insert(*base);
+                }
+                Instr::AllocClass { dst, .. } => {
+                    used.insert(*dst);
                 }
                 Instr::Store { base, idx, src, .. } => {
                     used.insert(*base);

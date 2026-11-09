@@ -66,8 +66,7 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 
 | 特性 | 拒收点 | 备注 |
 |---|---|---|
-| class/ARC | sem | 声明即注册，单一诊断 |
-| trait/impl/aspect/provide | sem | 跳过清单 |
+| class/ARC（M4 切片 1–4b，Plan C 所有权闭环） | ✅ | 构造/字段/方法/deinit/weak var + upgrade 读取（?P）/可空 class/形参+0/返回+1 统一/重赋值所有权/语句级 +1 临时释放（`stmt_temps`，full-expression 纪律）；继承、二级构造后置 || trait/impl/aspect/provide | sem | 跳过清单 |
 | 泛型（fun 类型形参/调用实例化） | sem | 签名不 lower |
 | lambda 定型、方法调用、spawn/async/await、宏展开、grow | sem | 跳过清单 |
 | 指针 `*const T` / `*mut T`（T2 thin） | ✅ | D-007 / M2 已落地：类型+FFI+`&x`/`*p`+StorePtr；T2 checked pointer 后置 M10（Q7） |

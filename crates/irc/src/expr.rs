@@ -2,10 +2,10 @@
 //! 类型取自 expr_ty 侧表；隐式提升与显式 as 统一走 `coerce` 插 Conv
 //! （操作数类型均匀不变量，opt-notes）。
 
-use ast::syntax::expr::{CastKind, ExprKind, ExprWrap};
-use ast::syntax::node::{DiagCode, Span};
+use ast::syntax::expr::{CallArg, CastKind, ExprKind, ExprWrap};
+use ast::syntax::node::{DiagCode, NodeId, Span};
 use ast::token::{LiteralKind, OperatorKind};
-use sem::{DefKind, TyId, TyKind};
+use sem::{DefId, DefKind, TyId, TyKind};
 
 use crate::lower::{Ctx, Place};
 use crate::tac::{BinOp, Callee, Const, Instr, Operand, RuntimeFn, TempId, Term, UnOp};
@@ -22,7 +22,7 @@ pub(crate) fn lower_expr(ctx: &mut Ctx, e: &ExprWrap) -> Operand {
         ExprKind::Literal(kind) => literal(ctx, *kind, e.span),
         ExprKind::Bool(b) => Operand::Const(Const::Bool(*b)),
         ExprKind::Null => nullable_null(ctx, e),
-        ExprKind::Ident(name) => ident(ctx, *name, e.span),
+        ExprKind::Ident(name) => ident(ctx, *name, e.span, e.id),
         ExprKind::Path(path) => {
             let Some(last) = path.segments.last() else {
                 ctx.diag(e.span, "空路径穿透 parser 门禁（内部不变量破缺）");
@@ -36,8 +36,8 @@ pub(crate) fn lower_expr(ctx: &mut Ctx, e: &ExprWrap) -> Operand {
                 .map(|d| &ctx.sem.defs.get(d).kind)
             {
                 Some(DefKind::EnumVariant { index, .. }) => variant_value(ctx, e, *index),
-                _ if path.segments.len() == 1 => ident(ctx, last.name, e.span),
-                _ => ident(ctx, last.name, e.span),
+                _ if path.segments.len() == 1 => ident(ctx, last.name, e.span, e.id),
+                _ => ident(ctx, last.name, e.span, e.id),
             }
         }
         ExprKind::Binary { op, lhs, rhs } => binary(ctx, e, *op, lhs, rhs),
@@ -111,8 +111,38 @@ fn op_or_unit(ctx: &mut Ctx, op: Operand, ty: TyId) -> Operand {
 
 /// 标识符读取：Temp 直接用；Slot 标量发 Load，聚合逐槽拷贝出新基址
 /// （var 读取 = 快照语义，sem v1 全拷贝）
-fn ident(ctx: &mut Ctx, name: ast::interner::Symbol, span: Span) -> Operand {
+/// M4 slice 4b (Plan C): class or ?class (unified ownership predicate)
+pub(crate) fn classish_ty(ctx: &Ctx, ty: TyId) -> bool {
+    crate::layout::is_class(ctx, ty)
+        || matches!(ctx.sem.tys.kind(ty), TyKind::Nullable(inner) if crate::layout::is_class(ctx, *inner))
+}
+
+/// M4 slice 4b (Plan C): +1-origin expressions. Calls/null are always +1;
+/// ?? and if with a class result are normalized per-branch (borrowed
+/// branches retain) and therefore +1 as well.
+pub(crate) fn plus1_origin(ctx: &Ctx, e: &ExprWrap) -> bool {
+    match &e.kind {
+        ExprKind::Call { .. } => true,
+        ExprKind::Null => true,
+        ExprKind::Binary { op, .. } if *op == OperatorKind::QuestionQuestion => {
+            classish_ty(ctx, ctx.expr_ty(e))
+        }
+        ExprKind::If { .. } => classish_ty(ctx, ctx.expr_ty(e)),
+        _ => false,
+    }
+}
+
+fn ident(ctx: &mut Ctx, name: ast::interner::Symbol, span: Span, id: NodeId) -> Operand {
+    // M4 slice 4b (Plan C)：weak 绑定读取 = upgrade（sem 侧定型 ?P）——
+    // starry_weak_upgrade 得 +1 对象或 null，物化 flag+payload
+    let weak = ctx.sem.expr_def.get(id).is_some_and(|d| {
+        matches!(
+            ctx.sem.defs.get(*d).kind,
+            DefKind::LocalBinding { weak: true, .. }
+        )
+    });
     match ctx.lookup(name) {
+        Some((place, ty)) if weak => weak_upgrade_read(ctx, place, ty, span, id),
         Some((place, ty)) => read_place(ctx, place, ty, span),
         None => {
             if ctx.unsupported_globals.contains(&name) {
@@ -126,6 +156,56 @@ fn ident(ctx: &mut Ctx, name: ast::interner::Symbol, span: Span) -> Operand {
             Operand::Const(Const::Int(0))
         }
     }
+}
+
+/// M4 slice 4b (Plan C)：weak 读取 lowering——upgrade 得 +1 对象指针
+///（strong==0 则 null），物化为 ?P（flag = ptr != null）。结果是 +1
+/// 临时值：绑定/返回 take 转移，语句末 release（drain_stmt_temps）。
+fn weak_upgrade_read(ctx: &mut Ctx, place: Place, ty: TyId, span: Span, id: NodeId) -> Operand {
+    let obj = read_place(ctx, place, ty, span);
+    let Operand::Temp(obj_t) = obj else {
+        ctx.diag(
+            span,
+            "weak binding storage is not a temp (internal invariant)",
+        );
+        return Operand::Const(Const::Unit);
+    };
+    let u = ctx.temp();
+    ctx.emit(Instr::Param {
+        a: Operand::Temp(obj_t),
+        ty,
+    });
+    ctx.emit(Instr::Call {
+        dst: Some(u),
+        callee: Callee::Runtime(crate::tac::RuntimeFn::WeakUpgrade),
+        ty, // Call 的 ty = 返回类型（ptr），非 unit
+    });
+    // flag = (u != null)：Bin 的 ty 字段 = 操作数类型（class -> ptr 比较）
+    let flag = ctx.temp();
+    ctx.emit(Instr::Bin {
+        dst: flag,
+        op: BinOp::Ne,
+        l: Operand::Temp(u),
+        r: Operand::Const(Const::Null),
+        ty,
+    });
+    // sem 已把 weak 读取定型为 ?P（侧表取，TyArena 此处不可变）
+    let nullable_ty = ctx.sem.expr_ty.get(id).copied().unwrap_or(ty);
+    let out = ctx.temp();
+    ctx.emit(Instr::Store {
+        base: out,
+        idx: Operand::Const(Const::Int(0)),
+        src: Operand::Temp(flag),
+        ty: ctx.sem.tys.bool_,
+    });
+    ctx.emit(Instr::Store {
+        base: out,
+        idx: Operand::Const(Const::Int(1)),
+        src: Operand::Temp(u),
+        ty,
+    });
+    ctx.note_stmt_temp(out, nullable_ty);
+    Operand::Temp(out)
 }
 
 /// 读取值存放处为操作数：聚合 Slot → 逐槽拷贝出新基址（快照）
@@ -201,6 +281,105 @@ fn as_base(ctx: &mut Ctx, op: Operand, span: Span) -> TempId {
             ctx.temp()
         }
     }
+}
+
+/// M4 slice 1: class value = object pointer (scalarized; see layout::is_aggregate)
+pub(crate) fn is_class_ty(ctx: &Ctx, ty: TyId) -> bool {
+    matches!(
+        ctx.sem.tys.kind(ty),
+        TyKind::Named(def, _) if matches!(ctx.sem.defs.get(*def).kind, DefKind::Class)
+    )
+}
+
+/// M4 slice 1: ARC header bytes (strong/weak/meta, fixed early per D-004 ABI)
+pub(crate) const ARC_HEADER_BYTES: i64 = 24;
+
+/// 对象字段地址：OffsetPtr(obj, header + slot*8)。槽全 i64（sem 已拒
+/// i128/聚合 class 字段），payload 偏移按 8B 槽计。
+pub(crate) fn class_field_addr(ctx: &mut Ctx, obj: TempId, parent: DefId, index: usize) -> TempId {
+    let slot = crate::layout::field_slot(ctx, parent, index) as i64;
+    let addr = ctx.temp();
+    ctx.emit(Instr::OffsetPtr {
+        dst: addr,
+        base: obj,
+        bytes: ARC_HEADER_BYTES + slot * 8,
+        ty: ctx.sem.tys.unit,
+    });
+    addr
+}
+
+/// M4 slice 1: class construction — heap alloc + payload field stores.
+/// 构造者持 strong=1；槽机同 struct_ctor（位置/命名实参）。
+fn class_ctor(ctx: &mut Ctx, e: &ExprWrap, def: DefId, args: &[CallArg]) -> Operand {
+    let fields = ctx.sem.defs.get(def).sig.fields.clone();
+    let payload = fields.len() as i64 * 8;
+    let obj = ctx.temp();
+    // M4 slice 2b：deinit 派发——class 带 deinit 成员时把函数指针
+    // 塞进 header meta（release 末引用时回调）；无则 null
+    let deinit = ctx.sem.defs.get(def).member_scope.and_then(|ms| {
+        ctx.sem
+            .scopes
+            .lookup_local(ms, ctx.sem.interner.intern("deinit"))
+    });
+    let obj_ty = ctx.expr_ty(e);
+    ctx.emit(Instr::AllocClass {
+        dst: obj,
+        bytes: ARC_HEADER_BYTES + payload,
+        deinit,
+        ty: obj_ty,
+    });
+    // 主构造槽机：sig.params（头参数全量，含仅构造参数）；字段参数落
+    // payload，仅构造参数求值后丢弃（M3 纪律）
+    let ctor_params = ctx.sem.defs.get(def).sig.params.clone();
+    let slot_of = |name| fields.iter().position(|(n, _)| *n == name);
+    let mut slots: Vec<Option<Operand>> = vec![None; ctor_params.len()];
+    let mut bad = false;
+    for (i, arg) in args.iter().enumerate() {
+        let idx = match arg.name {
+            Some(n) => match ctor_params.iter().position(|(s, _)| *s == n) {
+                Some(p) => p,
+                None => {
+                    ctx.diag(
+                        e.span,
+                        "named arg has no parameter (SemUnknownParam missed)",
+                    );
+                    bad = true;
+                    continue;
+                }
+            },
+            None => i,
+        };
+        if idx >= slots.len() || slots[idx].is_some() {
+            ctx.diag(e.span, "ctor arg slot conflict (SemArityMismatch missed)");
+            bad = true;
+            continue;
+        }
+        let v = lower_expr(ctx, &arg.value);
+        slots[idx] = Some(coerce(ctx, v, ctx.expr_ty(&arg.value), ctor_params[idx].1));
+    }
+    if !bad {
+        for s in &slots {
+            if s.is_none() {
+                ctx.diag(e.span, "missing ctor arg (SemArityMismatch missed)");
+            }
+        }
+    }
+    for (idx, v) in slots.into_iter().enumerate() {
+        if let Some(v) = v
+            && let Some(fidx) = slot_of(ctor_params[idx].0)
+        {
+            let addr = class_field_addr(ctx, obj, def, fidx);
+            ctx.emit(Instr::StorePtr {
+                ptr: addr,
+                src: v,
+                ty: fields[fidx].1,
+            });
+        }
+    }
+    // M4 slice 4b (Plan C): ctor result is a +1 temp (consumers take;
+    // otherwise released at statement end)
+    ctx.note_stmt_temp(obj, obj_ty);
+    Operand::Temp(obj)
 }
 
 /// 逐槽拷贝（带跨槽类型转换）：源值（类型 src_ty，位于 src 基址的
@@ -1013,6 +1192,13 @@ pub(crate) fn coerce(ctx: &mut Ctx, op: Operand, from: TyId, to: TyId) -> Operan
     if let TyKind::Nullable(inner) = ctx.sem.tys.kind(to).clone()
         && !matches!(ctx.sem.tys.kind(from), TyKind::Nullable(_))
     {
+        // M4 slice 4b (Plan C): on class materialization the old +1
+        // temp transfers ownership; the new base is the +1 carrier
+        // (consumers take it, otherwise it releases at statement end)
+        let classish = classish_ty(ctx, inner);
+        if classish {
+            let _ = ctx.take_stmt_temp(&op);
+        }
         let base = ctx.temp();
         ctx.emit(Instr::Store {
             base,
@@ -1037,6 +1223,9 @@ pub(crate) fn coerce(ctx: &mut Ctx, op: Operand, from: TyId, to: TyId) -> Operan
                 src: v,
                 ty: inner,
             });
+        }
+        if classish {
+            ctx.note_stmt_temp(base, to);
         }
         return Operand::Temp(base);
     }
@@ -1190,6 +1379,7 @@ fn call(
     match ctx.sem.defs.get(def).kind {
         DefKind::BuiltinPrint => return runtime_print(ctx, e, args),
         DefKind::Struct => return struct_ctor(ctx, e, def, args),
+        DefKind::Class => return class_ctor(ctx, e, def, args),
         DefKind::EnumVariant { parent, index } => {
             return variant_ctor(ctx, e, parent, index, args);
         }
@@ -1198,6 +1388,17 @@ fn call(
             ctx.diag(e.span, "该调用目标无 lowering 路径（sem 契约破缺）");
             return Operand::Const(Const::Unit);
         }
+    }
+    // M4 slice 2b：class 方法调用——self（对象指针）作首实参注入。
+    // callee 为成员访问且走到此处 = 方法（变体/字段路径已先行返回）；
+    // sig.ty 是 sem 的 self 标记（class 值类型）
+    if let ExprKind::Member { base, .. } = &callee.kind {
+        let class_ty = ctx.sem.defs.get(def).sig.ty;
+        let bop = lower_expr(ctx, base);
+        ctx.emit(Instr::Param {
+            a: bop,
+            ty: class_ty,
+        });
     }
     // 克隆签名槽（sem 审查已认可 per-call 克隆的规模；避免借用冲突）
     let (param_tys, param_defaults, ret) = {
@@ -1259,6 +1460,12 @@ fn call(
     } else {
         Some(ctx.temp())
     };
+    // M4 slice 4b (Plan C): class/?class return is a +1 temp
+    if let Some(d) = dst
+        && classish_ty(ctx, ret)
+    {
+        ctx.note_stmt_temp(d, ret);
+    }
     let callee_op = if ctx.sem.defs.get(def).external {
         Callee::Extern(def)
     } else {
@@ -1305,6 +1512,56 @@ fn runtime_print(ctx: &mut Ctx, e: &ExprWrap, args: &[ast::syntax::expr::CallArg
     Operand::Const(Const::Unit)
 }
 
+/// M4 slice 4b (Plan C)：if 分支结果落槽。class 结果在分支内归一化为
+/// +1：+1-origin 尾式转移（take），借用尾式显式 retain；语句位
+///（slot=None）的 +1 尾式在分支末随 drain 释放（路径局部，正确）。
+fn store_branch_result(
+    ctx: &mut Ctx,
+    slot: Option<TempId>,
+    tail: Option<(Operand, TyId)>,
+    tail_expr: Option<&ExprWrap>,
+    result_ty: TyId,
+    span: Span,
+) {
+    let Some((op, from)) = tail else { return };
+    let Some(slot) = slot else {
+        // statement position: a +1 tail temp dies at the branch end
+        ctx.drain_stmt_temps();
+        return;
+    };
+    if crate::layout::is_class(ctx, result_ty) {
+        match tail_expr {
+            Some(te) if plus1_origin(ctx, te) => {
+                let _ = ctx.take_stmt_temp(&op);
+            }
+            Some(_) => {
+                if let Operand::Temp(t) = op {
+                    ctx.emit_class_retain(crate::lower::Place::Temp(t), result_ty);
+                }
+            }
+            None => ctx.diag(span, "class branch tail AST missing (sem invariant)"),
+        }
+        ctx.emit(Instr::Store {
+            base: slot,
+            idx: Operand::Const(Const::Int(0)),
+            src: op,
+            ty: result_ty,
+        });
+        return;
+    }
+    if crate::layout::is_aggregate(ctx, result_ty) {
+        copy_slots(ctx, (slot, 0), (op, 0), from, result_ty, span);
+    } else {
+        let v = coerce(ctx, op, from, result_ty);
+        ctx.emit(Instr::Store {
+            base: slot,
+            idx: Operand::Const(Const::Int(0)),
+            src: v,
+            ty: result_ty,
+        });
+    }
+}
+
 fn lower_if(
     ctx: &mut Ctx,
     e: &ExprWrap,
@@ -1321,6 +1578,8 @@ fn lower_if(
 
     // val/is 条件的模式绑定限 then 分支（scoped=true 时 lower_cond 已推作用域）
     let (c, scoped) = lower_cond(ctx, cond);
+    // M4 slice 4b (Plan C)：条件里的 +1 class 临时值在分支前释放
+    ctx.drain_stmt_temps();
     ctx.terminate(Term::Br {
         cond: c,
         then_: then_b,
@@ -1337,28 +1596,20 @@ fn lower_if(
     }
     // 聚合结果逐槽拷贝（单槽 Store 的 ty 必须是槽类型，不是聚合型）
     let span = e.span;
-    let store_result = |ctx: &mut Ctx, slot: Option<TempId>, tail: Option<(Operand, TyId)>| {
-        if let (Some(slot), Some((op, from))) = (slot, tail) {
-            if crate::layout::is_aggregate(ctx, result_ty) {
-                copy_slots(ctx, (slot, 0), (op, 0), from, result_ty, span);
-            } else {
-                let v = coerce(ctx, op, from, result_ty);
-                ctx.emit(Instr::Store {
-                    base: slot,
-                    idx: Operand::Const(Const::Int(0)),
-                    src: v,
-                    ty: result_ty,
-                });
-            }
-        }
-    };
-    store_result(ctx, result_slot, then_tail);
+    store_branch_result(
+        ctx,
+        result_slot,
+        then_tail,
+        then_block.tail.as_deref(),
+        result_ty,
+        span,
+    );
     ctx.terminate(Term::Jmp(merge_b));
 
     ctx.switch_to(else_b);
     if let Some(b) = else_block {
         let tail = ctx.lower_block(b);
-        store_result(ctx, result_slot, tail);
+        store_branch_result(ctx, result_slot, tail, b.tail.as_deref(), result_ty, span);
     }
     ctx.terminate(Term::Jmp(merge_b));
 
@@ -1376,6 +1627,10 @@ fn lower_if(
                     idx: Operand::Const(Const::Int(0)),
                     ty: result_ty,
                 });
+                // M4 slice 4b (Plan C)：class 汇合结果统一 +1
+                if crate::layout::is_class(ctx, result_ty) {
+                    ctx.note_stmt_temp(dst, result_ty);
+                }
                 Operand::Temp(dst)
             }
         }
@@ -1631,9 +1886,21 @@ fn lower_member(ctx: &mut Ctx, e: &ExprWrap, base: &ExprWrap, safe: bool) -> Ope
         crate::layout::MemberRes::Variant { index, .. } => variant_value(ctx, e, index),
         crate::layout::MemberRes::Field { parent, index } => {
             let bop = lower_expr(ctx, base);
+            let fty = ctx.sem.defs.get(parent).sig.fields[index].1;
+            if is_class_ty(ctx, ctx.expr_ty(base)) {
+                // M4 slice 1：class 字段经对象指针 + 偏移读
+                let obj = as_base(ctx, bop, e.span);
+                let addr = class_field_addr(ctx, obj, parent, index);
+                let v = ctx.temp();
+                ctx.emit(Instr::LoadPtr {
+                    dst: v,
+                    ptr: addr,
+                    ty: fty,
+                });
+                return Operand::Temp(v);
+            }
             let b = as_base(ctx, bop, e.span);
             let slot = crate::layout::field_slot(ctx, parent, index);
-            let fty = ctx.sem.defs.get(parent).sig.fields[index].1;
             read_slots(ctx, b, slot, fty, e.span)
         }
     }
@@ -2900,6 +3167,10 @@ fn lower_when(
                     idx: Operand::Const(Const::Int(0)),
                     ty: result_ty,
                 });
+                // M4 slice 4b (Plan C)：class 汇合结果统一 +1
+                if crate::layout::is_class(ctx, result_ty) {
+                    ctx.note_stmt_temp(dst, result_ty);
+                }
                 Operand::Temp(dst)
             }
         }
@@ -2942,9 +3213,30 @@ fn lower_safe_member(ctx: &mut Ctx, e: &ExprWrap, base: &ExprWrap) -> Operand {
     });
     // 非空：字段在 payload 区（slot 1 + 字段偏移）
     ctx.switch_to(ok_b);
-    let slot = 1 + crate::layout::field_slot(ctx, parent, index);
     let fty = ctx.sem.defs.get(parent).sig.fields[index].1;
-    let v = read_slots(ctx, b, slot, fty, e.span);
+    // M4 slice 4a: base payload is class (bty ?P) -> field via object ptr
+    let base_class = matches!(ctx.sem.tys.kind(bty), TyKind::Nullable(bi) if is_class_ty(ctx, *bi));
+    let v = if base_class {
+        // M4 slice 4a: payload slot 1 = object ptr; field via header offset
+        let obj = ctx.temp();
+        ctx.emit(Instr::Load {
+            dst: obj,
+            base: b,
+            idx: Operand::Const(Const::Int(1)),
+            ty: inner,
+        });
+        let addr = class_field_addr(ctx, obj, parent, index);
+        let fv = ctx.temp();
+        ctx.emit(Instr::LoadPtr {
+            dst: fv,
+            ptr: addr,
+            ty: fty,
+        });
+        Operand::Temp(fv)
+    } else {
+        let slot = 1 + crate::layout::field_slot(ctx, parent, index);
+        read_slots(ctx, b, slot, fty, e.span)
+    };
     let out = ctx.temp();
     ctx.emit(Instr::Store {
         base: out,
@@ -3013,6 +3305,13 @@ fn lower_elvis(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> O
         copy_slots(ctx, (base, 0), (Operand::Temp(lb), 1), s_inner, to, e.span);
         Operand::Temp(base)
     };
+    // M4 slice 4b (Plan C)：class 的 some 分支借用 lhs payload——
+    // 显式 retain，使 ?? 结果统一 +1（none 分支转移/retain 同规则）
+    if crate::layout::is_class(ctx, to)
+        && let Operand::Temp(t) = some_v
+    {
+        ctx.emit_class_retain(crate::lower::Place::Temp(t), to);
+    }
     if !crate::layout::is_aggregate(ctx, to) {
         ctx.emit(Instr::Store {
             base: slot,
@@ -3030,6 +3329,13 @@ fn lower_elvis(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> O
         let v = lower_expr(ctx, rhs);
         coerce(ctx, v, ctx.expr_ty(rhs), to)
     };
+    if crate::layout::is_class(ctx, to) {
+        if plus1_origin(ctx, rhs) {
+            let _ = ctx.take_stmt_temp(&none_v);
+        } else if let Operand::Temp(t) = none_v {
+            ctx.emit_class_retain(crate::lower::Place::Temp(t), to);
+        }
+    }
     if n <= 1 {
         ctx.emit(Instr::Store {
             base: slot,
@@ -3051,6 +3357,10 @@ fn lower_elvis(ctx: &mut Ctx, e: &ExprWrap, lhs: &ExprWrap, rhs: &ExprWrap) -> O
             idx: Operand::Const(Const::Int(0)),
             ty: to,
         });
+        // M4 slice 4b (Plan C)：class ?? 结果统一 +1
+        if crate::layout::is_class(ctx, to) {
+            ctx.note_stmt_temp(dst, to);
+        }
         Operand::Temp(dst)
     } else {
         Operand::Temp(slot)
@@ -3297,6 +3607,19 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
                 return;
             };
             let fty = ctx.sem.defs.get(parent).sig.fields[index].1;
+            if is_class_ty(ctx, ctx.expr_ty(base)) {
+                // M4 slice 1：class 字段经对象指针 + 偏移写
+                let Some(obj) = lvalue_base(ctx, base, span) else {
+                    return;
+                };
+                let addr = class_field_addr(ctx, obj, parent, index);
+                ctx.emit(Instr::StorePtr {
+                    ptr: addr,
+                    src: v,
+                    ty: fty,
+                });
+                return;
+            }
             let Some(b) = lvalue_base(ctx, base, span) else {
                 return;
             };

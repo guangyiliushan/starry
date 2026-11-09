@@ -243,6 +243,8 @@ fn run_fun_capturing(
                 | Instr::Slot { dst, .. } => Some(dst.0),
                 Instr::AddrOf { dst, base, .. } => Some(dst.0.max(base.0)),
                 Instr::LoadPtr { dst, ptr, .. } => Some(dst.0.max(ptr.0)),
+                Instr::OffsetPtr { dst, base, .. } => Some(dst.0.max(base.0)),
+                Instr::AllocClass { dst, .. } => Some(dst.0),
                 Instr::StorePtr { ptr, .. } => Some(ptr.0),
                 Instr::Store { base, .. } => Some(base.0),
                 Instr::LoadGlobal { dst, .. } => Some(dst.0),
@@ -608,6 +610,13 @@ impl<'a> Machine<'a> {
             Instr::AddrOf { .. } | Instr::LoadPtr { .. } | Instr::StorePtr { .. } => {
                 Err(InterpError::Trap("pointer op (AddrOf/LoadPtr/StorePtr)"))
             }
+            // M4 slice 1: class objects live on the native heap; the
+            // interpreter has no address-space model for them (same
+            // discipline as pointer ops and extern calls)
+            Instr::AllocClass { .. } => Err(InterpError::Trap("class object alloc (AllocClass)")),
+            Instr::OffsetPtr { .. } => {
+                Err(InterpError::Trap("class object addressing (OffsetPtr)"))
+            }
             Instr::Slot { dst, count } => {
                 let slot = &mut cells[dst.0 as usize];
                 if slot.len() < *count as usize {
@@ -663,6 +672,13 @@ impl<'a> Machine<'a> {
                         let (v, pty) = args.first().copied().unwrap_or((0, *ty));
                         self.printed.push(self.print_line(v, pty));
                         0
+                    }
+                    Callee::Runtime(RuntimeFn::Retain)
+                    | Callee::Runtime(RuntimeFn::Release)
+                    | Callee::Runtime(RuntimeFn::WeakRetain)
+                    | Callee::Runtime(RuntimeFn::WeakDrop)
+                    | Callee::Runtime(RuntimeFn::WeakUpgrade) => {
+                        return Err(InterpError::Trap("class object runtime op"));
                     }
                     Callee::Extern(def) => {
                         return Err(InterpError::UnknownFun(format!("extern def {}", def.0)));

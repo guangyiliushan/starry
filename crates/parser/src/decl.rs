@@ -864,6 +864,15 @@ fn parse_class_members(session: &mut ParseSession<'_>) -> Result<Vec<ClassMember
         }
         let constructor_checkpoint = session.checkpoint();
         let constructor_modifiers = parse_modifier_list(session)?;
+        // M4 slice 2b：deinit 块（init 同款的文本槽位词——不做硬关键字，
+        // 与 init 先例一致；R4 的 "deinit 拼写" 裁定由此兑现）
+        if session.cursor.check(&TokenKind::Identifier)
+            && session.token_text(session.cursor.peek()) == "deinit"
+        {
+            session.cursor.advance();
+            members.push(ClassMember::Deinit(parse_block(session)?));
+            continue;
+        }
         if session.cursor.check(&TokenKind::Identifier)
             && session.token_text(session.cursor.peek()) == "init"
         {

@@ -23,6 +23,27 @@ pub(crate) fn parse_statement(
     let start = session.cursor.peek().span;
     let label = parse_label(session)?;
     match session.cursor.peek().kind {
+        // M4 slice 3：`weak var` 语句级绑定——修饰词前瞻（peak 是 weak
+        // 且次位是 var/val 才走绑定，否则回落表达式，保住 weak 作标识符的残路）
+        TokenKind::Identifier
+            if session.token_text(session.cursor.peek()) == "weak"
+                && session.cursor.peek_ahead(1).is_some_and(|next| {
+                    matches!(
+                        next.kind,
+                        TokenKind::Keyword(HardKeyword::Val) | TokenKind::Keyword(HardKeyword::Var)
+                    )
+                }) =>
+        {
+            let declaration = crate::decl::parse_binding_decl(session)?;
+            let DeclKind::Binding(binding) = declaration.kind else {
+                unreachable!("binding parser returns Binding");
+            };
+            Ok(ParsedStatement::Statement(StmtWrap::new(
+                declaration.id,
+                declaration.span,
+                StmtKind::Binding(Box::new(binding)),
+            )))
+        }
         TokenKind::Keyword(HardKeyword::Val) | TokenKind::Keyword(HardKeyword::Var) => {
             let declaration = crate::decl::parse_binding_decl(session)?;
             let DeclKind::Binding(binding) = declaration.kind else {

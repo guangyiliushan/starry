@@ -55,6 +55,49 @@ pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
                 };
                 check_fun(item.id, f, fdef, st)
             }
+            // M4 slice 2b：class 成员函数/deinit 体检查（self 已由 resolve 期绑定）
+            DeclKind::Class(c) => {
+                let Some(class_def) = st.decl_def.get(i).copied().flatten() else {
+                    continue;
+                };
+                for member in &c.members {
+                    match member {
+                        ast::syntax::decl::ClassMember::Declaration(d)
+                            if matches!(&d.kind, DeclKind::Fun(_)) =>
+                        {
+                            if let DeclKind::Fun(f) = &d.kind {
+                                let Some(mdef) = member_lookup(st, class_def, f.name) else {
+                                    continue;
+                                };
+                                check_fun(d.id, f, mdef, st);
+                            }
+                        }
+                        ast::syntax::decl::ClassMember::Deinit(b) => {
+                            let dname = st.interner.intern("deinit");
+                            let Some(mdef) = member_lookup(st, class_def, dname) else {
+                                continue;
+                            };
+                            let anchor_id = b.stmts.first().map(|s| s.id).unwrap_or(NodeId(0));
+                            st.funs.push(crate::FunFrame {
+                                node: anchor_id,
+                                def: mdef,
+                            });
+                            let ty = type_block(b, st, true);
+                            if !st.tys.assignable(ty, st.tys.unit) {
+                                mismatch(
+                                    st,
+                                    b.stmts
+                                        .first()
+                                        .map(|s| s.span)
+                                        .unwrap_or(Span { start: 0, end: 0 }),
+                                );
+                            }
+                            st.funs.pop();
+                        }
+                        _ => {}
+                    }
+                }
+            }
             DeclKind::Struct(s) => {
                 // M3：主构造默认值逐参数定型（上下文=参数类型，含字面量重定型）。
                 // M7：泛型 struct 默认值在 declare 期已拒收，这里跳过（无逐实例化检查）
@@ -204,6 +247,10 @@ fn check_fun(decl_id: NodeId, f: &ast::syntax::decl::FunDecl, fdef: DefId, st: &
         return;
     }
     let ret = st.defs.get(fdef).sig.ret;
+    // M4 slice 4c: class/?P params and returns are scheduled (+0/+1).
+    // Params are borrowed (+0, caller keeps ownership); a callee
+    // binding retains explicitly. Returns are owned (+1): the call-site
+    // binding takes over the release (call-init skip-retain rule).
     // M2 非逃逸：返回借用 = 悬垂，v1 拒绝
     if matches!(st.tys.kind(ret), TyKind::Ref { .. }) {
         st.diags.emit(Diagnostic::error(
@@ -292,6 +339,11 @@ fn check_top_binding(b: &BindingDecl, st: &mut SemState) {
 }
 
 fn check_local_binding(b: &BindingDecl, st: &mut SemState) {
+    let weak = b
+        .modifiers
+        .modifiers
+        .iter()
+        .any(|m| m.word == ast::token::ModifierWord::Weak);
     let Some(init) = &b.init else {
         if b.ty.is_none() {
             st.diags.emit(Diagnostic::error(
@@ -303,6 +355,14 @@ fn check_local_binding(b: &BindingDecl, st: &mut SemState) {
         return;
     };
     let init_ty = type_expr(init, st, true);
+    // M4 slice 3：weak 绑定只接受 class 值（弱引用语义）
+    if weak && !crate::declare::is_class_ty(st, init_ty) {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemTypeMismatch,
+            init.span,
+            "`weak` bindings require a class value initializer",
+        ));
+    }
     check_binding_pattern(init, &b.pattern, init_ty, st);
 }
 
@@ -544,8 +604,15 @@ fn assign_target_ty(target: &ExprWrap, target_ty: TyId, st: &mut SemState) -> Ty
     match &target.kind {
         ExprKind::Ident(_) => match st.expr_def.get(target.id).copied() {
             Some(def) => match &st.defs.get(def).kind {
-                DefKind::LocalBinding { mutable } => {
-                    if !mutable {
+                DefKind::LocalBinding { mutable, weak } => {
+                    // M4 slice 3：weak 重赋值簿记（旧 weak_drop/新 weak_retain）未排期
+                    if *weak {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnsupportedConstruct,
+                            target.span,
+                            "reassigning a `weak` binding is not supported in this slice",
+                        ));
+                    } else if !mutable {
                         st.diags.emit(Diagnostic::error(
                             DiagCode::SemAssignToVal,
                             target.span,
@@ -636,7 +703,16 @@ fn check_root_mutability(target: &ExprWrap, st: &mut SemState) {
         && let Some(def) = st.expr_def.get(root.id).copied()
     {
         match &st.defs.get(def).kind {
-            DefKind::LocalBinding { mutable: false } => {
+            // M4 slice 3：weak 绑定不可重赋值（旧值 weak_drop/新值 weak_retain
+            // 的簿记未排期）
+            DefKind::LocalBinding { weak: true, .. } => {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    target.span,
+                    "reassigning a `weak` binding is not supported in this slice",
+                ));
+            }
+            DefKind::LocalBinding { mutable: false, .. } => {
                 st.diags.emit(Diagnostic::error(
                     DiagCode::SemAssignToVal,
                     target.span,
@@ -707,7 +783,7 @@ fn member_field_ty_ex(
                     None
                 }
             },
-            DefKind::Struct => {
+            DefKind::Struct | DefKind::Class => {
                 let fields = st.defs.get(def).sig.fields.clone();
                 match fields.iter().find(|(n, _)| *n == name) {
                     Some((_, t)) => Some(*t),
@@ -861,8 +937,17 @@ fn check_borrow(target: &ExprWrap, mutable: bool, st: &mut SemState) {
     }
     if mutable {
         match &st.defs.get(def).kind {
-            DefKind::LocalBinding { mutable: true } => {}
-            DefKind::LocalBinding { mutable: false } => {
+            DefKind::LocalBinding { mutable: true, .. } => {}
+            // M4 slice 3：weak 绑定不可重赋值（旧值 weak_drop/新值 weak_retain
+            // 的簿记未排期）
+            DefKind::LocalBinding { weak: true, .. } => {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    target.span,
+                    "reassigning a `weak` binding is not supported in this slice",
+                ));
+            }
+            DefKind::LocalBinding { mutable: false, .. } => {
                 st.diags.emit(Diagnostic::error(
                     DiagCode::SemAssignToVal,
                     target.span,
@@ -1137,7 +1222,19 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
         ExprKind::Bool(_) => st.tys.bool_,
         ExprKind::Null => st.tys.null,
         ExprKind::Ident(_) | ExprKind::Path(_) => match st.expr_def.get(e.id).copied() {
-            Some(def) => def_value_ty(def, st),
+            Some(def) => {
+                // M4 slice 4b (Plan C)：weak 绑定读取 = upgrade——定型
+                // 为 ?P；irc 在读取点发射 starry_weak_upgrade（+1 临时值
+                // 纪律：绑定/返回转移，语句末 release）
+                if matches!(
+                    st.defs.get(def).kind,
+                    DefKind::LocalBinding { weak: true, .. }
+                ) {
+                    let vty = def_value_ty(def, st);
+                    return st.tys.nullable(vty);
+                }
+                def_value_ty(def, st)
+            }
             None => st.tys.error,
         },
         // M2 取址 &x / &mut x（T1 借用；v1 保守规则见 semantic-notes）
@@ -1266,6 +1363,23 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             }
         }
         ExprKind::Member { base, name, safe } => {
+            // M4 slice 4b (Plan C)：经 weak 的 `?.` 安全访问放行
+            //（base 读取即 upgrade，定型 ?P）；非安全 `.` 仍拒（需显式 !!）
+            if !*safe
+                && let ExprKind::Ident(_) = &base.kind
+                && let Some(def) = st.expr_def.get(base.id).copied()
+                && matches!(
+                    st.defs.get(def).kind,
+                    DefKind::LocalBinding { weak: true, .. }
+                )
+            {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    e.span,
+                    "accessing a member through a `weak` binding requires upgrade: use `?.` or `!!`",
+                ));
+                return st.tys.error;
+            }
             let bty = type_expr(base, st, true);
             member_field_ty(bty, *name, *safe, e.span, st)
         }
@@ -1502,6 +1616,16 @@ fn type_binary(
             }
         }
         Op::EqEq | Op::BangEq => {
+            // M4 slice 2a：class 引用相等 = 指针比较（R4 裁定默认引用相等）。
+            // class 值已标量化（is_aggregate=false），走标量 Bin Eq——
+            // llvme 发 icmp eq ptr；不得落入聚合结构相等（会把 header 算进去）
+            if crate::declare::is_class_ty(st, l) || crate::declare::is_class_ty(st, r) {
+                if !(crate::declare::is_class_ty(st, l) && crate::declare::is_class_ty(st, r)) {
+                    mismatch(st, span);
+                    return st.tys.error;
+                }
+                return st.tys.bool_;
+            }
             // 等值按可汇合判定（命名/数组/元组结构相等即可比）
             if st.tys.join(l, r).is_some() {
                 st.tys.bool_
@@ -1605,6 +1729,22 @@ fn type_call(
     // 查不到即方法调用（由此处报「不支持」，不让 member_field_ty 发 unknown-field 误导）
     let callee_ty = match &callee.kind {
         ExprKind::Member { base, name, safe } => {
+            // M4 slice 4b (Plan C)：经 weak 的 `?.` 方法调用放行；非安全拒
+            if !*safe
+                && let ExprKind::Ident(_) = &base.kind
+                && let Some(def) = st.expr_def.get(base.id).copied()
+                && matches!(
+                    st.defs.get(def).kind,
+                    DefKind::LocalBinding { weak: true, .. }
+                )
+            {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    callee.span,
+                    "calling a method through a `weak` binding requires upgrade: use `?.` or `!!`",
+                ));
+                return st.tys.error;
+            }
             let base_ty = type_expr(base, st, true);
             let fty = if st.tys.is_error(base_ty) {
                 st.tys.error
@@ -1612,12 +1752,37 @@ fn type_call(
                 match member_field_ty_ex(base_ty, *name, *safe, callee.span, st, false) {
                     Some(t) => t,
                     None => {
-                        unsupported(
-                            st,
-                            callee.span,
-                            "method calls are not supported in semantic v1",
-                        );
-                        st.tys.error
+                        // M4 slice 2b：class 方法分派（静态单态；self 在 lowering 注入）
+                        let method = if let TyKind::Named(def, _) = st.tys.kind(base_ty).clone()
+                            && matches!(st.defs.get(def).kind, DefKind::Class)
+                            && let Some(m) = member_lookup(st, def, *name)
+                            && matches!(st.defs.get(m).kind, DefKind::Fun)
+                        {
+                            Some(m)
+                        } else {
+                            None
+                        };
+                        match method {
+                            Some(m) => {
+                                let params = st.defs.get(m).sig.params.clone();
+                                let defaults = st.defs.get(m).sig.param_defaults.clone();
+                                check_call_args(args, &params, &defaults, span, st);
+                                let ret = st.defs.get(m).sig.ret;
+                                st.expr_def.set(callee.id, m);
+                                // callee 值占位（irc 方法路径读 expr_def；早退绕过
+                                // 臂尾的 expr_ty.set，这里必须自写）
+                                st.expr_ty.set(callee.id, st.tys.unit);
+                                return ret;
+                            }
+                            None => {
+                                unsupported(
+                                    st,
+                                    callee.span,
+                                    "method calls are not supported in semantic v1",
+                                );
+                                st.tys.error
+                            }
+                        }
                     }
                 }
             };
@@ -1668,6 +1833,22 @@ fn type_call(
             }
         }
         TyKind::TypeObject(named) => match st.defs.get(named).kind.clone() {
+            // M4 slice 1：class 构造——槽机核查同 struct；expr_def 指向
+            // class def（irc 构造者判定免 retain 的依据）
+            DefKind::Class => {
+                // 主构造：sig.params（含仅构造参数）优先，无头构造退 fields
+                let sig = &st.defs.get(named).sig;
+                if !sig.params.is_empty() {
+                    let params = sig.params.clone();
+                    let defaults = sig.param_defaults.clone();
+                    check_call_args(args, &params, &defaults, span, st);
+                } else {
+                    let fields = sig.fields.clone();
+                    check_call_args(args, &fields, &[], span, st);
+                }
+                st.expr_def.set(callee.id, named);
+                return st.tys.builtin_named(named);
+            }
             DefKind::Struct => {
                 // M7：泛型 struct 构造——实例化 spec def，实参按代入后 sig 核查
                 if st.defs.get(named).ty_params > 0 {
@@ -2290,6 +2471,16 @@ mod verify {
     use crate::SemState;
 
     pub(super) fn run(ast: &SourceFile, st: &SemState) {
+        // 已有错误诊断时跳过覆盖断言：出错子树本就不定型，断言只会
+        // 以 panic 盖过真实诊断（debug 可用性）
+        if st
+            .diags
+            .all()
+            .iter()
+            .any(|d| matches!(d.severity, ast::syntax::node::DiagSeverity::Error))
+        {
+            return;
+        }
         for (i, item) in ast.items.iter().enumerate() {
             match &item.kind {
                 DeclKind::Fun(f) => {
@@ -2321,6 +2512,9 @@ mod verify {
     }
 
     fn assert_typed(id: NodeId, st: &SemState) {
+        if st.expr_ty.get(id).is_none() {
+            eprintln!("UNTYPED {id:?}");
+        }
         assert!(
             st.expr_ty.get(id).is_some(),
             "expr not typed (coverage drift): {id:?}"

@@ -608,9 +608,10 @@ fn alias_constructor_reaches_target() {
 }
 
 #[test]
-fn class_declaration_reports_unsupported() {
+fn class_declaration_with_method_is_clean() {
+    // M4 slice 2b: class + method decl accepted (static dispatch)
     let src = "class C {\n    fun m() : int {\n        return 1\n    }\n}";
-    assert_eq!(codes(src), vec![DiagCode::SemUnsupportedConstruct]);
+    assert_clean(src);
 }
 
 #[test]
@@ -872,9 +873,10 @@ fn self_reports_dedicated_diagnostic() {
 }
 
 #[test]
-fn class_use_site_stays_silent() {
+fn class_use_site_ctor_is_clean() {
+    // M4 slice 1: class ctor call accepted
     let src = "class C {\n}\nfun main() {\n    C()\n}";
-    assert_eq!(codes(src), vec![DiagCode::SemUnsupportedConstruct]);
+    assert_clean(src);
 }
 
 // ---- 2026-11 审查修复回归 ----
@@ -1390,5 +1392,118 @@ fn checked_const_overflow_and_wrapping_operators() {
     assert_has(
         "fun f() : int {\n    return \"a\" +% \"b\"\n}",
         DiagCode::SemTypeMismatch,
+    );
+}
+
+#[test]
+fn class_slice1_rejections_are_stable() {
+    // reference equality (slice 2a: pointer compare)
+    assert_clean(
+        "class P(val x: int)\nfun main() : int {\n    val a = P(1)\n    val b = P(1)\n    if a == b {\n        return 1\n    }\n    return 0\n}",
+    );
+    // class vs non-class equality still rejected
+    assert_has(
+        "class P(val x: int)\nfun main() : int {\n    val a = P(1)\n    if a == 1 {\n        return 1\n    }\n    return 0\n}",
+        DiagCode::SemTypeMismatch,
+    );
+    // M4 slice 4a: nullable class accepted (flag + payload slots)
+    assert_clean("class P(val x: int)\nfun main() : int {\n    val a: P? = null\n    return 0\n}");
+    // M4 slice 4c: class params/returns accepted (+0/+1)
+    assert_clean("class P(val x: int)\nfun f(p: P) : int {\n    return p.x\n}");
+    assert_clean("class P(val x: int)\nfun f() : P {\n    return P(1)\n}");
+    // i128 class field (payload slot model limit)
+    assert_has(
+        "class P(val x: i128)\nfun main() : int {\n    return 0\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // aggregate class field
+    assert_has(
+        "struct S {\n    v: int\n}\nclass P(val s: S)\nfun main() : int {\n    return 0\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // primary-ctor default value
+    assert_has(
+        "class P(val x: int = 1)\nfun main() : int {\n    return 0\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn class_methods_and_deinit_slice2b() {
+    // static dispatch + deinit + shared mutation
+    assert_clean(
+        "class Counter(var count: int) {\n    fun bump() : int {\n        self.count += 1\n        return self.count\n    }\n}\nfun main() : int {\n    val a = Counter(10)\n    val b = a\n    return b.bump() + a.bump()\n}",
+    );
+    // method arg type checking
+    assert_has(
+        "class C {\n    fun m(x: int) : int {\n        return x\n    }\n}\nfun main() : int {\n    val c = C()\n    return c.m(\"s\")\n}",
+        DiagCode::SemTypeMismatch,
+    );
+}
+
+#[test]
+fn nullable_class_slice4a_semantics() {
+    // lift/null/==/!!/?. accepted
+    assert_clean(
+        "class P(val x: int)\nfun main() : int {\n    val a = P(1)\n    val pa: P? = a\n    val pn: P? = null\n    if (pa != null) {\n        print(pa!!.x)\n    }\n    if (pn == null) {\n        print(0)\n    }\n    val v: int? = pa?.x\n    return v!!\n}",
+    );
+    // M4 slice 4c: ?P params/returns accepted (+0/+1)
+    assert_clean(
+        "class P(val x: int)\nfun f(p: P?) : int {\n    return 1\n}\nfun g() : P? {\n    return null\n}\nfun main() : int {\n    return 0\n}",
+    );
+}
+
+#[test]
+fn weak_var_slice3_semantics() {
+    // weak var init accepted
+    assert_clean(
+        "class N(var v: int) {\n    deinit {\n        print(self.v)\n    }\n}\nfun main() {\n    val a = N(1)\n    weak var wa = a\n}",
+    );
+    // weak read rejected (upgrade semantics not scheduled)
+    assert_has(
+        "class N(var v: int) {\n}\nfun main() : int {\n    val a = N(1)\n    weak var wa = a\n    return wa.v\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // weak val rejected (must be var)
+    assert_has(
+        "class N(var v: int) {\n}\nfun main() {\n    val a = N(1)\n    weak val wa = a\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // weak of non-class rejected
+    assert_has(
+        "fun main() {\n    val a = 1\n    weak var wa = a\n}",
+        DiagCode::SemTypeMismatch,
+    );
+}
+
+#[test]
+fn class_reassignment_slice4d_semantics() {
+    // plain reassignment, cross-scope borrowed rhs, self-assign all accepted
+    assert_clean(
+        "class P(val x: int) {\n}\nfun main() : int {\n    var b = P(1)\n    if (true) {\n        val a = P(2)\n        b = a\n    }\n    b = P(3)\n    b = b\n    return b.x\n}",
+    );
+    // nullable var reassignment chains
+    assert_clean(
+        "class P(val x: int) {\n}\nfun main() : int {\n    var b: P? = null\n    b = P(1)\n    b = null\n    return 0\n}",
+    );
+}
+
+#[test]
+fn weak_upgrade_slice4b_semantics() {
+    // weak read = upgrade to ?P: !!/?. /?? /binding all accepted
+    assert_clean(
+        "class N(var v: int) {\n}\nfun main() : int {\n    val a = N(1)\n    weak var w = a\n    val u = w\n    if (u != null) {\n        print(u!!.v)\n    }\n    print(w!!.v)\n    val x: int? = w?.v\n    print(x!!)\n    val fb = w ?? a\n    print(fb.v)\n    return 0\n}",
+    );
+    // ctor-initialized weak var accepted (releases at statement end)
+    assert_clean("class N(var v: int) {\n}\nfun main() {\n    weak var w = N(2)\n}");
+    // non-safe member through weak still rejected (use ?. or !!)
+    assert_has(
+        "class N(var v: int) {\n}\nfun main() : int {\n    val a = N(1)\n    weak var w = a\n    return w.v\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // weak reassignment still rejected
+    assert_has(
+        "class N(var v: int) {\n}\nfun main() {\n    val a = N(1)\n    val b = N(2)\n    weak var w = a\n    w = b\n}",
+        DiagCode::SemUnsupportedConstruct,
     );
 }

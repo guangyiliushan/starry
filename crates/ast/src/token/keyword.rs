@@ -147,6 +147,7 @@ pub enum ModifierWord {
     OperatorWord,
     Infix,
     Vararg,
+    Weak,
 }
 
 impl ModifierWord {
@@ -167,6 +168,7 @@ impl ModifierWord {
             Self::OperatorWord => "operator",
             Self::Infix => "infix",
             Self::Vararg => "vararg",
+            Self::Weak => "weak",
         }
     }
 }
@@ -188,6 +190,7 @@ pub fn lookup_modifier_word(word: &str) -> Option<ModifierWord> {
         "operator" => Some(ModifierWord::OperatorWord),
         "infix" => Some(ModifierWord::Infix),
         "vararg" => Some(ModifierWord::Vararg),
+        "weak" => Some(ModifierWord::Weak),
         _ => None,
     }
 }
@@ -305,5 +308,5 @@ pub fn lookup_slot_word(word: &str) -> Option<SlotWord> {
 }
 
 pub const HARD_KEYWORD_COUNT: usize = 37;
-pub const MODIFIER_WORD_COUNT: usize = 14;
+pub const MODIFIER_WORD_COUNT: usize = 15;
 pub const SLOT_WORD_COUNT: usize = 31;

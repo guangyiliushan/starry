@@ -21,7 +21,21 @@ pub trait LayoutView {
 /// 但前者是基址、后者是值。用 `scalar_slots(ty) <= 1` 当「标量」会把单槽
 /// 聚合折成标量值，成员读取随即把该值当基址用（非法 IR + 丢字段）。
 /// 与 llvme 的 `TyClass` 同口径。
+/// M4 slice 1：ty 是否为 class 值（对象指针标量化）
+pub fn is_class(v: &impl LayoutView, ty: TyId) -> bool {
+    matches!(
+        v.tys().kind(ty),
+        TyKind::Named(def, _) if matches!(v.defs().get(*def).kind, DefKind::Class)
+    )
+}
+
 pub fn is_aggregate(v: &impl LayoutView, ty: TyId) -> bool {
+    // M4 slice 1: class values are scalarized object pointers
+    if let TyKind::Named(def, _) = v.tys().kind(ty)
+        && matches!(v.defs().get(*def).kind, DefKind::Class)
+    {
+        return false;
+    }
     !matches!(
         v.tys().kind(ty),
         TyKind::Int(_)
@@ -44,7 +58,10 @@ pub fn scalar_slots(v: &impl LayoutView, ty: TyId) -> usize {
         TyKind::Range(inner) => scalar_slots(v, *inner) * 2 + 1,
         TyKind::Nullable(inner) => 1 + scalar_slots(v, *inner),
         TyKind::Named(def, _) => match v.defs().get(*def).kind {
-            DefKind::Struct | DefKind::Class => v
+            // M4 slice 4a：class 值 = 标量化对象指针（与 is_aggregate 同口径），
+            // nullable class 的 payload 槽因此是 1 个 ptr 槽
+            DefKind::Class => 1,
+            DefKind::Struct => v
                 .defs()
                 .get(*def)
                 .sig
@@ -109,7 +126,15 @@ pub fn slot_ty(v: &impl LayoutView, ty: TyId, slot: usize) -> TyId {
             }
         }
         TyKind::Named(def, _) => match v.defs().get(*def).kind {
-            DefKind::Struct | DefKind::Class => {
+            // M4 slice 4a：class 的槽 0 = 值自身（ptr），与标量同纪律
+            DefKind::Class => {
+                if slot == 0 {
+                    ty
+                } else {
+                    v.tys().unit
+                }
+            }
+            DefKind::Struct => {
                 let mut rest = slot;
                 for (_, t) in &v.defs().get(*def).sig.fields {
                     let n = scalar_slots(v, *t);

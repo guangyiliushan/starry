@@ -668,3 +668,15 @@ fn borrow_and_deref_lower_to_pointer_instrs() {
         "{text}"
     );
 }
+
+#[test]
+fn class_top_level_global_is_rejected() {
+    // M4 review fix: class/?P globals have no release site (the Global arm
+    // of the implicit drop is a silent no-op) — reject at irc, not leak.
+    let (_, codes) =
+        dump("class P(val x: int) {\n}\nval g = P(1)\nfun main() : int {\n    return 0\n}");
+    assert!(
+        codes.contains(&DiagCode::IrcUnsupportedLowering),
+        "class global must be rejected, got {codes:?}"
+    );
+}

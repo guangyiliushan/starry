@@ -270,6 +270,84 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
 - **泛型（M7 slice 1）**：fun/struct 单态化已落地（见 generic-mono-spike.md）；
   trait bounds/形参默认值/实参推断/泛型 enum 后置（R2 核心 exit 后不写进承诺）。
 
+## class + ARC（M4 slice 1，R3/R4）
+
+- **值模型**：class 值 = 对象指针（标量化）；header 定案 24B（strong/weak/
+  meta——D-004 ABI 先钉），payload 紧跟 header，字段槽全 i64（i128/聚合
+  字段 slice 1 拒收，保 8B 槽寻址：OffsetPtr = 24 + 槽*8）。
+- **构造**：主构造 val/var 头参数 = 字段（M3 三态同纪律）；`P(...)` 经
+  `starry_alloc_object` 分配，构造者持 strong=1（免 retain）。
+- **复制与释放**：`val b = a` 发 `starry_retain`；class 局部绑定注册
+  **隐式 drop**（与 defer 同出口纪律：块出口/return/break 逆序
+  `starry_release`）。move 消除（构造期 retain/release 对）是 M4 优化项。
+- **线程模型**：R3 线程本地非原子（跨线程 atomic 后置）。
+- **slice 2b：方法 + deinit**——`x.m(args)` 静态分派（self 作首参对象
+  指针注入，`@m.N` 按 DefId 唯一命名）；成员体经 resolve/check
+  全流程（self 绑定为 Param，sig.ty 复用为 class 值类型通道）；
+  `deinit { }` 走 init 同款文本槽位词（R4 拼写裁定；不升硬关键字，
+  与 init 先例一致）；末引用 release 经 **header meta = deinit 函数
+  指针**回调（AllocClass 指令两参：payload 字节 + deinit 或 null）。
+  **隐式 self 裸字段名未排期**——方法内须显式 `self.x`（裸名给
+  SemUndefinedName）；verify 覆盖断言在已有错误诊断时跳过（不再
+  panic 盖诊断）。
+- **slice 3：weak var**——`weak` 走 **lexicon 修饰词表**（15 个，syntaxgen
+  正道；语句级 `weak var` 前瞻分支，peak=weak 且次位 var/val 才走绑定）。
+  初始化 `starry_weak_retain`（weak++），块出口 `starry_weak_drop`
+  （weak--；strong==0 && weak==0 释放 header）。**e2e 语义验证**：weak 持有
+  下两对象的 deinit 均触发（`2 1`），证明不延长生命周期。
+  **slice 3 拒收面**：weak 读取（裸名与成员访问两臂——upgrade 零化
+  语义 slice 4）、weak 重赋值（簿记未排期）、`weak val`（须 var）、
+  非 class 初始化（SemTypeMismatch）。
+- **slice 1/2b 拒收面**（稳定诊断）：i128/聚合 class 字段、主构造/
+  方法默认值、二级构造（init 块，R4）、class body 字段绑定（字段走
+  主构造 val/var 头参数）、仅构造参数之外的裸字段名。
+- **slice 4c：class 形参/返回（+0/+1）**——形参 = **+0 借用**：调用点
+  不 retain，所有权留在调用方；被调侧绑定形参时显式 retain、块出口
+  release（平衡）。返回 = **+1 owned**：调用点绑定接管 release——
+  绑定对**任意调用 init**（构造/函数/方法，统一 +1 约定）免 retain，
+  仅登记块出口 release。`?P` 同机制（聚合返回 = 基址指针 ABI，槽机
+  逐槽拷贝）。e2e：deinit 每对象恰好一次；callee 内 `val local = p`
+  retain/drop 平衡；函数返回 +1 绑定不重复计数。
+- **slice 4b（Plan C）：所有权闭环 + weak upgrade**——裁定否决 A（autorelease
+  池：推迟 deinit、不修复 return 路径、循环峰值）与 B（立即绑定：不修复
+  `val b = id(a)` UAF、打断链式表达式、无官方先例），选 **C：统一 +1 返回 +
+  full-expression 临时释放**（Clang ARC `objc_loadWeakRetained`、C++
+  `[class.temporary]` 同模型）。三件套：
+  ① **+1 返回统一**：`return e` 若 e 为 +0 借用（标识符/字段/形参）先 retain
+  再返回（修 `id(p)` UAF）；+1-origin（调用/null/??/if-class）直接转移。
+  ② **语句级临时释放**：`stmt_temps` 登记构造/调用返回值/upgrade/汇合点的
+  +1 临时值；绑定/返回/赋值 take 转移，其余在**语句末/条件求值后/分支末**
+  release（路径局部，正确；无池）。`??` 与 if 的 class 结果在分支内归一化
+  为 +1（借用分支 retain、+1 分支转移）。修裸 `make()`/`make().x` 泄漏。
+  ③ **weak upgrade**：`starry_weak_upgrade`（strong>0 → strong++ 返回对象；
+  strong==0 → null；不碰 weak 计数）。weak 读取定型 `?P`，直接 `!!`/`?.`/
+  `??`/绑定；upgrade 结果按 +1 临时值纪律回收。`w.x`（非安全成员）仍拒
+  （需 `?.`/`!!`）；weak 重赋值仍拒。`weak var w = P(..)`（构造初始化）
+  在语句末放弃强引用——weak 不延长生命周期的正确语义。
+  e2e：三探针（裸调用/成员临时、return-p UAF、upgrade 全形态 + 1e5 循环）
+  deinit 逐对象恰好一次。
+- **slice 4d：class/?P var 重赋值所有权**——重赋值先 release 旧 payload
+  （null 载荷为 runtime no-op），写回后按 rhs 来源补 retain：调用结果
+  （+1）与 null 字面量免 retain，借用值（标识符/成员）显式 retain。
+  不变式：var 恒持恰好一个引用，与绑定时登记的块出口 drop 配对——
+  修复「`b = a` 不 retain 致悬垂 / 旧值不 release 致泄漏」。语法自赋值
+  `b = b` 特判为 no-op（否则先 release 后 retain 会过零释放）。e2e：
+  跨作用域借用重赋值后旧对象 deinit、新对象可读；可空 var 全链平衡。
+- **slice 4a：可空 class（`?P`）**——布局 = flag（i8，槽 0）+ payload
+  （对象指针，槽 1）；`scalar_slots`/`slot_ty` 对 Named class 取 1 槽
+  口径（与 is_aggregate 一致）。绑定纪律与 class 相同：物化后 retain
+  payload（null 字面量初始化免 retain——payload 恒空），块出口 release
+  payload（槽 1）。**release/retain 的 Param 类型必须取 payload 类型**：
+  传外层 `?P`（聚合口径）会把槽单元地址当对象指针（已踩坑修复）。
+  `== null`/`!= null`/`!!` 直接工作；`?.x` 走对象指针 + header 偏移
+  （payload 是对象指针，不是内联字段槽）；`??` 逐槽拷贝天然成立。
+  e2e：共享对象 deinit 恰好一次、ctor-into-nullable 免 retain、
+  null 释放 no-op。**slice 4a 拒收面**：weak upgrade 读取（slice 4b
+  裁定）。
+
+- **解释器**：class 对象在原生堆，interp 无地址模型——class 程序
+  一律 Trap（与 extern/指针程序同纪律，差分不入拍）。
+
 ## checked 溢出与 wrapping 算子（M1.5，Q5 + D1–D5 裁定）
 
 - 整型 `+ - *` **默认受检、所有 build mode 生效**（D5：release 只关 T2

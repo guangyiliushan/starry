@@ -87,7 +87,8 @@ PrimaryConstructor := "(" ParameterList ")" ;
 Supertypes   := ":" SuperItem { "," SuperItem } ;
 SuperItem    := Type [ "(" ArgumentList? ")" ] [ «by» Expr ] ;
 ClassBody    := "{" { ClassMember } "}" ;
-ClassMember  := Declaration | ConstructorDecl | AccessorDecl | InitBlock ;
+ClassMember  := Declaration | ConstructorDecl | AccessorDecl | InitBlock | DeinitBlock ;
+DeinitBlock  := "deinit" Block ;
 
 ConstructorDecl := Modifiers «init» "(" ParameterList ")" Block ;
 InitBlock       := «init» Block ;

@@ -102,6 +102,9 @@ pub struct SemanticOutput {
     /// M7：顶层声明下标 → def（irc 按 item 找 def；克隆 def 与原件同 span，
     /// span 反查会撞车）
     pub decl_def: Vec<Option<DefId>>,
+    /// M4 slice 2b：作用域 arena 只读导出——irc 的 deinit/成员查找需要
+    /// member_scope 查名（SemanticOutput 整体消费期有效）
+    pub scopes: ScopeArena,
 }
 
 /// 语义分析入口；parser 诊断原样保留在前，语义诊断附加在后
@@ -259,6 +262,7 @@ impl Sem {
             pat_binding_def: self.st.pat_binding_def,
             ty_of_node: self.st.ty_of_node,
             decl_def: self.st.decl_def,
+            scopes: self.st.scopes,
         }
     }
 }

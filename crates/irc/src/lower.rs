@@ -8,13 +8,14 @@
 use std::collections::HashMap;
 
 use ast::interner::{Interner, Symbol};
-use ast::syntax::decl::{BindingDecl, DeclKind, FunDecl, FunctionBody};
+use ast::syntax::decl::{BindingDecl, ClassMember, DeclKind, FunDecl, FunctionBody};
+use ast::syntax::expr::ExprWrap as ExprWrap2;
 use ast::syntax::expr::{Block, Condition};
 use ast::syntax::node::{DiagCode, Diagnostic, NodeId, SourceFile, Span};
 use ast::syntax::pat::{PatKind, PatWrap};
 use ast::syntax::stmt::{StmtKind, StmtWrap};
 use ast::token::OperatorKind;
-use sem::{DefArena, DefId, FlowRes, SideTable, TyArena, TyId, TyKind};
+use sem::{DefArena, DefId, DefKind, FlowRes, SideTable, TyArena, TyId, TyKind};
 
 use crate::expr;
 use crate::tac::{BlockId, Callee, FunBody, GlobalBody, Instr, Operand, TacOutput, TempId, Term};
@@ -32,6 +33,7 @@ pub(crate) struct SemRef<'a> {
     pub flow_res: &'a SideTable<FlowRes>,
     pub ty_of_node: &'a SideTable<TyId>,
     pub decl_def: &'a [Option<DefId>],
+    pub scopes: &'a sem::ScopeArena,
     pub interner: &'a mut Interner,
 }
 
@@ -101,6 +103,15 @@ pub(crate) struct Ctx<'r, 'a> {
     /// defer 栈（与块作用域同深）：每块一个待发射 defer 体队列（克隆持有，
     /// 规避 AST 引用生命期穿透 Ctx——defer 是低频构造，克隆成本可忽略）
     defers: Vec<Vec<crate::syntax_reexport::Block>>,
+    /// M4 slice 1：class 局部绑定的隐式 drop 队列（与 defers 栈同深同生命周期）。
+    /// 块出口 / return / break 与 defer 同纪律逆序 release。
+    class_drops: Vec<Vec<(Place, TyId, bool)>>,
+    /// M4 slice 4b (Plan C): +1 class temporaries within a statement
+    /// (ctor/call returns/weak upgrade/?? and if class joins).
+    /// Bindings/returns/assignments take (transfer); the rest release
+    /// at statement end (or after cond eval / at branch end) -
+    /// C++ [class.temporary]-style full-expression discipline, no pool.
+    stmt_temps: Vec<(TempId, TyId)>,
     /// BlockId → blocks 下标（switch_to 维护；block_pos O(1)）
     block_index: std::collections::HashMap<BlockId, usize>,
     /// 顶层全局：Symbol → (DefId, 类型)；只含标量（v1）
@@ -147,6 +158,20 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
                 DiagCode::IrcUnsupportedLowering,
                 binding.pattern.span,
                 "aggregate top-level globals are not lowered in this milestone (M-later)",
+            ));
+            skipped.insert(*name);
+            continue;
+        }
+        // M4 review fix: class/?P globals have no release site (the
+        // Global arm of emit_class_release is a silent no-op) — reject
+        // loudly instead of leaking the object and skipping deinit.
+        let global_class = crate::layout::is_class(sem, ty)
+            || matches!(sem.tys.kind(ty), TyKind::Nullable(inner) if crate::layout::is_class(sem, *inner));
+        if global_class {
+            out.diags.push(Diagnostic::error(
+                DiagCode::IrcUnsupportedLowering,
+                binding.pattern.span,
+                "class top-level globals are not lowered in this slice (no release site)",
             ));
             skipped.insert(*name);
             continue;
@@ -218,6 +243,45 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
         ctx.lower_fun(def);
         out.diags.append(&mut ctx.diags);
         out.funs.push(ctx.fun);
+    }
+    // M4 slice 2b：class 成员函数与 deinit 的 lowering。self = 首参对象
+    // 指针（静态分派）；deinit 由 release 经 header meta 回调。
+    for (i, item) in ast.items.iter().enumerate() {
+        let DeclKind::Class(c) = &item.kind else {
+            continue;
+        };
+        let Some(class_def) = sem.decl_def.get(i).copied().flatten() else {
+            continue;
+        };
+        let Some(ms) = sem.defs.get(class_def).member_scope else {
+            continue;
+        };
+        for member in &c.members {
+            match member {
+                ClassMember::Declaration(d) if matches!(&d.kind, DeclKind::Fun(_)) => {
+                    if let DeclKind::Fun(f) = &d.kind {
+                        let Some(mdef) = sem.scopes.lookup_local(ms, f.name) else {
+                            continue;
+                        };
+                        let mut ctx = Ctx::new(sem, source, i8_ty, &globals, &skipped);
+                        ctx.lower_member_fun(f, mdef);
+                        out.diags.append(&mut ctx.diags);
+                        out.funs.push(ctx.fun);
+                    }
+                }
+                ClassMember::Deinit(b) => {
+                    let dname = sem.interner.intern("deinit");
+                    let Some(mdef) = sem.scopes.lookup_local(ms, dname) else {
+                        continue;
+                    };
+                    let mut ctx = Ctx::new(sem, source, i8_ty, &globals, &skipped);
+                    ctx.lower_deinit(b, mdef);
+                    out.diags.append(&mut ctx.diags);
+                    out.funs.push(ctx.fun);
+                }
+                _ => {}
+            }
+        }
     }
     reorder_globals(&mut out, sem.defs);
     out
@@ -403,6 +467,8 @@ impl<'r, 'a> Ctx<'r, 'a> {
             env: Vec::new(),
             loops: Vec::new(),
             defers: Vec::new(),
+            class_drops: Vec::new(),
+            stmt_temps: Vec::new(),
             block_index: std::collections::HashMap::new(),
             globals,
             unsupported_globals,
@@ -550,6 +616,65 @@ impl<'r, 'a> Ctx<'r, 'a> {
 
     // ---- 函数 ----
 
+    /// M4 slice 2b：class 成员函数 lowering——self 作首参（对象指针，
+    /// sig.ty 通道取 class 值类型），声明形参随后；体在 self 作用域解析
+    /// 的 env 下 lowering（self 名由 sem resolve 期绑定）。
+    fn lower_member_fun(&mut self, f: &FunDecl, mdef: DefId) {
+        let class_ty = self.sem.defs.get(mdef).sig.ty;
+        let ret = self.sem.defs.get(mdef).sig.ret;
+        self.fun.def = mdef;
+        self.fun.ret = ret;
+        let entry = self.reserve_block();
+        self.switch_to(entry);
+        self.fun.entry = entry;
+        self.env.push(HashMap::new());
+        let self_t = self.temp();
+        self.fun.params.push((self_t, class_ty));
+        let self_name = self.sem.interner.intern("self");
+        self.env[0].insert(self_name, (Place::Temp(self_t), class_ty));
+        let params = self.sem.defs.get(mdef).sig.params.clone();
+        for (name, ty) in &params {
+            let t = self.temp();
+            self.fun.params.push((t, *ty));
+            self.env[0].insert(*name, (Place::Temp(t), *ty));
+        }
+        match &f.body {
+            Some(FunctionBody::Block(b)) => {
+                let tail = self.lower_block(b);
+                self.finish_fun(tail, b.tail.as_deref());
+            }
+            Some(FunctionBody::Expr(e)) => {
+                let op = expr::lower_expr_as(self, e, ret);
+                // M4 slice 4b (Plan C): expression-body returns are +1
+                if !self.is_unit(ret) {
+                    self.assume_class_value(&op, e, ret);
+                }
+                let value = if self.is_unit(ret) { None } else { Some(op) };
+                self.terminate(Term::Ret { value, ty: ret });
+            }
+            None => {
+                self.fun.blocks.clear();
+            }
+        }
+    }
+
+    /// M4 slice 2b：deinit lowering——只有 self 一个形参，返回 unit
+    fn lower_deinit(&mut self, body: &Block, mdef: DefId) {
+        let class_ty = self.sem.defs.get(mdef).sig.ty;
+        self.fun.def = mdef;
+        self.fun.ret = self.sem.tys.unit;
+        let entry = self.reserve_block();
+        self.switch_to(entry);
+        self.fun.entry = entry;
+        self.env.push(HashMap::new());
+        let self_t = self.temp();
+        self.fun.params.push((self_t, class_ty));
+        let self_name = self.sem.interner.intern("self");
+        self.env[0].insert(self_name, (Place::Temp(self_t), class_ty));
+        let tail = self.lower_block(body);
+        self.finish_fun(tail, None);
+    }
+
     fn lower_fun(&mut self, def: DefId) {
         let Some(decl) = self.find_fun_decl(def) else {
             self.diag(
@@ -578,10 +703,14 @@ impl<'r, 'a> Ctx<'r, 'a> {
         match &decl.body {
             Some(FunctionBody::Block(b)) => {
                 let tail = self.lower_block(b);
-                self.finish_fun(tail);
+                self.finish_fun(tail, b.tail.as_deref());
             }
             Some(FunctionBody::Expr(e)) => {
                 let op = expr::lower_expr_as(self, e, self.fun.ret);
+                // M4 slice 4b (Plan C): expression-body returns are +1
+                if !self.is_unit(self.fun.ret) {
+                    self.assume_class_value(&op, e, self.fun.ret);
+                }
                 let value = if self.is_unit(self.fun.ret) {
                     None
                 } else {
@@ -599,10 +728,14 @@ impl<'r, 'a> Ctx<'r, 'a> {
         }
     }
 
-    fn finish_fun(&mut self, tail: Option<(Operand, TyId)>) {
+    fn finish_fun(&mut self, tail: Option<(Operand, TyId)>, tail_expr: Option<&ExprWrap2>) {
         match tail {
             Some((op, from)) => {
                 let op = expr::coerce(self, op, from, self.fun.ret);
+                // M4 slice 4b (Plan C): tail-expression returns are +1
+                if let Some(te) = tail_expr {
+                    self.assume_class_value(&op, te, self.fun.ret);
+                }
                 let value = if self.is_unit(self.fun.ret) {
                     None
                 } else {
@@ -633,6 +766,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
     pub(crate) fn lower_block(&mut self, b: &Block) -> Option<(Operand, TyId)> {
         self.env.push(HashMap::new());
         self.defers.push(Vec::new());
+        self.class_drops.push(Vec::new());
         for s in &b.stmts {
             self.lower_stmt(s);
         }
@@ -644,6 +778,10 @@ impl<'r, 'a> Ctx<'r, 'a> {
         let pending = self.defers.pop().unwrap_or_default();
         // defer 在块出口（尾式求值后、调用方终止块前）逆序发射
         self.emit_defers(&pending.iter().rev().cloned().collect::<Vec<_>>());
+        let drops = self.class_drops.pop().unwrap_or_default();
+        for (place, ty, weak) in drops.iter().rev() {
+            self.emit_class_release(*place, *ty, *weak);
+        }
         self.env.pop();
         tail
     }
@@ -660,20 +798,31 @@ impl<'r, 'a> Ctx<'r, 'a> {
             StmtKind::While { cond, body, .. } => self.lower_while(s.id, s.span, cond, body),
             StmtKind::Loop { body, .. } => self.lower_loop(s.id, s.span, body),
             StmtKind::Break { value, .. } => {
+                self.drain_stmt_temps();
                 self.lower_jump(s.id, expr::FlowTarget::Break, s.span, value.as_deref());
+                return;
             }
             StmtKind::Continue { .. } => {
-                self.lower_jump(s.id, expr::FlowTarget::Continue, s.span, None)
+                self.drain_stmt_temps();
+                self.lower_jump(s.id, expr::FlowTarget::Continue, s.span, None);
+                return;
             }
             StmtKind::Return { value } => {
                 let op = value
                     .as_ref()
                     .map(|v| expr::lower_expr_as(self, v, self.fun.ret));
+                // M4 slice 4b (Plan C)：class 返回统一 +1——借用值
+                // （标识符/字段等 +0）先 retain；+1-origin 转移
+                if let (Some(v), Some(op_ref)) = (value.as_ref(), op.as_ref()) {
+                    self.assume_class_value(op_ref, v, self.fun.ret);
+                }
+                self.drain_stmt_temps();
                 self.emit_defers_above(0);
                 self.terminate(Term::Ret {
                     value: op,
                     ty: self.fun.ret,
                 });
+                return;
             }
             StmtKind::For {
                 pattern,
@@ -693,6 +842,9 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 self.diag(s.span, "错误/缺失节点穿透 sem 门禁（内部不变量破缺）");
             }
         }
+        // M4 slice 4b (Plan C)：语句末释放未转移的 +1 class 临时值
+        //（Return/Break/Continue 臂已自行 drain 并终止当前块）
+        self.drain_stmt_temps();
     }
 
     fn lower_binding(&mut self, b: &BindingDecl) {
@@ -735,10 +887,54 @@ impl<'r, 'a> Ctx<'r, 'a> {
         };
         let to = target.unwrap_or_else(|| self.expr_ty(init));
         let op = expr::lower_expr_as(self, init, to);
+        // M4 slice 1：class 值的复制 = retain + 块出口隐式 release；
+        // 构造者（init 为 class 构造调用）持 strong=1，免 retain。
+        // M4 slice 4a: nullable class bindings share class ownership discipline
+        // (materialized flag+payload, then retain payload, release at scope exit)
+        let nullable_class = matches!(
+            self.sem.tys.kind(to),
+            TyKind::Nullable(inner) if crate::layout::is_class(self, *inner)
+        );
+        let class_binding = crate::layout::is_class(self, to) || nullable_class;
+        // M4 slice 3：weak var——初始化时 weak_retain（weak++），
+        // 块出口 weak_drop；读取/重赋值 sem 已拒收（无悬垂面）
+        let weak_binding = self
+            .sem
+            .pat_binding_def
+            .get(b.pattern.id)
+            .is_some_and(|def| {
+                matches!(
+                    self.sem.defs.get(*def).kind,
+                    DefKind::LocalBinding { weak: true, .. }
+                )
+            });
+        // M4 slice 4c: +1 return convention——init 为任意调用（构造/函数/方法）
+        // 时结果已持 strong 引用，绑定免 retain，仅登记块出口 release。
+        // 形参 = +0 借用：调用点不 retain，被调侧绑定显式 retain。
+        // M4 slice 4b (Plan C): +1-origin inits (call/??/if/null) and
+        // registered +1 temps (weak upgrade) transfer to the binding
+        // (take => skip the retain arms); borrowed inits retain below.
+        let taken = if class_binding {
+            self.take_stmt_temp(&op)
+        } else {
+            false
+        };
+        let is_ctor = class_binding && (taken || crate::expr::plus1_origin(self, init));
+        // null 字面量初始化：payload 恒空，retain 是噪音（runtime 虽守卫）
+        let is_null_init = matches!(&init.kind, ast::syntax::expr::ExprKind::Null);
         if b.immutable {
             if crate::layout::is_aggregate(self, to) {
                 // 聚合：不可变 → 别名构造基址（无重赋值，零拷贝安全）
                 if let Operand::Temp(t) = op {
+                    if nullable_class {
+                        if !is_ctor && !is_null_init {
+                            self.emit_class_retain(Place::Temp(t), to);
+                        }
+                        self.class_drops
+                            .last_mut()
+                            .expect("class drop stack in sync with defers")
+                            .push((Place::Temp(t), to, false));
+                    }
                     self.env_top().insert(*name, (Place::Temp(t), to));
                     return;
                 }
@@ -754,19 +950,73 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 });
             }
             self.env_top().insert(*name, (Place::Temp(t), to));
+            if class_binding {
+                if !is_ctor {
+                    self.emit(Instr::Param {
+                        a: Operand::Temp(t),
+                        ty: to,
+                    });
+                    self.emit(Instr::Call {
+                        dst: Some(t),
+                        callee: Callee::Runtime(crate::tac::RuntimeFn::Retain),
+                        ty: to,
+                    });
+                }
+                self.class_drops
+                    .last_mut()
+                    .expect("class drop stack in sync with defers")
+                    .push((Place::Temp(t), to, false));
+            }
         } else {
             let slot = self.temp();
             if crate::layout::is_aggregate(self, to) {
-                expr::copy_slots(self, (slot, 0), (op, 0), to, to, b.pattern.span);
+                expr::copy_slots(self, (slot, 0), (op.clone(), 0), to, to, b.pattern.span);
             } else {
                 self.emit(Instr::Store {
                     base: slot,
                     idx: Operand::Const(crate::tac::Const::Int(0)),
-                    src: op,
+                    src: op.clone(),
                     ty: to,
                 });
             }
             self.env_top().insert(*name, (Place::Slot(slot), to));
+            if weak_binding {
+                let wr = self.temp();
+                self.emit(Instr::Param { a: op, ty: to });
+                self.emit(Instr::Call {
+                    dst: Some(wr),
+                    callee: Callee::Runtime(crate::tac::RuntimeFn::WeakRetain),
+                    ty: to,
+                });
+                self.emit(Instr::Store {
+                    base: slot,
+                    idx: Operand::Const(crate::tac::Const::Int(0)),
+                    src: Operand::Temp(wr),
+                    ty: to,
+                });
+                self.class_drops
+                    .last_mut()
+                    .expect("class drop stack in sync with defers")
+                    .push((Place::Slot(slot), to, weak_binding));
+            } else if class_binding {
+                if !is_ctor && !is_null_init {
+                    if nullable_class {
+                        // M4 slice 4a: retain the payload (slot 1), not the flag
+                        self.emit_class_retain(Place::Slot(slot), to);
+                    } else {
+                        self.emit(Instr::Param { a: op, ty: to });
+                        self.emit(Instr::Call {
+                            dst: Some(slot),
+                            callee: Callee::Runtime(crate::tac::RuntimeFn::Retain),
+                            ty: to,
+                        });
+                    }
+                }
+                self.class_drops
+                    .last_mut()
+                    .expect("class drop stack in sync with defers")
+                    .push((Place::Slot(slot), to, weak_binding));
+            }
         }
     }
 
@@ -782,6 +1032,49 @@ impl<'r, 'a> Ctx<'r, 'a> {
         };
         if op == OperatorKind::Eq {
             let v = expr::lower_expr_as(self, value, to);
+            // M4 slice 4d: class/?P var 重赋值所有权——release 旧 payload，
+            // 写回后按 rhs 来源补 retain（调用结果 +1 / null 字面量免 retain）。
+            // 不变式：var 恒持有恰好一个引用（与绑定时登记的 drop 配对）。
+            let nullable_class = matches!(
+                self.sem.tys.kind(to),
+                TyKind::Nullable(inner) if crate::layout::is_class(self, *inner)
+            );
+            let classish = crate::layout::is_class(self, to) || nullable_class;
+            let self_assign = match (&target.kind, &value.kind) {
+                (
+                    ast::syntax::expr::ExprKind::Ident(tn),
+                    ast::syntax::expr::ExprKind::Ident(vn),
+                ) => tn == vn,
+                _ => false,
+            };
+            if classish && !self_assign {
+                let slot_only = matches!(&target.kind, ast::syntax::expr::ExprKind::Ident(name)
+                    if matches!(self.lookup(*name), Some((Place::Slot(_), _))));
+                if slot_only {
+                    let place = match &target.kind {
+                        ast::syntax::expr::ExprKind::Ident(name) => match self.lookup(*name) {
+                            Some((pl, _)) => pl,
+                            None => {
+                                self.diag(target.span, "赋值目标不在环境（sem 契约破缺）");
+                                return;
+                            }
+                        },
+                        _ => unreachable!("slot_only 已限定 Ident"),
+                    };
+                    // 旧值 release（null 载荷为 runtime no-op）
+                    self.emit_class_release(place, to, false);
+                    let rhs_plus1 = crate::expr::plus1_origin(self, value);
+                    if rhs_plus1 {
+                        // M4 slice 4b (Plan C): +1 temp transfers into the var
+                        let _ = self.take_stmt_temp(&v);
+                    }
+                    expr::assign_to(self, target, v, target.span);
+                    if !rhs_plus1 {
+                        self.emit_class_retain(place, to);
+                    }
+                    return;
+                }
+            }
             expr::assign_to(self, target, v, target.span);
             return;
         }
@@ -823,6 +1116,8 @@ impl<'r, 'a> Ctx<'r, 'a> {
         // 作用域覆盖 cond_b + body（scoped 时 lower_cond 推作用域）
         self.switch_to(cond_b);
         let (c, scoped) = expr::lower_cond(self, cond);
+        // M4 slice 4b (Plan C)：条件临时值每迭代释放
+        self.drain_stmt_temps();
         self.terminate(Term::Br {
             cond: c,
             then_: body_b,
@@ -1394,6 +1689,117 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 let _ = self.lower_block(body);
             }
         }
+        for q in (depth..self.class_drops.len()).rev() {
+            let drops: Vec<(Place, TyId, bool)> = self.class_drops[q].drain(..).rev().collect();
+            for (place, ty, weak) in drops {
+                self.emit_class_release(place, ty, weak);
+            }
+        }
+    }
+
+    /// M4 slice 1：class 绑定的隐式 release。Temp 直持对象指针；
+    /// Slot 先 Load 槽 0。与 defer 同出口纪律。
+    /// M4 slice 4a: nullable class 的 payload（对象指针）在槽 1
+    /// （槽 0 是 i8 flag）；标量 class 的指针在槽 0。
+    fn class_ptr_operand(&mut self, place: Place, ty: TyId) -> Option<(Operand, TyId)> {
+        let inner = match self.sem.tys.kind(ty) {
+            TyKind::Nullable(inner) => Some(*inner),
+            _ => None,
+        };
+        let (base, idx, lty) = match place {
+            Place::Temp(t) => (t, if inner.is_some() { 1 } else { 0 }, inner.unwrap_or(ty)),
+            Place::Slot(s) => (s, if inner.is_some() { 1 } else { 0 }, inner.unwrap_or(ty)),
+            Place::Global(_) => return None,
+        };
+        if idx == 0 && inner.is_none() {
+            return Some((Operand::Temp(base), lty));
+        }
+        let v = self.temp();
+        self.emit(Instr::Load {
+            dst: v,
+            base,
+            idx: Operand::Const(crate::tac::Const::Int(idx)),
+            ty: lty,
+        });
+        Some((Operand::Temp(v), lty))
+    }
+
+    // ---- M4 slice 4b (Plan C): +1 temp discipline ----
+
+    /// Register a +1 class temporary (ctor/call/upgrade/join).
+    pub(crate) fn note_stmt_temp(&mut self, t: TempId, ty: TyId) {
+        self.stmt_temps.push((t, ty));
+    }
+
+    /// Consumer takeover: transfer (unregister) when the operand is a
+    /// registered +1 temporary.
+    pub(crate) fn take_stmt_temp(&mut self, op: &Operand) -> bool {
+        if let Operand::Temp(t) = op
+            && let Some(pos) = self.stmt_temps.iter().position(|(x, _)| x == t)
+        {
+            self.stmt_temps.swap_remove(pos);
+            return true;
+        }
+        false
+    }
+
+    /// Statement end / after cond eval / branch end: release untransferred
+    /// +1 temporaries.
+    pub(crate) fn drain_stmt_temps(&mut self) {
+        let pending: Vec<(TempId, TyId)> = self.stmt_temps.drain(..).collect();
+        for (t, ty) in pending {
+            self.emit_class_release(Place::Temp(t), ty, false);
+        }
+    }
+
+    /// Unified takeover at binding/return/assignment: transfer +1-origin
+    /// (take), retain borrowed values. No-op for non-class types.
+    pub(crate) fn assume_class_value(
+        &mut self,
+        op: &Operand,
+        e: &ast::syntax::expr::ExprWrap,
+        ty: TyId,
+    ) {
+        if !crate::expr::classish_ty(self, ty) {
+            return;
+        }
+        if crate::expr::plus1_origin(self, e) {
+            let _ = self.take_stmt_temp(op);
+        } else if let Operand::Temp(t) = op {
+            self.emit_class_retain(Place::Temp(*t), ty);
+        }
+    }
+
+    /// M4 slice 4a: retain class 值；nullable class 经 class_ptr_operand 取 payload
+    pub(crate) fn emit_class_retain(&mut self, place: Place, ty: TyId) {
+        let Some((op, pty)) = self.class_ptr_operand(place, ty) else {
+            return;
+        };
+        self.emit(Instr::Param { a: op, ty: pty });
+        self.emit(Instr::Call {
+            dst: None,
+            callee: Callee::Runtime(crate::tac::RuntimeFn::Retain),
+            ty: self.sem.tys.unit,
+        });
+    }
+
+    fn emit_class_release(&mut self, place: Place, ty: TyId, weak: bool) {
+        let Some((op, pty)) = self.class_ptr_operand(place, ty) else {
+            return;
+        };
+        // Param ty must be the payload (class) ty: the payload temp is a
+        // scalar ptr; passing outer ?P (agg) releases the cell address
+        self.emit(Instr::Param { a: op, ty: pty });
+        let rt = if weak {
+            crate::tac::RuntimeFn::WeakDrop
+        } else {
+            crate::tac::RuntimeFn::Release
+        };
+        self.emit(Instr::Call {
+            dst: None,
+            callee: Callee::Runtime(rt),
+            ty: self.sem.tys.unit,
+        });
     }
 
     pub(crate) fn lookup(&self, name: Symbol) -> Option<(Place, TyId)> {

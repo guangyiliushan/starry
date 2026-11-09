@@ -44,7 +44,7 @@
 | `Where` | `where` | `global` |
 | `Mut` | `mut` | `global` |
 
-## Modifier word (14)
+## Modifier word (15)
 
 | Variant | Lexeme | Grammar slot |
 |---|---|---|
@@ -62,6 +62,7 @@
 | `OperatorWord` | `operator` | `modifier` |
 | `Infix` | `infix` | `modifier` |
 | `Vararg` | `vararg` | `modifier` |
+| `Weak` | `weak` | `modifier` |
 
 ## Slot word (31)
 

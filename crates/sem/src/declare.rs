@@ -11,7 +11,7 @@ use ast::syntax::ty::{TypeKind, TypeWrap};
 
 use crate::SemState;
 use crate::def::{Def, DefId, DefKind, DefSig, ScopeId};
-use crate::ty::{FloatKind, IntKind, TyId, TyKind};
+use crate::ty::{FloatKind, IntKind, TyArena, TyId, TyKind};
 
 const BUILTINS: &[&str] = &[
     "i4", "i8", "i16", "i32", "i64", "i128", "int", "f32", "f64", "bool", "string", "char", "unit",
@@ -98,6 +98,30 @@ fn add_def(st: &mut SemState, scope: ScopeId, name: Symbol, span: Span, kind: De
         ));
     }
     def
+}
+
+/// M4 slice 1：class 字段的 8B 标量判据（与 irc::layout::is_aggregate 同口径的
+/// sem 侧镜像——sem 不依赖 irc，种类表手工对齐；i128 单独拒）
+fn class_field_ok(tys: &TyArena, ty: TyId) -> bool {
+    // i128 单独拒：payload 槽模型 slice 1 只保 8B 槽（guard 不跨 or 臂）
+    match tys.kind(ty) {
+        TyKind::Int(IntKind::I128) => false,
+        TyKind::Int(_)
+        | TyKind::Float(_)
+        | TyKind::Bool
+        | TyKind::Char
+        | TyKind::String
+        | TyKind::Ref { .. }
+        | TyKind::Pointer { .. } => true,
+        _ => false,
+    }
+}
+
+pub(crate) fn is_class_ty(st: &SemState, ty: TyId) -> bool {
+    matches!(
+        st.tys.kind(ty),
+        TyKind::Named(d, _) if matches!(st.defs.get(*d).kind, DefKind::Class)
+    )
 }
 
 /// M7：类型形参作用域——形参名注册为 DefKind::TypeParam，返回新作用域
@@ -293,20 +317,78 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
             }
         }
         DeclKind::Class(c) => {
-            // v1 不支持 class（无构造路径/方法调用）：注册保持不级联，钉一条诊断
-            st.diags.emit(Diagnostic::error(
-                DiagCode::SemUnsupportedConstruct,
-                decl.span,
-                "class declarations are not supported in semantic v1",
-            ));
+            // M4 slice 1：class 落地（主构造 val/var 头参数=字段、堆分配、
+            // 复制 retain、块出口隐式 release）。方法/继承/deinit/weak/
+            // 引用相等/可空 class/二级构造 后续切片；注册保持防级联。
             let def = add_def(st, scope, c.name, decl.span, DefKind::Class);
+            st.defs.get_mut(def).decl = Some(index);
+            if let Some(slot) = st.decl_def.last_mut() {
+                *slot = Some(def);
+            }
             let ms = st.scopes.new_scope(Some(scope));
             st.defs.get_mut(def).member_scope = Some(ms);
+            // 头字段注册（M3 三态纪律同 struct 主构造）
+            let mut fidx = 0usize;
+            if let Some(pc) = &c.primary_ctor {
+                for p in &pc.params {
+                    if matches!(
+                        p.modifier,
+                        ast::syntax::decl::ParamModifier::Val
+                            | ast::syntax::decl::ParamModifier::Var
+                    ) {
+                        add_def(
+                            st,
+                            ms,
+                            p.name,
+                            decl.span,
+                            DefKind::StructField {
+                                parent: def,
+                                index: fidx,
+                                mutable: Some(p.modifier == ast::syntax::decl::ParamModifier::Var),
+                            },
+                        );
+                        fidx += 1;
+                    }
+                }
+            }
             for member in &c.members {
-                if let ClassMember::Declaration(d) = member
-                    && let DeclKind::Fun(f) = &d.kind
-                {
-                    add_def(st, ms, f.name, d.span, DefKind::Fun);
+                match member {
+                    // M4 slice 2b：class body 绑定（字段声明）未排期——
+                    // 字段走主构造 val/var 头参数（M3 纪律）
+                    ClassMember::Declaration(d) if matches!(&d.kind, DeclKind::Binding(_)) => {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnsupportedConstruct,
+                            d.span,
+                            "class body field bindings are not supported in this slice (use primary-constructor val/var parameters)",
+                        ));
+                    }
+                    ClassMember::Declaration(d) if matches!(&d.kind, DeclKind::Fun(_)) => {
+                        if let DeclKind::Fun(f) = &d.kind {
+                            if f.params.iter().any(|p| p.default.is_some()) {
+                                st.diags.emit(Diagnostic::error(
+                                    DiagCode::SemUnsupportedConstruct,
+                                    d.span,
+                                    "method default parameters are not supported in this slice",
+                                ));
+                            }
+                            add_def(st, ms, f.name, d.span, DefKind::Fun);
+                        }
+                    }
+                    // M4 slice 2b：deinit 注册为 member_scope 里的 Fun def
+                    //（名 "deinit"、零形参、unit 返回；release 经 header meta 派发）
+                    ClassMember::Deinit(_) => {
+                        let dname = st.interner.intern("deinit");
+                        add_def(st, ms, dname, decl.span, DefKind::Fun);
+                    }
+                    // R4：v1 无二级构造——init 块/构造器稳定拒收
+                    ClassMember::Constructor(_) | ClassMember::Init(_) => {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnsupportedConstruct,
+                            decl.span,
+                            "secondary constructors (init) are not supported in this slice",
+                        ));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -394,10 +476,31 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
 
 /// 顶层 / 语句 binding：模式必须是绑定形（binding/wildcard/destructure 内层绑定）
 fn declare_binding_name(b: &BindingDecl, scope: ScopeId, span: Span, st: &mut SemState) {
+    // M4 slice 3：`weak var` 弱引用（R4 拼写；修饰词表 weak）
+    let weak = b
+        .modifiers
+        .modifiers
+        .iter()
+        .any(|m| m.word == ast::token::ModifierWord::Weak);
+    if weak && b.immutable {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemUnsupportedConstruct,
+            span,
+            "`weak` requires a `var` binding",
+        ));
+    }
+    if weak && b.init.is_none() {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemUnsupportedConstruct,
+            span,
+            "`weak` bindings require an initializer in this slice",
+        ));
+    }
     use ast::syntax::pat::PatKind;
     fn walk(
         pat: &ast::syntax::pat::PatWrap,
         immutable: bool,
+        weak: bool,
         scope: ScopeId,
         span: Span,
         st: &mut SemState,
@@ -411,6 +514,7 @@ fn declare_binding_name(b: &BindingDecl, scope: ScopeId, span: Span, st: &mut Se
                     span,
                     DefKind::LocalBinding {
                         mutable: !immutable,
+                        weak,
                     },
                 );
                 // 与局部绑定同契约：check 经 pat_binding_def 精化解构元素类型
@@ -420,14 +524,14 @@ fn declare_binding_name(b: &BindingDecl, scope: ScopeId, span: Span, st: &mut Se
             | PatKind::Tuple { elements: ps, .. }
             | PatKind::Array { elements: ps, .. } => {
                 for p in ps {
-                    walk(p, immutable, scope, span, st);
+                    walk(p, immutable, weak, scope, span, st);
                 }
             }
             _ => {}
         }
     }
     let immutable = b.immutable;
-    walk(&b.pattern, immutable, scope, span, st);
+    walk(&b.pattern, immutable, weak, scope, span, st);
 }
 
 // ==================== 顶层签名 lower ====================
@@ -573,11 +677,61 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                 }
             }
             DeclKind::Class(c) => {
-                // 成员 fun 签名 lower（成员作用域已由 declare 建好）
+                // M4 slice 1：头字段签名 lower（payload 槽全 i64——i128/聚合
+                // 字段与默认值在 slice 1 拒收，保字段寻址的 8B 槽模型）
                 let class_def = match st.scopes.lookup_local(root, c.name) {
                     Some(d) => d,
                     None => continue,
                 };
+                let mut fields: Vec<(Symbol, TyId)> = Vec::new();
+                if let Some(pc) = &c.primary_ctor {
+                    for p in &pc.params {
+                        if p.default.is_some() {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemUnsupportedConstruct,
+                                item.span,
+                                "class primary-constructor defaults are not supported in this slice",
+                            ));
+                        }
+                        if !matches!(
+                            p.modifier,
+                            ast::syntax::decl::ParamModifier::Val
+                                | ast::syntax::decl::ParamModifier::Var
+                        ) {
+                            continue;
+                        }
+                        let Some(ann) = &p.ty else {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemParamTypeRequired,
+                                item.span,
+                                "class constructor field requires a type annotation",
+                            ));
+                            continue;
+                        };
+                        let ty = lower_ty(st, root, ann);
+                        if !class_field_ok(&st.tys, ty) {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemUnsupportedConstruct,
+                                item.span,
+                                "class fields must be 8-byte scalars in this slice (no i128/aggregates)",
+                            ));
+                            continue;
+                        }
+                        fields.push((p.name, ty));
+                    }
+                }
+                st.defs.get_mut(class_def).sig.fields = fields;
+                // 头构造参数（全量，含仅构造参数）进 sig.params——class_ctor
+                // 的槽机与 sem 的实参核查都读它
+                if let Some(pc) = &c.primary_ctor {
+                    let params = lower_params(st, root, &pc.params, item.span);
+                    let defaults: Vec<bool> =
+                        pc.params.iter().map(|p| p.default.is_some()).collect();
+                    let sig = &mut st.defs.get_mut(class_def).sig;
+                    sig.params = params;
+                    sig.param_defaults = defaults;
+                }
+                // 成员 fun 签名 lower（成员作用域已由 declare 建好）
                 let ms = st.defs.get(class_def).member_scope;
                 let Some(ms) = ms else { continue };
                 for member in &c.members {
@@ -835,6 +989,8 @@ fn lower_ty_uncached(st: &mut SemState, scope: ScopeId, ty: &TypeWrap) -> TyId {
         }
         TypeKind::Nullable(inner) => {
             let t = lower_ty(st, scope, inner);
+            // M4 slice 4a：可空 class（?P）放行——值模型 = 2 槽
+            //（i8 flag + ptr payload），布局/槽类型见 irc::layout 的 class 臂
             st.tys.nullable(t)
         }
         TypeKind::Array { element, len } => {

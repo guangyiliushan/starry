@@ -10,7 +10,7 @@ pub const ANTLR_TERMS_PATH: &str = "docs/syntax/generated/StarryLexerTerms.g4";
 pub const MARKDOWN_TABLE_PATH: &str = "docs/syntax/generated/lexicon.md";
 
 pub const HARD_KEYWORD_COUNT: usize = 37;
-pub const MODIFIER_WORD_COUNT: usize = 14;
+pub const MODIFIER_WORD_COUNT: usize = 15;
 pub const SLOT_WORD_COUNT: usize = 31;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -541,7 +541,7 @@ mod tests {
 
         let markdown = generate_markdown(&words);
         assert!(markdown.contains("## Hard keyword (37)"));
-        assert!(markdown.contains("## Modifier word (14)"));
+        assert!(markdown.contains("## Modifier word (15)"));
         assert!(markdown.contains("## Slot word (31)"));
     }
 

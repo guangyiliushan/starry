@@ -483,3 +483,25 @@ fn checked_arith_emits_overflow_intrinsic_and_panic_decl() {
         "{text}"
     );
 }
+
+#[test]
+fn class_object_emits_alloc_retain_release() {
+    // M4 slice 1：class 对象 = alloc + 复制 retain + 块出口隐式 release；
+    // 字段经 24B header 偏移（offsetptr/GEP i8）
+    let (text, codes) = emit(
+        "class P(val x: int, var y: int)\nfun main() : int {\n    val a = P(1, 2)\n    val b = a\n    b.y = 9\n    return a.x + b.y\n}",
+    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    if !llvm_as_ok(&text) {
+        panic!("LLVM validator rejected:\n{text}");
+    }
+    assert!(
+        text.contains("starry_alloc_object")
+            && text.contains("starry_retain")
+            && text.contains("starry_release")
+            && text.contains("getelementptr i8"),
+        "{text}"
+    );
+    // 头 24B：第一个字段（槽 0）偏移 24
+    assert!(text.contains("getelementptr i8, ptr %u"), "{text}");
+}

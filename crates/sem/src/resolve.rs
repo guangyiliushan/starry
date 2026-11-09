@@ -4,13 +4,13 @@
 //! （pat_res 在 check 补写）；lambda/spawn 内部整体跳过（见 semantic-notes）。
 
 use ast::interner::Symbol;
-use ast::syntax::decl::{DeclKind, FunDecl, FunctionBody};
+use ast::syntax::decl::{ClassMember, DeclKind, FunDecl, FunctionBody};
 use ast::syntax::expr::*;
 use ast::syntax::node::{DiagCode, Diagnostic, NodeId, SourceFile, Span};
 use ast::syntax::pat::{PatKind, PatWrap};
 use ast::syntax::stmt::{StmtKind, StmtWrap};
 
-use crate::declare::{lookup_with_imports, lower_ty, resolve_path};
+use crate::declare::{lookup_with_imports, lower_ty, member_lookup, resolve_path};
 use crate::def::{Def, DefId, DefKind, DefSig, ScopeId};
 use crate::ty::TyId;
 use crate::{FlowKind, FlowRes, FunFrame, LabelFrame, PatRes, SemState};
@@ -31,6 +31,34 @@ pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
                     continue;
                 };
                 resolve_fun(item.id, f, fdef, st)
+            }
+            // M4 slice 2b：class 成员函数与 deinit 的解析（self 注入作用域）
+            DeclKind::Class(c) => {
+                let Some(class_def) = st.decl_def.get(i).copied().flatten() else {
+                    continue;
+                };
+                let self_ty = st.tys.builtin_named(class_def);
+                let self_name = st.interner.intern("self");
+                for member in &c.members {
+                    match member {
+                        ClassMember::Declaration(d) if matches!(&d.kind, DeclKind::Fun(_)) => {
+                            if let DeclKind::Fun(f) = &d.kind {
+                                let Some(mdef) = member_lookup(st, class_def, f.name) else {
+                                    continue;
+                                };
+                                resolve_method(d.id, f, mdef, self_name, self_ty, st);
+                            }
+                        }
+                        ClassMember::Deinit(b) => {
+                            let dname = st.interner.intern("deinit");
+                            let Some(mdef) = member_lookup(st, class_def, dname) else {
+                                continue;
+                            };
+                            resolve_deinit(b, mdef, self_name, self_ty, st);
+                        }
+                        _ => {}
+                    }
+                }
             }
             DeclKind::Struct(s) => {
                 // M3：主构造默认值表达式在根作用域解析（与函数默认实参同纪律）
@@ -54,12 +82,78 @@ fn zero_span() -> Span {
     Span { start: 0, end: 0 }
 }
 
+/// M4 slice 2b：建 self 参数 def 的作用域（成员函数与 deinit 共用）
+fn self_scope(class_def: DefId, self_name: Symbol, self_ty: TyId, st: &mut SemState) -> ScopeId {
+    let root = st.scopes.root();
+    let sscope = st.scopes.new_scope(Some(root));
+    let unit = st.tys.unit;
+    let self_def = st.defs.push(Def {
+        kind: DefKind::Param,
+        name: self_name,
+        scope: sscope,
+        span: zero_span(),
+        sig: {
+            let mut s = DefSig::new(unit, st.tys.unknown);
+            s.ty = self_ty;
+            s
+        },
+        resolving: false,
+        alias_of: None,
+        alias_resolved: None,
+        member_scope: None,
+        external: false,
+        ty_params: 0,
+        decl: None,
+    });
+    st.scopes.insert(sscope, self_name, self_def);
+    let _ = class_def;
+    sscope
+}
+
+fn resolve_method(
+    decl_id: NodeId,
+    f: &FunDecl,
+    mdef: DefId,
+    self_name: Symbol,
+    self_ty: TyId,
+    st: &mut SemState,
+) {
+    let sscope = self_scope(mdef, self_name, self_ty, st);
+    // sig.ty 复用为 self 的 class 值类型（irc 方法 lowering/调用注入的通道）
+    st.defs.get_mut(mdef).sig.ty = self_ty;
+    resolve_fun_with_parent(decl_id, f, mdef, sscope, st);
+}
+
+fn resolve_deinit(block: &Block, mdef: DefId, self_name: Symbol, self_ty: TyId, st: &mut SemState) {
+    let sscope = self_scope(mdef, self_name, self_ty, st);
+    st.defs.get_mut(mdef).sig.ty = self_ty;
+    // deinit 块无独立 NodeId 头——用 block 首语句 id 作帧锚（仅 flow 目标用）
+    let anchor_id = block.stmts.first().map(|s| s.id).unwrap_or(NodeId(0));
+    st.funs.push(FunFrame {
+        node: anchor_id,
+        def: mdef,
+    });
+    resolve_block(block, st, sscope);
+    st.funs.pop();
+}
+
 fn resolve_fun(decl_id: NodeId, f: &FunDecl, fdef: DefId, st: &mut SemState) {
     let root = st.scopes.root();
-    // 参数作用域：参数 defs 的 ty 已在 declare 期 lower 进 fun sig。
-    // M7：泛型 fun 的 pscope 挂在类型形参作用域下（member_scope 复用），
-    // 体里的 T 注解/类型实参 lower 才能解析
+    // M7：泛型 fun 的 pscope 挂在类型形参作用域下（member_scope 复用）
     let parent = st.defs.get(fdef).member_scope.unwrap_or(root);
+    resolve_fun_with_parent(decl_id, f, fdef, parent, st);
+}
+
+/// M4 slice 2b：class 成员函数/deinit 的解析——parent 是含 self 的作用域
+fn resolve_fun_with_parent(
+    decl_id: NodeId,
+    f: &FunDecl,
+    fdef: DefId,
+    parent: ScopeId,
+    st: &mut SemState,
+) {
+    let root = st.scopes.root();
+    // 参数作用域：参数 defs 的 ty 已在 declare 期 lower 进 fun sig。
     let sig_params = st.defs.get(fdef).sig.params.clone();
     let pscope = st.scopes.new_scope(Some(parent));
     for (name, ty) in sig_params {
@@ -131,7 +225,19 @@ fn resolve_stmt(s: &StmtWrap, st: &mut SemState, scope: ScopeId) {
             if let Some(init) = &b.init {
                 resolve_expr(init, st, scope);
             }
-            declare_local_binding(&b.pattern, b.immutable, scope, st);
+            let weak = b
+                .modifiers
+                .modifiers
+                .iter()
+                .any(|m| m.word == ast::token::ModifierWord::Weak);
+            if weak && b.immutable {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    b.pattern.span,
+                    "`weak` requires a `var` binding",
+                ));
+            }
+            declare_local_binding(&b.pattern, b.immutable, weak, scope, st);
             if let Some(t) = &b.ty {
                 let ty = lower_ty(st, scope, t);
                 note_binding_ann(st, &b.pattern, ty);
@@ -145,7 +251,7 @@ fn resolve_stmt(s: &StmtWrap, st: &mut SemState, scope: ScopeId) {
         } => {
             resolve_expr(iterable, st, scope);
             let lscope = st.scopes.new_scope(Some(scope));
-            declare_local_binding(pattern, true, lscope, st);
+            declare_local_binding(pattern, true, false, lscope, st);
             // 无标签帧也压栈：无标签 break/continue 取栈顶即最近循环
             st.labels.push(LabelFrame {
                 label: *label,
@@ -266,7 +372,7 @@ fn resolve_condition(cond: &Condition, st: &mut SemState, scope: ScopeId) -> Sco
         Condition::Val { pattern, expr } => {
             resolve_expr(expr, st, scope);
             let pscope = st.scopes.new_scope(Some(scope));
-            declare_local_binding(pattern, true, pscope, st);
+            declare_local_binding(pattern, true, false, pscope, st);
             // 与 ExprKind::Is 同纪律：构造器路径 resolve 期解析（pat_res），
             // 否则两段构造器（Opt.Some(w)）在 if val 里不做 payload 精化
             resolve_pattern(pattern, st, pscope);
@@ -324,7 +430,7 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
         }
         ExprKind::Is { lhs, pattern, .. } => {
             resolve_expr(lhs, st, scope);
-            declare_local_binding(pattern, true, scope, st);
+            declare_local_binding(pattern, true, false, scope, st);
             resolve_pattern(pattern, st, scope);
         }
         // in 右操作数是集合表达式（EBNF RangeExpr 侧）：不产生模式绑定
@@ -380,7 +486,7 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
             if let Condition::Val { pattern, expr } = &**cond {
                 resolve_expr(expr, st, scope);
                 let pscope = st.scopes.new_scope(Some(scope));
-                declare_local_binding(pattern, true, pscope, st);
+                declare_local_binding(pattern, true, false, pscope, st);
                 // 与 is/while val 同纪律：两段构造器 resolve 期解析（pat_res）
                 resolve_pattern(pattern, st, pscope);
                 resolve_block(then_block, st, pscope);
@@ -408,7 +514,7 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
                     WhenPattern::Expression(e) => resolve_expr(e, st, bscope),
                     WhenPattern::Pattern(p) => {
                         // 构造器参数绑定（如 Opt.Some(x) 的 x）注册进分支作用域
-                        declare_local_binding(p, true, bscope, st);
+                        declare_local_binding(p, true, false, bscope, st);
                         resolve_pattern(p, st, bscope);
                     }
                     WhenPattern::Else => {}
@@ -455,14 +561,16 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
 pub(crate) fn declare_local_binding(
     pat: &PatWrap,
     immutable: bool,
+    weak: bool,
     scope: ScopeId,
     st: &mut SemState,
 ) {
-    fn walk(pat: &PatWrap, immutable: bool, scope: ScopeId, st: &mut SemState) {
+    fn walk(pat: &PatWrap, immutable: bool, weak: bool, scope: ScopeId, st: &mut SemState) {
         match &pat.kind {
             PatKind::Binding { name, .. } => {
                 let def = st.defs.push(Def {
                     kind: DefKind::LocalBinding {
+                        weak,
                         mutable: !immutable,
                     },
                     name: *name,
@@ -490,28 +598,28 @@ pub(crate) fn declare_local_binding(
             // 否则 `A(x) | B(x) -> x` 在同作用域被误报重名
             PatKind::Or(ps) => {
                 if let Some(first) = ps.first() {
-                    walk(first, immutable, scope, st);
+                    walk(first, immutable, weak, scope, st);
                 }
             }
             PatKind::Tuple { elements: ps, .. } | PatKind::Array { elements: ps, .. } => {
                 for p in ps {
-                    walk(p, immutable, scope, st);
+                    walk(p, immutable, weak, scope, st);
                 }
             }
             PatKind::Constructor { args, .. } => {
                 for p in args {
-                    walk(p, immutable, scope, st);
+                    walk(p, immutable, weak, scope, st);
                 }
             }
             PatKind::Struct { fields, .. } => {
                 for (_, p) in fields {
-                    walk(p, immutable, scope, st);
+                    walk(p, immutable, weak, scope, st);
                 }
             }
             _ => {}
         }
     }
-    walk(pat, immutable, scope, st);
+    walk(pat, immutable, weak, scope, st);
 }
 
 fn note_binding_ann(st: &mut SemState, pat: &PatWrap, ty: TyId) {
