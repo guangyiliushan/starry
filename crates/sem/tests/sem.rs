@@ -1323,9 +1323,12 @@ fn generic_rejections_are_stable() {
         "fun main<T>() : int {\n    return 0\n}",
         DiagCode::SemUnsupportedConstruct,
     );
-    // 类型形参 bounds（trait bounds 是 M9 地基）
+    // M9 9c：类型形参 bounds 已落地——声明放行；实例化违例拒收
+    assert_clean(
+        "trait Eq {\n    fun eq(o: Self): bool\n}\nfun f<T : Eq>(v: T) : int {\n    return 0\n}\nfun main() : int {\n    return 0\n}",
+    );
     assert_has(
-        "fun f<T : Equatable>(v: T) : int {\n    return 0\n}\nfun main() : int {\n    return f<int>(1)\n}",
+        "trait Eq {\n    fun eq(o: Self): bool\n}\nstruct Plain(val v: int)\nfun f<T : Eq>(v: T) : int {\n    return 0\n}\nfun main() : int {\n    val p = Plain(1)\n    return f(p)\n}",
         DiagCode::SemUnsupportedConstruct,
     );
     // 泛型 enum

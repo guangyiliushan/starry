@@ -994,3 +994,17 @@ fn trait_static_dispatch_end_to_end() {
     };
     assert_eq!(out, "point\n84\n");
 }
+
+#[test]
+fn generic_bounds_end_to_end() {
+    // M9 9c: bounded type params — the concrete type argument must
+    // implement the bound trait; trait method calls through the
+    // type parameter resolve in the instantiated clone.
+    let Some(out) = build_and_run(
+        "generic_bounds",
+        "trait Show {\n    fun show(): string\n}\nstruct Point(val x: int)\nstruct Label(val t: string)\nimpl Show for Point {\n    fun show(): string {\n        return \"pt\"\n    }\n}\nimpl Show for Label {\n    fun show(): string {\n        return \"lbl\"\n    }\n}\nfun describe<T: Show>(x: T): string {\n    return x.show()\n}\nfun main() {\n    val a = describe(Point(1))\n    val b = describe(Label(\"L\"))\n    print(a)\n    print(b)\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "pt\nlbl\n");
+}

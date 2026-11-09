@@ -93,6 +93,9 @@ pub struct DefSig {
     /// M7 slice 2：类型形参默认值（declare 期在类型形参作用域 lower；
     /// 与 type_params 对齐；未提供的为 None）
     pub tp_defaults: Vec<Option<TyId>>,
+    /// M9 9c：类型形参 bounds——每项 = 该形参的 trait def 列表
+    ///（`T : A & B` 交集；实例化时逐一查 impl 注册表兑现）
+    pub tp_bounds: Vec<Vec<DefId>>,
     pub params: Vec<(Symbol, TyId)>,
     pub ret: TyId,
     pub ty: TyId,
@@ -108,6 +111,7 @@ impl DefSig {
         Self {
             vis: Vis::Pub,
             tp_defaults: Vec::new(),
+            tp_bounds: Vec::new(),
             params: Vec::new(),
             ret: unit,
             ty: error,

@@ -421,11 +421,9 @@ fn reject_generic_extras(
     st: &mut SemState,
     what: &str,
 ) {
-    // M7 slice 2：类型形参默认值已落地（调用点推断的兜底）；
-    // bounds/variance/where 仍拒收（bounds 依赖 trait，M9 前）
-    let fancy = type_params
-        .iter()
-        .any(|tp| tp.variance.is_some() || !tp.bounds.is_empty());
+    // M7 slice 2 + M9 9c：类型形参默认值与 bounds 已落地；variance/
+    // where 仍拒收（where 是 bounds 的语法糖后置）
+    let fancy = type_params.iter().any(|tp| tp.variance.is_some());
     if fancy {
         st.diags.emit(Diagnostic::error(
             DiagCode::SemUnsupportedConstruct,
@@ -521,6 +519,37 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                     .map(|tp| tp.default.as_ref().map(|d| lower_ty(st, tscope, d)))
                     .collect();
                 st.defs.get_mut(def).sig.tp_defaults = tp_defaults;
+                // M9 9c：bounds 解析为 trait def 列表（tscope 内解析）
+                st.in_impl_header = true; // bounds 命名 trait 合法
+                let tp_bounds: Vec<Vec<DefId>> = f
+                    .type_params
+                    .iter()
+                    .map(|tp| {
+                        tp.bounds
+                            .iter()
+                            .filter_map(|b| {
+                                let bt = lower_ty(st, tscope, b);
+                                match st.tys.kind(bt) {
+                                    TyKind::Named(d, _)
+                                        if matches!(st.defs.get(*d).kind, DefKind::Trait) =>
+                                    {
+                                        Some(*d)
+                                    }
+                                    _ => {
+                                        st.diags.emit(Diagnostic::error(
+                                            DiagCode::SemTypeMismatch,
+                                            b.span,
+                                            "type parameter bounds must name traits",
+                                        ));
+                                        None
+                                    }
+                                }
+                            })
+                            .collect()
+                    })
+                    .collect();
+                st.in_impl_header = false;
+                st.defs.get_mut(def).sig.tp_bounds = tp_bounds;
             }
         }
         DeclKind::Binding(b) => {
@@ -1111,6 +1140,37 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                     .map(|tp| tp.default.as_ref().map(|d| lower_ty(st, sscope, d)))
                     .collect();
                 st.defs.get_mut(def).sig.tp_defaults = tp_defaults;
+                // M9 9c：struct 形参 bounds（sscope 内解析）
+                st.in_impl_header = true; // bounds 命名 trait 合法
+                let tp_bounds: Vec<Vec<DefId>> = s
+                    .type_params
+                    .iter()
+                    .map(|tp| {
+                        tp.bounds
+                            .iter()
+                            .filter_map(|b| {
+                                let bt = lower_ty(st, sscope, b);
+                                match st.tys.kind(bt) {
+                                    TyKind::Named(d, _)
+                                        if matches!(st.defs.get(*d).kind, DefKind::Trait) =>
+                                    {
+                                        Some(*d)
+                                    }
+                                    _ => {
+                                        st.diags.emit(Diagnostic::error(
+                                            DiagCode::SemTypeMismatch,
+                                            b.span,
+                                            "type parameter bounds must name traits",
+                                        ));
+                                        None
+                                    }
+                                }
+                            })
+                            .collect()
+                    })
+                    .collect();
+                st.in_impl_header = false;
+                st.defs.get_mut(def).sig.tp_bounds = tp_bounds;
                 // M3 主构造：头 val/var 参数类型（引用字段拒绝同纪律）+ body 字段
                 let mut fields: Vec<(Symbol, TyId)> = Vec::new();
                 for p in &s.primary_ctor {

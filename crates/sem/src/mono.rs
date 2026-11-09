@@ -6,12 +6,47 @@
 //! - 值类型一律 `Named(spec_def, [])`：irc/opt/llvme 对实例化产物零改动。
 
 use ast::syntax::decl::DeclKind;
+use ast::syntax::node::{DiagCode, Diagnostic};
 use ast::syntax::ty::TypeParamName;
 
 use crate::Sem;
 use crate::SemState;
 use crate::def::{Def, DefId, DefKind, DefSig};
 use crate::ty::{TyId, TyKind};
+
+/// M9 9c：bounds 兑现——`def` 的第 i 个类型形参的每个 bound trait
+/// 须在 impl 注册表里有 `args[i]` 的 impl；否则稳定诊断。
+fn check_bounds(st: &mut SemState, def: DefId, args: &[TyId]) {
+    let tp_bounds = st.defs.get(def).sig.tp_bounds.clone();
+    if tp_bounds.is_empty() {
+        return;
+    }
+    for (i, bounds) in tp_bounds.iter().enumerate() {
+        let Some(arg) = args.get(i) else { continue };
+        let arg_def = match st.tys.kind(*arg) {
+            TyKind::Named(d, _) => Some(*d),
+            _ => None,
+        };
+        for bound in bounds {
+            let satisfied = match arg_def {
+                Some(d) => st
+                    .impls
+                    .iter()
+                    .any(|im| im.trait_def == *bound && im.type_def == d),
+                None => false,
+            };
+            if !satisfied {
+                let span = st.defs.get(def).span;
+                let tname = st.interner.resolve(st.defs.get(*bound).name).to_string();
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    span,
+                    format!("type argument does not satisfy the `{tname}` bound"),
+                ));
+            }
+        }
+    }
+}
 
 /// fun 实例化作业（struct 在调用点同步完成，不排队）
 pub(crate) struct MonoJob {
@@ -24,6 +59,8 @@ pub(crate) fn instantiate(st: &mut SemState, def: DefId, args: &[TyId]) -> DefId
     if let Some(&spec) = st.mono_insts.get(&(def, args.to_vec())) {
         return spec;
     }
+    // M9 9c：bounds 兑现——每个类型实参的 def 须有对应 bound trait 的 impl
+    check_bounds(st, def, args);
     match st.defs.get(def).kind {
         DefKind::Struct => instantiate_struct(st, def, args),
         DefKind::Fun => {
