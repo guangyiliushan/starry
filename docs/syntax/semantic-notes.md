@@ -172,12 +172,12 @@ LocalBinding/Param）；`=` 赋值重置；分支/循环取两态**并集**
 
 泛型（fun 类型形参/调用实例化；签名不 lower，单一
 `SemUnsupportedConstruct` 不级联）、方法调用（成员 callee）、impl、
-actor、provide、union/dyn/Self 类型、lambda 定型、spawn 内部、
+actor、provide、union/dyn/Self 类型、spawn 内部、
 宏展开（独立前置 pass，规格待定；调用点报 `SemMacroExpansion`）。
 class 声明（无构造路径/方法调用；声明点报一条即注册，避免级联）、
 grow 语句、concurrent/async 块与 await（lowering 未排期）——均由 sem
 先行诊断，irc 不重复报。rest 模式与含绑定 Or 已在 sem/irc 解冻。
-lambda/spawn 内部整体不解析不定型。
+spawn 内部整体不解析不定型。lambda 内部已在 M8 slice 2 落地（期望 Fn 类型驱动的定型 + body resolve + irc lowering）。
 
 `StringInterp` 不在跳过清单：sem 已完整定型（结果 `string`，parts
 逐一定型，`"a${nosuch}b"` 的 `SemUndefinedName` 在 part 定型时暴露）——
