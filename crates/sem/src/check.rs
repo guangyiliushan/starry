@@ -1585,9 +1585,78 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             st.unsafe_depth -= 1;
             ty
         }
-        ExprKind::Lambda { .. } => {
-            unsupported(st, e.span, "lambda typing is not supported in semantic v1");
-            st.tys.error
+        ExprKind::Lambda { params, body } => {
+            // M8 slice 2: pop expected Fn type (pushed by check_call_args)
+            let expected = st.lambda_exp.pop().flatten();
+            let Some(ft) = expected else {
+                unsupported(st, e.span, "cannot infer lambda param types without function type context");
+                return st.tys.error;
+            };
+            let (param_tys, ret_ty) = match st.tys.kind(ft).clone() {
+                TyKind::Fn(ps, r) => (ps, r),
+                _ => {
+                    unsupported(st, e.span, "expected type is not a function type");
+                    return st.tys.error;
+                }
+            };
+            // create param scope with bindings
+            let root = st.scopes.root();
+            let scope = st.scopes.new_scope(Some(root));
+            let mut sig_params: Vec<(Symbol, TyId)> = Vec::new();
+            match params {
+                LambdaParams::It => {
+                    let sym = st.interner.intern("it");
+                    let ty = param_tys.first().copied().unwrap_or(st.tys.error);
+                    let def = st.defs.push(crate::def::Def {
+                        kind: DefKind::Param,
+                        name: sym,
+                        scope,
+                        span: e.span,
+                        sig: { let mut s = crate::def::DefSig::new(st.tys.unit, st.tys.error); s.ty = ty; s },
+                        resolving: false, alias_of: None, alias_resolved: None,
+                        member_scope: None, external: false, ty_params: 0, decl: None,
+                    });
+                    st.scopes.insert(scope, sym, def);
+                    sig_params.push((sym, ty));
+                }
+                LambdaParams::Explicit(ps) => {
+                    for (i, pat) in ps.iter().enumerate() {
+                        let ty = param_tys.get(i).copied().unwrap_or(st.tys.error);
+                        if let PatKind::Binding { name, .. } = &pat.kind {
+                            let def = st.defs.push(crate::def::Def {
+                                kind: DefKind::Param,
+                                name: *name,
+                                scope,
+                                span: pat.span,
+                                sig: { let mut s = crate::def::DefSig::new(st.tys.unit, st.tys.error); s.ty = ty; s },
+                                resolving: false, alias_of: None, alias_resolved: None,
+                                member_scope: None, external: false, ty_params: 0, decl: None,
+                            });
+                            st.scopes.insert(scope, *name, def);
+                            sig_params.push((*name, ty));
+                        }
+                    }
+                }
+            }
+            // create synthetic fun def
+            let lambda_def = st.defs.push(crate::def::Def {
+                kind: DefKind::Fun,
+                name: st.interner.intern("__lambda"),
+                scope,
+                span: e.span,
+                sig: { let mut s = crate::def::DefSig::new(st.tys.unit, st.tys.error); s.params = sig_params.clone(); s.ret = ret_ty; s },
+                resolving: false, alias_of: None, alias_resolved: None,
+                member_scope: None, external: false, ty_params: 0, decl: None,
+            });
+            st.lambda_defs.insert(e.id.0, lambda_def);
+            // type body in lambda scope
+            st.funs.push(crate::FunFrame { node: e.id, def: lambda_def });
+            let body_ty = type_block(body, st, true);
+            st.funs.pop();
+            if !st.tys.assignable(body_ty, ret_ty) && !st.tys.is_error(body_ty) {
+                mismatch(st, e.span);
+            }
+            st.tys.intern(TyKind::Fn(param_tys, ret_ty))
         }
         ExprKind::Spawn(_) | ExprKind::Proceed | ExprKind::Super { .. } => {
             unsupported(st, e.span, "this construct is not supported in semantic v1");
@@ -2529,6 +2598,10 @@ fn check_call_args(
             ));
             type_expr(&arg.value, st, true);
             continue;
+        }
+        // M8 slice 2：lambda 实参压入期望类型供 Lambda 弹出
+        if matches!(&arg.value.kind, ExprKind::Lambda { .. }) {
+            st.lambda_exp.push(Some(params[idx].1));
         }
         let aty = type_expr(&arg.value, st, true);
         // M1：形参是具体整型且实参是整数字面量 → 按形参宽度重定型
