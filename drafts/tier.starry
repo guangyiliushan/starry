@@ -1,0 +1,42 @@
+package m10
+
+struct Vec2(val x: f64, val y: f64)
+
+trait Named {
+    fun name(): string
+}
+
+class Entity(val id: int, var x: f64, var y: f64) {
+    deinit {
+        print(self.id)
+    }
+    fun move_to(dx: f64, dy: f64) {
+        self.x = self.x + dx
+        self.y = self.y + dy
+    }
+}
+
+impl Named for Entity {
+    fun name(): string {
+        return "entity"
+    }
+}
+
+fun dist(x1: f64, y1: f64, x2: f64, y2: f64): f64 {
+    val dx = x1 - x2
+    val dy = y1 - y2
+    return dx * dx + dy * dy
+}
+
+fun main(): int {
+    val origin = Vec2(0.0, 0.0)
+    val target = Vec2(3.0, 4.0)
+    val d = dist(origin.x, origin.y, target.x, target.y)
+    print(d)
+    val e = Entity(1, 0.0, 0.0)
+    e.move_to(3.0, 4.0)
+    print(e.x)
+    print(e.y)
+    print(42)
+    return 0
+}
