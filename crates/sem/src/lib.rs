@@ -107,6 +107,7 @@ pub struct SemanticOutput {
     pub scopes: ScopeArena,
     /// M9 9b：impl 注册表导出（irc 的 impl 方法体 lowering 用）
     pub impls: Vec<def::TraitImpl>,
+    pub lambda_defs: std::collections::BTreeMap<u32, DefId>,
 }
 
 /// 语义分析入口；parser 诊断原样保留在前，语义诊断附加在后
@@ -164,6 +165,10 @@ pub(crate) struct SemState {
     /// M6：unsafe 块深度——extern "c" 调用要求在 unsafe 上下文中
     ///（language-design：FFI 调用在 unsafe 中）
     pub unsafe_depth: usize,
+    /// M8: lambda expected Fn type stack
+    pub lambda_exp: Vec<Option<TyId>>,
+    /// M8: lambda expr id -> fun def
+    pub lambda_defs: std::collections::BTreeMap<u32, DefId>,
     // ---- M7 泛型单态化（generic-mono-spike.md） ----
     /// fun 实例化作业队列（struct 同步完成，不排队）
     pub mono_queue: Vec<mono::MonoJob>,
@@ -231,9 +236,11 @@ impl Sem {
             own_def: None,
             pkg_scopes: Vec::new(),
             impls: Vec::new(),
+            lambda_defs: std::collections::BTreeMap::new(),
+            mono_queue: Vec::new(),
             in_impl_header: false,
             unsafe_depth: 0,
-            mono_queue: Vec::new(),
+            lambda_exp: Vec::new(),
             mono_insts: std::collections::BTreeMap::new(),
             mono_subst: Vec::new(),
             next_node: node_count,
@@ -277,6 +284,7 @@ impl Sem {
             decl_def: self.st.decl_def,
             scopes: self.st.scopes,
             impls: self.st.impls,
+            lambda_defs: self.st.lambda_defs,
         }
     }
 }
