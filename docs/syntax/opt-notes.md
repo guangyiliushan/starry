@@ -296,7 +296,8 @@ v1 跳过（记入扩展位，不归本阶段）：全局数据流（到达定�
 
 - LLVM poison 一律表现为 trap（越界移位、fptosi 越界/NaN），不发明值，
   与 opt「不折叠越界移位/除零」同一立场。
-- 已知局限：槽是 u64，`i128` 按 64 位建模。
+- 2026-11：interp 槽升级 u128——`i128` 全 128 位建模（checked/wrapping/比较
+  与 LLVM 逐位一致），i128 已入差分对拍。
 - 已知局限：`extern "c"` 调用的程序无法经参考解释器验证——`Callee::Extern` 一律 `UnknownFun` trap（外部符号只存在于 native 链接）。
 - **差分验证层就此可用**：`opt` 侧 `opt_preserves_semantics_*`（6 条）
   优化前后各跑一遍解释器、断言逐值相等。回归验证过：把折叠改回 i128

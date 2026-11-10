@@ -79,7 +79,6 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | spawn/async/await、宏展开、grow | sem | 跳过清单 |
 | 聚合顶层全局 | irc | `IrcUnsupportedLowering` |
 | extern 程序 interp 验证 | interp | `UnknownFun` trap（已知局限） |
-| i128 位宽语义 | interp | 按 64 位建模（已知局限） |
 | T2 checked pointer | — | 后置 M10（Q7） |
 | M10 并发（Mutex/actor、Send/Sync） | — | 模型选择待用户裁定 |
 

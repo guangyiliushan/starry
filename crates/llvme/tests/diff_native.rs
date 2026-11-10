@@ -5,7 +5,8 @@
 //! - native：llvme 发射 .ll → clang + 内嵌 runtime 链接 → 运行 stdout
 //!
 //! 选型纪律：extern "c" 程序不可 interp（已知局限）、浮点打印文本两侧
-//! 不同源（C fmt_double vs interp 占位）、i128 按 64 位建模——均不入选。
+//! 不同源（C fmt_double vs interp 占位）——均不入选。i128 已随 interp
+//! 全 128 位建模入选（2026-11）。
 //! trap 程序（受检溢出/除零）不走本路径——TRAP_CASES 的
 //! interp_and_native_agree_on_traps 单独断言两侧一致 trap。
 //! 无工具链时显式 SKIP（与 build_cli 同纪律）。
@@ -112,6 +113,17 @@ const CASES: &[&str] = &[
     "struct P { x: int, y: int }\nfun main() {\n    val p = P(1, 2)\n    print(p.x)\n    print(p.y)\n    print(p == P(1, 2))\n    print(p == P(1, 3))\n}",
     // 数组/元组：索引/聚合相等/动态下标
     "fun main() {\n    val a: [int; 3] = [7, 8, 9]\n    print(a[0])\n    print(a[2])\n    var i = 1\n    print(a[i])\n    val t = (1, 2)\n    print(t[1])\n    print(a == [7, 8, 9])\n    print((1, 2) == (1, 3))\n}",
+    // i128：超 64 位字面量/算术/回绕/比较（interp 全 128 位建模，2026-11）
+    "fun main() {
+    print(9223372036854775808)
+    val a: i128 = 9223372036854775807
+    print(a +% 1)
+    print(a *% 2)
+    print(a > 0)
+    val big = 170141183460469231731687303715884105727
+    print(big +% 1)
+    print(big -% 1)
+}",
     // nullable：elvis / == null / 构造取 payload
     "enum Opt { None, Some(int) }\nfun main() {\n    val o: Opt = Opt.Some(5)\n    print(o == Opt.Some(5))\n    print(o == Opt.None)\n    val n: int? = null\n    print(n == null)\n    print(n ?? 9)\n    val m: int? = 4\n    print(m ?? 9)\n}",
     // 区间：字面量 in / 物化 in（开闭）/ for 扫描

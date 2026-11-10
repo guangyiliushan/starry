@@ -14,9 +14,9 @@
 //! 算成 2000000000，LLVM 算 -147483648），也就抓不到折叠位宽那类错编。
 //! 浮点按 `ty` 的精度算（f32 逐次舍入到单精度）。LLVM 的 poison 在
 //! 解释器里一律表现为 trap（越界移位、fptosi 越界/NaN），不发明值。
-//! 已知局限：槽是 u64，`i128` 按 64 位建模。
-//! 已知局限：`extern "c"` 调用的程序无法经本解释器验证——外部符号只
-//! 存在于 native 链接，Callee::Extern 一律 UnknownFun trap。
+//! 槽是 u128 单元——`i128` 全 128 位建模（2026-11：原按 64 位建模，
+//!   超 64 位的算术/比较与 native 分歧；现与 LLVM 逐位一致）。
+//! 已知局限：extern "c" 程序无法经本解释器验证（外部符号只存在于 native 链接；Callee::Extern 一律 UnknownFun trap）。
 //! 已知局限：聚合/可空实参经 Value 快照只传递首槽——多槽实参的 interp
 //! 语义不完整（差分 harness 因此不选此类用例；native 断言归 build_cli）。
 
@@ -27,11 +27,14 @@ use crate::tac::{
     BinOp, Callee, Const, FunBody, Instr, Operand, RuntimeFn, TacOutput, TempId, Term, UnOp,
 };
 
-/// N 位补码规约（低位截断 + 符号扩展回 u64）——与 opt 的 `sx` 同模型
-fn narrow(v: u64, w: u32) -> u64 {
-    debug_assert!((1..=64).contains(&w));
+/// N 位补码规约（低位截断 + 符号扩展）——与 opt 的 `sx` 同模型
+fn narrow(v: u128, w: u32) -> u128 {
+    debug_assert!((1..=128).contains(&w));
+    if w >= 128 {
+        return v;
+    }
     let s = 64 - w;
-    ((v << s) as i64 >> s) as u64
+    (((v as u64) << s) as i64 >> s) as u128
 }
 
 /// M1（Q5）：i128 值是否在 w 位有符号域内（w ≥ 128 恒真）。
@@ -45,31 +48,44 @@ fn fits_w(v: i128, w: u32) -> bool {
     (min..=max).contains(&v)
 }
 
-/// w 位有符号最小值（INT_MIN——除法溢出判据）
-fn min_w(w: u32) -> i64 {
-    if w >= 64 {
-        i64::MIN
+/// w 位有符号最小值（INT_MIN——除法溢出判据；i128 域精确）
+fn min_w(w: u32) -> i128 {
+    if w >= 128 {
+        i128::MIN
+    } else if w >= 64 {
+        i64::MIN as i128
     } else {
-        -(1i64 << (w - 1))
+        -(1i128 << (w - 1))
     }
 }
 
-/// 整型位宽；非整型返回 None。i128 按 64 建模（槽是 u64）
+/// 槽值按 w 位取有符号数（u128 槽域 → i128 中间域）
+fn signed_of(v: u128, w: u32) -> i128 {
+    let n = narrow(v, w);
+    if w >= 128 {
+        n as i128
+    } else {
+        (n as u64) as i64 as i128
+    }
+}
+
+/// 整型位宽；非整型返回 None。i128 = 真 128 位（槽是 u128）
 fn int_width(kind: &TyKind) -> Option<u32> {
     Some(match kind {
         TyKind::Int(IntKind::I4) => 4,
         TyKind::Int(IntKind::I8) => 8,
         TyKind::Int(IntKind::I16) => 16,
         TyKind::Int(IntKind::I32) => 32,
-        TyKind::Int(IntKind::I64) | TyKind::Int(IntKind::I128) => 64,
+        TyKind::Int(IntKind::I64) => 64,
+        TyKind::Int(IntKind::I128) => 128,
         TyKind::Char => 32,
         _ => return None,
     })
 }
 
 /// 槽里的浮点位模式 → f64 值（f32 值以「已加宽的 f64」存放）
-fn f64_of(bits: u64, fk: FloatKind) -> f64 {
-    let f = f64::from_bits(bits);
+fn f64_of(bits: u128, fk: FloatKind) -> f64 {
+    let f = f64::from_bits(bits as u64);
     match fk {
         FloatKind::F32 => f as f32 as f64,
         FloatKind::F64 => f,
@@ -77,17 +93,17 @@ fn f64_of(bits: u64, fk: FloatKind) -> f64 {
 }
 
 /// 浮点值 → 槽位模式（目标精度逐次舍入）
-fn bits_of_f(f: f64, fk: FloatKind) -> u64 {
+fn bits_of_f(f: f64, fk: FloatKind) -> u128 {
     match fk {
-        FloatKind::F32 => (f as f32 as f64).to_bits(),
-        FloatKind::F64 => f.to_bits(),
+        FloatKind::F32 => ((f as f32 as f64).to_bits()) as u128,
+        FloatKind::F64 => f.to_bits() as u128,
     }
 }
 
 /// `fptosi` 目标位宽的可表示域 `[lo, hi)`——上界开：`2^(w-1)` 越界。
 /// 越界/NaN 是 LLVM poison，解释器以 trap 表示。
 fn int_range(w: u32) -> (f64, f64) {
-    let half = 2f64.powi(w.min(64) as i32 - 1);
+    let half = 2f64.powi(w.min(128) as i32 - 1);
     (-half, half)
 }
 
@@ -96,6 +112,8 @@ const STEP_CAP: u64 = 10_000_000;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     I(i64),
+    /// i128 结果/入参快照（差分 harness 与 e2e 用）
+    I128(i128),
     F(f64),
     B(bool),
     S(String),
@@ -165,7 +183,7 @@ fn run_fun_capturing(
         return Err(InterpError::Arity);
     }
     let mut strings: Vec<String> = Vec::new();
-    let mut str_ids: std::collections::HashMap<Symbol, u64> = std::collections::HashMap::new();
+    let mut str_ids: std::collections::HashMap<Symbol, u128> = std::collections::HashMap::new();
     // 预 intern 全部 Const::Str：op() 是只读的，常量侧表必须先建——
     // 否则数组/元组/返回里的字符串常量被读成 0（差分 harness 抓到）
     let const_ops: Vec<Operand> = tac
@@ -202,10 +220,10 @@ fn run_fun_capturing(
             let id = strings
                 .iter()
                 .position(|s| s == text)
-                .map(|i| i as u64 + 1)
+                .map(|i| i as u128 + 1)
                 .unwrap_or_else(|| {
                     strings.push(text.to_string());
-                    strings.len() as u64
+                    strings.len() as u128
                 });
             str_ids.insert(sym, id);
         }
@@ -255,7 +273,7 @@ fn run_fun_capturing(
         .max()
         .unwrap_or(0) as usize
         + 1;
-    let mut cells: Vec<Vec<u64>> = vec![Vec::new(); n];
+    let mut cells: Vec<Vec<u128>> = vec![Vec::new(); n];
     for ((t, ty), arg) in fun.params.iter().zip(args) {
         machine.bind_arg(&mut cells[t.0 as usize], *ty, arg)?;
     }
@@ -271,26 +289,26 @@ struct Machine<'a> {
     tys: &'a TyArena,
     strings: Vec<String>,
     /// Const::Str → 侧表 id（预 intern；op() 只读，查表不 intern）
-    str_ids: std::collections::HashMap<Symbol, u64>,
-    globals: Vec<(DefId, u64)>,
+    str_ids: std::collections::HashMap<Symbol, u128>,
+    globals: Vec<(DefId, u128)>,
     /// print 输出收集（差分 harness；每条 = 一行，与 runtime write_line 对齐）
     printed: Vec<String>,
 }
 
 impl<'a> Machine<'a> {
-    fn str_id(&mut self, s: &str) -> u64 {
+    fn str_id(&mut self, s: &str) -> u128 {
         for (i, e) in self.strings.iter().enumerate() {
             if e == s {
-                return i as u64 + 1;
+                return i as u128 + 1;
             }
         }
         self.strings.push(s.to_string());
-        self.strings.len() as u64
+        self.strings.len() as u128
     }
 
     fn bind_arg(
         &mut self,
-        cell: &mut Vec<u64>,
+        cell: &mut Vec<u128>,
         ty: sem::TyId,
         arg: &Value,
     ) -> Result<(), InterpError> {
@@ -308,7 +326,12 @@ impl<'a> Machine<'a> {
             (_, Value::I(v)) => {
                 cell.resize(1.max(cell.len()), 0);
                 // 入参按形参位宽规约：调用点传进来的值要与体内同域
-                cell[0] = narrow(*v as u64, int_width(self.tys.kind(ty)).unwrap_or(64));
+                cell[0] = narrow(*v as u128, int_width(self.tys.kind(ty)).unwrap_or(64));
+                Ok(())
+            }
+            (_, Value::I128(v)) => {
+                cell.resize(1.max(cell.len()), 0);
+                cell[0] = narrow(*v as u128, int_width(self.tys.kind(ty)).unwrap_or(64));
                 Ok(())
             }
             (_, Value::F(v)) => {
@@ -322,7 +345,7 @@ impl<'a> Machine<'a> {
             }
             (_, Value::B(v)) => {
                 cell.resize(1.max(cell.len()), 0);
-                cell[0] = u64::from(*v);
+                cell[0] = u128::from(*v);
                 Ok(())
             }
             (_, Value::S(s)) => {
@@ -342,7 +365,7 @@ impl<'a> Machine<'a> {
 
     fn bind_arg_at(
         &mut self,
-        cell: &mut [u64],
+        cell: &mut [u128],
         at: usize,
         ty: sem::TyId,
         v: &Value,
@@ -357,10 +380,17 @@ impl<'a> Machine<'a> {
         Ok(())
     }
 
-    fn decode(&self, v: u64, ty: sem::TyId) -> Value {
+    fn decode(&self, v: u128, ty: sem::TyId) -> Value {
         let kind = self.tys.kind(ty);
         match kind {
-            TyKind::Int(_) => Value::I(narrow(v, int_width(kind).unwrap_or(64)) as i64),
+            TyKind::Int(_) => {
+                let w = int_width(kind).unwrap_or(64);
+                if w >= 128 {
+                    Value::I128(signed_of(v, w))
+                } else {
+                    Value::I(signed_of(v, w) as i64)
+                }
+            }
             TyKind::Float(fk) => Value::F(f64_of(v, *fk)),
             TyKind::Bool => Value::B(v != 0),
             TyKind::String => {
@@ -379,22 +409,22 @@ impl<'a> Machine<'a> {
             }
             TyKind::Unit => Value::Unit,
             // char/聚合兜底：整型按位宽规约，其余原样
-            _ => Value::I(narrow(v, int_width(kind).unwrap_or(64)) as i64),
+            _ => Value::I(signed_of(v, int_width(kind).unwrap_or(64)) as i64),
         }
     }
 
-    fn op(&self, cells: &[Vec<u64>], op: &Operand) -> u64 {
+    fn op(&self, cells: &[Vec<u128>], op: &Operand) -> u128 {
         match op {
             Operand::Temp(t) => cells[t.0 as usize].first().copied().unwrap_or(0),
             Operand::Const(c) => match c {
-                Const::Int(v) => *v as i64 as u64,
-                Const::Float(v) => v.to_bits(),
-                Const::Bool(b) => u64::from(*b),
+                Const::Int(v) => *v as u128,
+                Const::Float(v) => v.to_bits() as u128,
+                Const::Bool(b) => u128::from(*b),
                 Const::Null | Const::Unit => 0,
                 // 字符串常量：查预 intern 的侧表（构建期已全量收集）
                 Const::Str(sym) => self.str_ids.get(sym).copied().unwrap_or(0),
                 // M8 slice 1：函数引用 = DefId 编码（间接调用时解码）
-                Const::Fun(d) => d.0 as u64,
+                Const::Fun(d) => d.0 as u128,
             },
         }
     }
@@ -402,15 +432,15 @@ impl<'a> Machine<'a> {
     fn exec(
         &mut self,
         fun: &FunBody,
-        cells: &mut [Vec<u64>],
+        cells: &mut [Vec<u128>],
         depth: usize,
-    ) -> Result<Option<(u64, sem::TyId)>, InterpError> {
+    ) -> Result<Option<(u128, sem::TyId)>, InterpError> {
         if depth > 512 {
             return Err(InterpError::Trap("call depth"));
         }
         let mut cur = fun.entry;
         let mut steps = 0u64;
-        let mut pending: Vec<(u64, sem::TyId)> = Vec::new();
+        let mut pending: Vec<(u128, sem::TyId)> = Vec::new();
         loop {
             steps += 1;
             if steps > STEP_CAP {
@@ -444,8 +474,8 @@ impl<'a> Machine<'a> {
     fn step(
         &mut self,
         _fun: &FunBody,
-        cells: &mut [Vec<u64>],
-        pending: &mut Vec<(u64, sem::TyId)>,
+        cells: &mut [Vec<u128>],
+        pending: &mut Vec<(u128, sem::TyId)>,
         instr: &Instr,
         depth: usize,
     ) -> Result<(), InterpError> {
@@ -473,34 +503,46 @@ impl<'a> Machine<'a> {
                     };
                     bits_of_f(f, fk)
                 } else {
-                    // 整型在 `ty` 位宽上算：操作数先规约、结果再规约
+                    // 整型在 `ty` 位宽上算：操作数先规约、结果再规约。
+                    // 中间域统一 i128；w = 128 时 checked_add/sub/mul 可能
+                    // 在 i128 域就溢出——wrapping 变体回绕，受检变体 trap。
                     let w = int_width(kind).unwrap_or(64);
-                    let (x, y) = (narrow(a, w) as i64, narrow(b, w) as i64);
-                    let raw = match op {
+                    let (x, y) = (signed_of(a, w), signed_of(b, w));
+                    let raw: u128 = match op {
                         // M1（Q5）：受检算术在位宽上核查溢出 → trap；
                         // wrapping 变体（+% -% *%）保持回绕
                         BinOp::Add | BinOp::WrappingAdd => {
-                            // i128 中间值：i64 输入加减乘不溢 i128，受检判据
-                            // 统一为「结果在 w 位有符号域内」（w = 64 也覆盖）
-                            let v = x as i128 + y as i128;
+                            let v = match x.checked_add(y) {
+                                Some(v) => v,
+                                None if matches!(op, BinOp::WrappingAdd) => x.wrapping_add(y),
+                                None => return Err(InterpError::Trap("add overflow")),
+                            };
                             if !matches!(op, BinOp::WrappingAdd) && !fits_w(v, w) {
                                 return Err(InterpError::Trap("add overflow"));
                             }
-                            v as i64 as u64
+                            v as u128
                         }
                         BinOp::Sub | BinOp::WrappingSub => {
-                            let v = x as i128 - y as i128;
+                            let v = match x.checked_sub(y) {
+                                Some(v) => v,
+                                None if matches!(op, BinOp::WrappingSub) => x.wrapping_sub(y),
+                                None => return Err(InterpError::Trap("sub overflow")),
+                            };
                             if !matches!(op, BinOp::WrappingSub) && !fits_w(v, w) {
                                 return Err(InterpError::Trap("sub overflow"));
                             }
-                            v as i64 as u64
+                            v as u128
                         }
                         BinOp::Mul | BinOp::WrappingMul => {
-                            let v = x as i128 * y as i128;
+                            let v = match x.checked_mul(y) {
+                                Some(v) => v,
+                                None if matches!(op, BinOp::WrappingMul) => x.wrapping_mul(y),
+                                None => return Err(InterpError::Trap("mul overflow")),
+                            };
                             if !matches!(op, BinOp::WrappingMul) && !fits_w(v, w) {
                                 return Err(InterpError::Trap("mul overflow"));
                             }
-                            v as i64 as u64
+                            v as u128
                         }
                         BinOp::Div => {
                             if y == 0 {
@@ -510,7 +552,7 @@ impl<'a> Machine<'a> {
                             if y == -1 && x == min_w(w) {
                                 return Err(InterpError::Trap("div overflow"));
                             }
-                            x.wrapping_div(y) as u64
+                            x.wrapping_div(y) as u128
                         }
                         BinOp::Rem => {
                             if y == 0 {
@@ -519,21 +561,21 @@ impl<'a> Machine<'a> {
                             if y == -1 && x == min_w(w) {
                                 return Err(InterpError::Trap("rem overflow"));
                             }
-                            x.wrapping_rem(y) as u64
+                            x.wrapping_rem(y) as u128
                         }
-                        BinOp::BitAnd => (x & y) as u64,
-                        BinOp::BitOr => (x | y) as u64,
-                        BinOp::BitXor => (x ^ y) as u64,
+                        BinOp::BitAnd => (x & y) as u128,
+                        BinOp::BitOr => (x | y) as u128,
+                        BinOp::BitXor => (x ^ y) as u128,
                         // 移位量判据是目标位宽（LLVM 对越界移位是 poison，
                         // 解释器以 trap 表示——不发明值，与 opt 不折叠一致）
                         BinOp::Shl | BinOp::Shr => {
-                            if !(0..w as i64).contains(&y) {
+                            if !(0..w as i128).contains(&y) {
                                 return Err(InterpError::Trap("shift out of range"));
                             }
                             if matches!(op, BinOp::Shl) {
-                                x.wrapping_shl(y as u32) as u64
+                                x.wrapping_shl(y as u32) as u128
                             } else {
-                                (x >> y) as u64
+                                (x >> y) as u128
                             }
                         }
                         BinOp::Eq => return self.set_bool(cells, dst, x == y),
@@ -556,10 +598,10 @@ impl<'a> Machine<'a> {
                         TyKind::Float(fk) => bits_of_f(-f64_of(v0, *fk), *fk),
                         _ => {
                             let w = int_width(kind).unwrap_or(64);
-                            narrow((narrow(v0, w) as i64).wrapping_neg() as u64, w)
+                            narrow(signed_of(v0, w).wrapping_neg() as u128, w)
                         }
                     },
-                    UnOp::Not => u64::from(v0 == 0),
+                    UnOp::Not => u128::from(v0 == 0),
                     UnOp::BitNot => {
                         let w = int_width(kind).unwrap_or(64);
                         narrow(!narrow(v0, w), w)
@@ -637,8 +679,11 @@ impl<'a> Machine<'a> {
                     Callee::Runtime(RuntimeFn::StrConv) => {
                         let (v, pty) = args.first().copied().unwrap_or((0, *ty));
                         let s = match self.tys.kind(pty) {
-                            TyKind::Int(_) => format!("{}", v as i64),
-                            TyKind::Float(_) => format!("{}", f64::from_bits(v)),
+                            TyKind::Int(_) => format!(
+                                "{}",
+                                signed_of(v, int_width(self.tys.kind(pty)).unwrap_or(64))
+                            ),
+                            TyKind::Float(_) => format!("{}", f64::from_bits(v as u64)),
                             TyKind::Bool => {
                                 if v != 0 {
                                     "true".to_string()
@@ -666,7 +711,7 @@ impl<'a> Machine<'a> {
                         let b = args.get(1).map(|(v, _)| *v).unwrap_or(0);
                         let sa = &self.strings[(a.max(1) - 1) as usize];
                         let sb = &self.strings[(b.max(1) - 1) as usize];
-                        u64::from(sa == sb)
+                        u128::from(sa == sb)
                     }
                     Callee::Runtime(RuntimeFn::Print) | Callee::Runtime(RuntimeFn::PrintChar) => {
                         // 差分验证（P1-8）：print 文本形态收集进 printed，
@@ -746,11 +791,11 @@ impl<'a> Machine<'a> {
         fun: &FunBody,
         args: &[Value],
         depth: usize,
-    ) -> Result<Option<(u64, sem::TyId)>, InterpError> {
+    ) -> Result<Option<(u128, sem::TyId)>, InterpError> {
         // 子调用：独立槽存储（值语义拷贝，同 llvme 聚合参数按指针的
         // 差异在解释器层无感——sem v1 形参不可变，拷贝等价）
         let n = 64usize;
-        let mut cells: Vec<Vec<u64>> = vec![
+        let mut cells: Vec<Vec<u128>> = vec![
             Vec::new();
             n.max(
                 fun.blocks
@@ -774,7 +819,7 @@ impl<'a> Machine<'a> {
     /// print 输出的文本形态，与 runtime `starry_print_*` 对齐
     /// （i64 十进制、bool 小写、string 原文、char 按码点）。浮点的
     /// C fmt_double 15 位文本不复刻——差分用例排除浮点打印（已知局限）。
-    fn print_line(&self, v: u64, ty: sem::TyId) -> String {
+    fn print_line(&self, v: u128, ty: sem::TyId) -> String {
         match self.tys.kind(ty) {
             TyKind::String => self.strings[(v.max(1) - 1) as usize].clone(),
             TyKind::Char => char::from_u32(v as u32)
@@ -785,17 +830,18 @@ impl<'a> Machine<'a> {
             TyKind::Float(_) => format!("{:?}", self.decode(v, ty)),
             _ => match self.decode(v, ty) {
                 Value::I(i) => i.to_string(),
+                Value::I128(i) => i.to_string(),
                 other => format!("{other:?}"),
             },
         }
     }
 
-    fn set_bool(&self, cells: &mut [Vec<u64>], dst: &TempId, b: bool) -> Result<(), InterpError> {
-        Self::put(cells, *dst, u64::from(b));
+    fn set_bool(&self, cells: &mut [Vec<u128>], dst: &TempId, b: bool) -> Result<(), InterpError> {
+        Self::put(cells, *dst, u128::from(b));
         Ok(())
     }
 
-    fn put(cells: &mut [Vec<u64>], t: TempId, v: u64) {
+    fn put(cells: &mut [Vec<u128>], t: TempId, v: u128) {
         let slot = &mut cells[t.0 as usize];
         if slot.is_empty() {
             slot.push(v);
@@ -805,13 +851,13 @@ impl<'a> Machine<'a> {
     }
 
     /// 按 `ty` 位宽规约一个槽值/常量（非整型原样）
-    fn norm(&self, v: u64, ty: sem::TyId) -> u64 {
+    fn norm(&self, v: u128, ty: sem::TyId) -> u128 {
         narrow(v, int_width(self.tys.kind(ty)).unwrap_or(64))
     }
 
     /// 数值转换（`UnOp::Conv`）：按源/目标位宽与精度规约。
     /// LLVM 的 fptosi 对 NaN/越界是 poison，此处以 trap 表示。
-    fn conv(&self, from: sem::TyId, to: sem::TyId, v: u64) -> Result<u64, InterpError> {
+    fn conv(&self, from: sem::TyId, to: sem::TyId, v: u128) -> Result<u128, InterpError> {
         let (fk, tk) = (self.tys.kind(from), self.tys.kind(to));
         let (fw, tw) = (int_width(fk), int_width(tk));
         Ok(match (fk, tk) {
@@ -823,11 +869,15 @@ impl<'a> Machine<'a> {
                 if !f.is_finite() || t < lo || t >= hi {
                     return Err(InterpError::Trap("fptosi out of range"));
                 }
-                narrow(t as i64 as u64, tw.unwrap_or(64))
+                if tw.unwrap_or(64) >= 128 {
+                    narrow(t as i128 as u128, 128)
+                } else {
+                    narrow(t as i64 as u128, tw.unwrap_or(64))
+                }
             }
             // sitofp：先按源位宽规约，再舍入到目标精度
             (_, TyKind::Float(tf)) if fw.is_some() => {
-                bits_of_f(narrow(v, fw.unwrap_or(64)) as i64 as f64, *tf)
+                bits_of_f(signed_of(v, fw.unwrap_or(64)) as f64, *tf)
             }
             // fpext / fptrunc：按目标精度舍入
             (TyKind::Float(ff), TyKind::Float(tf)) => bits_of_f(f64_of(v, *ff), *tf),
