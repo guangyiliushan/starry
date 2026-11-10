@@ -416,7 +416,7 @@ fn type_param_scope(
 /// （trait bounds 是 M9 的地基，先给稳定诊断而非半特性。）
 fn reject_generic_extras(
     type_params: &[ast::syntax::ty::TypeParam],
-    where_clause: &[WhereConstraint],
+    _where_clause: &[WhereConstraint],
     span: Span,
     st: &mut SemState,
     what: &str,
@@ -431,13 +431,6 @@ fn reject_generic_extras(
             format!(
                 "type parameter bounds/defaults/variance on generic {what} are not supported in this slice"
             ),
-        ));
-    }
-    if !where_clause.is_empty() {
-        st.diags.emit(Diagnostic::error(
-            DiagCode::SemUnsupportedConstruct,
-            span,
-            format!("where clauses on generic {what} are not supported in this slice"),
         ));
     }
 }
