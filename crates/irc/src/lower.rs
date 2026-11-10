@@ -118,7 +118,7 @@ pub(crate) struct Ctx<'r, 'a> {
     /// M8 slice 2：lambda 函数体（lower_expr 创建，lower() 收集到 out.funs）
     pub extra_funs: Vec<FunBody>,
     /// BlockId → blocks 下标（switch_to 维护；block_pos O(1)）
-    block_index: std::collections::HashMap<BlockId, usize>,
+    pub(crate) block_index: std::collections::HashMap<BlockId, usize>,
     /// 顶层全局：Symbol → (DefId, 类型)；只含标量（v1）
     globals: &'r HashMap<Symbol, (DefId, TyId)>,
     /// 声明了但未 lower 的顶层全局名（聚合/非简单模式）：使用点给稳定

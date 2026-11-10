@@ -30,6 +30,9 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
     let saved_r = ctx.fun.ret;
     let saved_e = ctx.fun.entry;
     let saved_nb = ctx.next_block;
+    // 块索引同属当前 fun 的地址空间——不随 lambda 换出会污染主函数
+    // （第二个 lambda 的块 id 与残留条目碰撞 → 空块发射越界）
+    let saved_bi = std::mem::take(&mut ctx.block_index);
     ctx.fun.def = ldef;
     ctx.fun.ret = lsig.ret;
     let entry = ctx.reserve_block();
@@ -38,9 +41,12 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
     ctx.env_push();
     let pnames: Vec<Symbol> = match lparams {
         LambdaParams::It => vec![ctx.sem.interner.intern("it")],
-        LambdaParams::Explicit(ps) => ps
+        // S2/P2-1 spike 修复：`(a, b)` 整体是单元素元组模式（= 参数表）——
+        // 经 param_kinds 展平后取名（与 sem 绑定纪律一致）
+        LambdaParams::Explicit(_) => lparams
+            .param_kinds()
             .iter()
-            .filter_map(|p| match &p.kind {
+            .filter_map(|kind| match *kind {
                 PatKind::Binding { name, .. } => Some(*name),
                 _ => None,
             })
@@ -65,6 +71,7 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
     std::mem::swap(&mut lfun, &mut ctx.fun);
     ctx.extra_funs.push(lfun);
     ctx.next_block = saved_nb;
+    ctx.block_index = saved_bi;
     ctx.switch_to(saved_e);
     Operand::Const(Const::Fun(ldef))
 }
@@ -1432,12 +1439,22 @@ fn fn_value_call(
     if args.iter().any(|a| a.name.is_some()) {
         ctx.diag(e.span, "函数值调用不支持命名实参（sem 已拒）");
     }
+    // S2/P2-1 spike 修复：先降全部实参再压 param——pending 队列在
+    // 嵌套调用（f(f(x))）时，外层 callee 的 param 先入队会被内层
+    // call 整队吞掉（实参临时槽不受 emit 顺序影响）
+    let arg_vals: Vec<(Operand, TyId)> = args
+        .iter()
+        .enumerate()
+        .map(|(i, arg)| {
+            let to = ps.get(i).copied().unwrap_or(ctx.sem.tys.unit);
+            let v = lower_expr_as(ctx, &arg.value, to);
+            (v, to)
+        })
+        .collect();
     let fty = ctx.expr_ty(callee);
     let fop = lower_expr(ctx, callee);
     ctx.emit(Instr::Param { a: fop, ty: fty });
-    for (i, arg) in args.iter().enumerate() {
-        let to = ps.get(i).copied().unwrap_or(ctx.sem.tys.unit);
-        let v = lower_expr_as(ctx, &arg.value, to);
+    for (v, to) in arg_vals {
         ctx.emit(Instr::Param { a: v, ty: to });
     }
     let dst = if ctx.is_unit(ret) {

@@ -1034,3 +1034,15 @@ fn generic_struct_impl_ctor_end_to_end() {
     };
     assert_eq!(out, "int-box\n1\n");
 }
+#[test]
+fn lambda_explicit_params_and_nested_fn_value_e2e() {
+    // S2/P2-1 spike 修复回归：显式参数 lambda + 嵌套函数值调用
+    // （param 入队顺序曾被内层 call 整队吞掉 → IR 畸形/panic）
+    let Some(out) = build_and_run(
+        "lambda_explicit_nested",
+        "fun twice(f: (int) -> int, x: int): int {\n    return f(f(x))\n}\nfun main(): int {\n    print(twice({ (n: int) -> n * 3 }, 2))\n    print(twice({ it + 1 }, 5))\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "18\n7\n");
+}

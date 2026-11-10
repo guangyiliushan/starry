@@ -1670,3 +1670,14 @@ fn generic_type_impl_registration_after_sig_lower() {
         DiagCode::SemTypeMismatch,
     );
 }
+#[test]
+fn lambda_explicit_params_paren_and_named_forms() {
+    // S2/P2-1 spike 修复回归：`{ (n) -> … }` / `{ (a, b) -> … }` /
+    // `{ (n: int) -> … }` 整体解析为元组模式（= 参数表）——须展平绑定
+    assert_clean(
+        "fun twice(f: (int) -> int, x: int): int {\n    return f(f(x))\n}\nfun main(): int {\n    print(twice({ (n: int) -> n * 3 }, 2))\n    return 0\n}",
+    );
+    assert_clean(
+        "fun add(f: (int, int) -> int, x: int, y: int): int {\n    return f(x, y)\n}\nfun main(): int {\n    print(add({ (a, b) -> a + b }, 1, 2))\n    return 0\n}",
+    );
+}

@@ -1632,15 +1632,17 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
                     st.scopes.insert(scope, sym, def);
                     sig_params.push((sym, ty));
                 }
-                LambdaParams::Explicit(ps) => {
-                    for (i, pat) in ps.iter().enumerate() {
+                LambdaParams::Explicit(_) => {
+                    // S2/P2-1 spike 修复：`{ (a, b) -> … }` 整体是单元素元组
+                    // 模式（= 参数表）——经 param_kinds 展平后逐个绑定
+                    for (i, kind) in params.param_kinds().iter().enumerate() {
                         let ty = param_tys.get(i).copied().unwrap_or(st.tys.error);
-                        if let PatKind::Binding { name, .. } = &pat.kind {
+                        if let PatKind::Binding { name, .. } = kind {
                             let def = st.defs.push(crate::def::Def {
                                 kind: DefKind::Param,
                                 name: *name,
                                 scope,
-                                span: pat.span,
+                                span: e.span,
                                 sig: {
                                     let mut s = crate::def::DefSig::new(st.tys.unit, st.tys.error);
                                     s.ty = ty;

@@ -1,7 +1,7 @@
 //! 表达式与 block 空间（Pratt 解析产物，糖全保留；v0.3 文法对齐中）
 
 use super::node::{ErrorNode, MissingNode, NodeId, Path, Span, Symbol};
-use super::pat::PatWrap;
+use super::pat::{PatKind, PatWrap};
 use super::stmt::StmtWrap;
 use super::ty::TypeArg;
 use super::ty::TypeWrap;
@@ -34,6 +34,31 @@ pub struct ExprStmt {
 pub struct Block {
     pub stmts: Vec<StmtWrap>,
     pub tail: Option<Box<ExprWrap>>,
+}
+
+impl LambdaParams {
+    /// 显式参数列表的绑定形展开：`{ (a, b) -> … }` 整体解析成单元素元组
+    /// 模式（= 参数表），`(x)` 单元素 = 单参数；无括号逐个绑定原样。
+    /// 非 Binding 形（wildcard/destructure）原样返回，由调用方按需处理。
+    pub fn param_kinds(&self) -> Vec<&PatKind> {
+        match self {
+            LambdaParams::It => vec![],
+            LambdaParams::Explicit(ps) => {
+                let flat: Vec<&PatKind> = if ps.len() == 1 {
+                    match &ps[0].kind {
+                        PatKind::Tuple {
+                            elements,
+                            rest: None,
+                        } => elements.iter().map(|p| &p.kind).collect(),
+                        other => vec![other],
+                    }
+                } else {
+                    ps.iter().map(|p| &p.kind).collect()
+                };
+                flat
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
