@@ -5,6 +5,7 @@
 //!   无 AST 面，调用点同步完成；
 //! - 值类型一律 `Named(spec_def, [])`：irc/opt/llvme 对实例化产物零改动。
 
+use ast::interner::Symbol;
 use ast::syntax::decl::DeclKind;
 use ast::syntax::node::{DiagCode, Diagnostic};
 use ast::syntax::ty::TypeParamName;
@@ -93,6 +94,73 @@ pub(crate) fn instantiate(st: &mut SemState, def: DefId, args: &[TyId]) -> DefId
         }
         _ => def,
     }
+}
+
+/// M7 slice 2：enum 实例化——spec def（变体 arg 类型 subst+concretize；
+/// member_scope 克隆变体 def，parent 指 spec）。注册先行防递归。
+pub(crate) fn instantiate_enum(st: &mut SemState, def: DefId, args: &[TyId]) -> DefId {
+    debug_assert!(
+        !args.iter().any(|a| st.tys.mentions_param(*a)),
+        "实例化实参必须已具体"
+    );
+    if let Some(&spec) = st.mono_insts.get(&(def, args.to_vec())) {
+        return spec;
+    }
+    let (name, span, scope, unit, error) = {
+        let d = st.defs.get(def);
+        (d.name, d.span, d.scope, st.tys.unit, st.tys.error)
+    };
+    let spec = st.defs.push(Def {
+        kind: DefKind::Enum,
+        name,
+        scope,
+        span,
+        sig: DefSig::new(unit, error),
+        resolving: false,
+        alias_of: None,
+        alias_resolved: None,
+        member_scope: None,
+        external: false,
+        ty_params: 0,
+        decl: None,
+    });
+    st.mono_insts.insert((def, args.to_vec()), spec);
+    let orig_variants = st.defs.get(def).sig.variants.clone();
+    let mut svariants: Vec<(Symbol, Vec<(Symbol, TyId)>)> = Vec::new();
+    for (vname, vargs) in &orig_variants {
+        let mut sargs: Vec<(Symbol, TyId)> = Vec::new();
+        for (an, at) in vargs {
+            let ty = st.tys.subst(*at, args);
+            let ty = concretize(st, ty);
+            sargs.push((*an, ty));
+        }
+        svariants.push((*vname, sargs));
+    }
+    st.defs.get_mut(spec).sig.variants = svariants.clone();
+    // member_scope：克隆变体 def（EnumVariant{ parent: spec, index }）
+    let ms = st.scopes.new_scope(Some(scope));
+    for (index, (vname, _)) in svariants.iter().enumerate() {
+        let vdef = st.defs.push(Def {
+            kind: DefKind::EnumVariant {
+                parent: spec,
+                index,
+            },
+            name: *vname,
+            scope: ms,
+            span,
+            sig: DefSig::new(unit, error),
+            resolving: false,
+            alias_of: None,
+            alias_resolved: None,
+            member_scope: None,
+            external: false,
+            ty_params: 0,
+            decl: None,
+        });
+        st.scopes.insert(ms, *vname, vdef);
+    }
+    st.defs.get_mut(spec).member_scope = Some(ms);
+    spec
 }
 
 /// struct 实例化：spec def。字段/构造参数类型 = subst + concretize
@@ -191,7 +259,10 @@ fn concretize(st: &mut SemState, ty: TyId) -> TyId {
                     // 防御：subst 输出应已具体；占位不实例化
                     return st.tys.intern(TyKind::Named(def, args));
                 }
-                let spec = instantiate_struct(st, def, &args);
+                let spec = match st.defs.get(def).kind {
+                    DefKind::Enum => instantiate_enum(st, def, &args),
+                    _ => instantiate_struct(st, def, &args),
+                };
                 st.tys.builtin_named(spec)
             } else {
                 st.tys.intern(TyKind::Named(def, args))

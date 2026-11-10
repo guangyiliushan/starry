@@ -617,13 +617,6 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
             st.defs.get_mut(def).ty_params = e.type_params.len() as u32;
             st.defs.get_mut(def).decl = Some(index);
             *st.decl_def.last_mut().expect("decl_def slot") = Some(def);
-            if !e.type_params.is_empty() {
-                st.diags.emit(Diagnostic::error(
-                    DiagCode::SemUnsupportedConstruct,
-                    decl.span,
-                    "generic enums are not supported in this slice",
-                ));
-            }
             let ms = st.scopes.new_scope(Some(scope));
             st.defs.get_mut(def).member_scope = Some(ms);
             for (index, variant) in e.variants.iter().enumerate() {
@@ -1230,7 +1223,13 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
             }
             DeclKind::Enum(e) => {
                 let Some(def) = item_def else { continue };
-                let dsc = st.defs.get(def).scope;
+                // M7 slice 2：泛型 enum 变体实参 lower 进类型形参作用域
+                let tscope = if e.type_params.is_empty() {
+                    st.defs.get(def).scope
+                } else {
+                    type_param_scope(st, st.defs.get(def).scope, &e.type_params)
+                };
+                let dsc = tscope;
                 // 形参名保留：命名实参构造（Shape.Circle(radius = 2.0)）依赖它
                 let variants: Vec<(Symbol, Vec<(Symbol, TyId)>)> = e
                     .variants
@@ -1447,6 +1446,9 @@ fn lower_variant_arg(st: &mut SemState, scope: ScopeId, p: &Param, span: Span) -
             DefKind::BuiltinType | DefKind::Struct | DefKind::Enum | DefKind::Class => {
                 st.tys.builtin_named(def)
             }
+            // M7 slice 2：变体实参的裸类型名 = 类型形参（落 Param 标记，
+            // 实例化时经 subst 兑现）
+            DefKind::TypeParam { index } => st.tys.intern(TyKind::Param(index)),
             DefKind::TypeAlias => alias_target(st, scope, def, span),
             _ => {
                 st.diags.emit(Diagnostic::error(
@@ -1557,7 +1559,35 @@ fn lower_ty_uncached(st: &mut SemState, scope: ScopeId, ty: &TypeWrap) -> TyId {
                         st.tys.builtin_named(spec)
                     }
                 }
-                DefKind::Enum | DefKind::Class => {
+                // M7 slice 2：泛型 enum 实例化 = spec def（变体代入后）
+                DefKind::Enum => {
+                    let want = st.defs.get(def).ty_params as usize;
+                    if want > 0 {
+                        if args.len() != want {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemTypeArgMismatch,
+                                ty.span,
+                                format!(
+                                    "generic enum expects {want} type argument(s), got {}",
+                                    args.len()
+                                ),
+                            ));
+                            return st.tys.error;
+                        }
+                        let spec = crate::mono::instantiate_enum(st, def, &args);
+                        st.tys.builtin_named(spec)
+                    } else {
+                        if !args.is_empty() {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemTypeArgMismatch,
+                                ty.span,
+                                "this enum is not generic",
+                            ));
+                        }
+                        st.tys.intern(TyKind::Named(def, args))
+                    }
+                }
+                DefKind::Class => {
                     if !args.is_empty() {
                         st.diags.emit(Diagnostic::error(
                             DiagCode::SemUnsupportedConstruct,

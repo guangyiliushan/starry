@@ -1331,10 +1331,9 @@ fn generic_rejections_are_stable() {
         "trait Eq {\n    fun eq(o: Self): bool\n}\nstruct Plain(val v: int)\nfun f<T : Eq>(v: T) : int {\n    return 0\n}\nfun main() : int {\n    val p = Plain(1)\n    return f(p)\n}",
         DiagCode::SemUnsupportedConstruct,
     );
-    // 泛型 enum
-    assert_has(
-        "enum E<T> {\n    A\n}\nfun main() : int {\n    return 0\n}",
-        DiagCode::SemUnsupportedConstruct,
+    // M7 slice 2：泛型 enum 已落地（声明+实例化+变体构造推断）
+    assert_clean(
+        "enum E<T> {\n    A\n    B(T)\n}\nfun main() : int {\n    val a = E.A\n    val b = E.B(1)\n    return 0\n}",
     );
     // 泛型 struct 主构造默认值
     assert_has(

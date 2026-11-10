@@ -382,6 +382,25 @@ fn check_local_binding(b: &BindingDecl, st: &mut SemState) {
 
 /// 绑定模式定型核心：Binding 核对注解/写入推断，Tuple/Array 按元素递归精化；
 /// 顶层与局部共用（顶层 defs 的 pat_binding_def 由 declare 期写入）
+/// M7 slice 2：泛型 enum 的零参变体构造（`Opt.None`）定型为泛型原件
+/// `Named(orig, [])`；标注/目标是实例化 spec（同名的 `Named(spec,[])`）
+/// 时视为可指派（零参变体布局与 T 无关）
+fn enum_ctor_matches_spec(st: &SemState, from: TyId, to: TyId) -> bool {
+    match (st.tys.kind(from).clone(), st.tys.kind(to).clone()) {
+        (TyKind::Named(fd, fa), TyKind::Named(td, ta)) => {
+            fa.is_empty()
+                && ta.is_empty()
+                && fd != td
+                && st.defs.get(fd).name == st.defs.get(td).name
+                && matches!(st.defs.get(fd).kind, DefKind::Enum)
+                && matches!(st.defs.get(td).kind, DefKind::Enum)
+                && st.defs.get(td).ty_params == 0
+                && st.mono_insts.iter().any(|(o, s)| o.0 == fd && *s == td)
+        }
+        _ => false,
+    }
+}
+
 fn check_binding_pattern(init: &ExprWrap, pat: &PatWrap, init_ty: TyId, st: &mut SemState) {
     match &pat.kind {
         PatKind::Binding { .. } => {
@@ -394,7 +413,9 @@ fn check_binding_pattern(init: &ExprWrap, pat: &PatWrap, init_ty: TyId, st: &mut
                     retype_binary_literals(init, ann, st);
                     retype_integer_literal(init, ann, st);
                     let init_ty = st.expr_ty.get(init.id).copied().unwrap_or(init_ty);
-                    if !st.tys.assignable(init_ty, ann) {
+                    // M7 slice 2：泛型 enum 零参 ctor → spec 豁免（见 helper）
+                    if !st.tys.assignable(init_ty, ann) && !enum_ctor_matches_spec(st, init_ty, ann)
+                    {
                         mismatch(st, init.span);
                     }
                 }
@@ -2141,6 +2162,44 @@ fn type_call(
                     });
                 if let Some((parent, index)) = resolved {
                     let vparams = variant_arg_tys(parent, index, st);
+                    // M7 slice 2：泛型 enum——变体实参推断 + 实例化 spec，
+                    // 变体 def 重映射到 spec 的对应变体（irc variant_ctor
+                    // 读 spec 的代入后签名）
+                    if st.defs.get(named).ty_params > 0 {
+                        let tp_defaults = st.defs.get(named).sig.tp_defaults.clone();
+                        let Some(targs) = infer_call_targs(
+                            st,
+                            st.defs.get(named).ty_params as usize,
+                            &vparams,
+                            &vec![false; vparams.len()],
+                            &tp_defaults,
+                            args,
+                            span,
+                        ) else {
+                            return st.tys.error;
+                        };
+                        let spec = crate::mono::instantiate_enum(st, named, &targs);
+                        let Some(svariant) = member_lookup(st, spec, *name) else {
+                            return st.tys.error;
+                        };
+                        let (sparent, sindex) = match st.defs.get(svariant).kind {
+                            DefKind::EnumVariant { parent, index } => (parent, index),
+                            _ => return st.tys.error,
+                        };
+                        let svparams = variant_arg_tys(sparent, sindex, st);
+                        for (a, (_, pt)) in args.iter().zip(svparams.iter()) {
+                            let aty = st.expr_ty.get(a.value.id).copied().unwrap_or(st.tys.error);
+                            if !st.tys.assignable(aty, *pt) {
+                                st.diags.emit(Diagnostic::error(
+                                    DiagCode::SemTypeMismatch,
+                                    a.value.span,
+                                    "argument type does not match the inferred instantiation",
+                                ));
+                            }
+                        }
+                        st.expr_def.set(callee.id, svariant);
+                        return st.tys.builtin_named(spec);
+                    }
                     check_call_args(args, &vparams, &[], span, st);
                 } else {
                     type_all_args(args, st);
@@ -2614,6 +2673,8 @@ fn type_when(
             None => missing_else(st, span),
             Some(sty) if st.tys.is_error(sty) => {}
             Some(sty) => match st.tys.kind(sty).clone() {
+                // M7 slice 2：泛型 enum 实例化 spec 的穷尽性/覆盖核查按
+                // spec 自身变体（covered_variants 已在 refine 时重映射）
                 TyKind::Named(def, _) => {
                     let total = match &st.defs.get(def).kind {
                         DefKind::Enum => st.defs.get(def).sig.variants.len(),
@@ -2693,6 +2754,41 @@ fn refine_pattern_types(pat: &PatWrap, subject_ty: TyId, st: &mut SemState) {
             }
         }
         PatKind::Constructor { path, args } => {
+            // M7 slice 2：泛型 enum 模式的 ctor 重映射——subject 是
+            // 实例化 spec（Named(spec, [])）时把 pat_res.ctor 从泛型
+            // 原件的变体重映射到 spec 的对应变体（类型代入后）
+            if let Some(spec) = (match st.tys.kind(subject_ty).clone() {
+                TyKind::Named(spec, _)
+                    if matches!(st.defs.get(spec).kind, DefKind::Enum)
+                        && st.defs.get(spec).ty_params == 0 =>
+                {
+                    Some(spec)
+                }
+                _ => None,
+            }) && matches!(st.defs.get(spec).kind, DefKind::Enum)
+                && st.defs.get(spec).ty_params == 0
+                && let Some(existing_ctor) = st.pat_res.get(pat.id).copied()
+                && let DefKind::EnumVariant { parent, .. } =
+                    st.defs.get(existing_ctor.ctor).kind.clone()
+                && st.defs.get(parent).ty_params > 0
+                && st
+                    .mono_insts
+                    .iter()
+                    .any(|(o, s)| o.0 == parent && *s == spec)
+            {
+                if let Some(svariant) =
+                    member_lookup(st, spec, st.defs.get(existing_ctor.ctor).name)
+                    && let DefKind::EnumVariant { index, .. } = st.defs.get(svariant).kind.clone()
+                {
+                    st.pat_res.set(
+                        pat.id,
+                        PatRes {
+                            ctor: svariant,
+                            variant: Some(index),
+                        },
+                    );
+                }
+            }
             let resolved = st.pat_res.get(pat.id).copied().or_else(|| {
                 if path.segments.len() != 1 {
                     return None;
