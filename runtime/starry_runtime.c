@@ -22,6 +22,14 @@ unsigned long long strlen(const char *s) {
     while (s[n]) n++;
     return n;
 }
+/* P1-A0（提前落地项）：MSVC x64 大栈帧（>4KB 局部，如大聚合数组）
+ * 会生成 __chkstk 栈探测调用——freestanding 无 CRT 必须自备。
+ * 当前程序栈小（<1MB 预留页经启动已提交），跳过探测直接返回；
+ * 若未来出现 >1MB 帧需改为真实逐页探测（/GUARD、栈提交策略随之定）。 */
+__attribute__((naked)) void __chkstk(void) {
+    __asm__ volatile("ret");
+}
+
 void *memcpy(void *dst, const void *src, unsigned long long n) {
     char *d = (char *)dst;
     const char *s = (const char *)src;
