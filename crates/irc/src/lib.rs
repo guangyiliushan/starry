@@ -54,6 +54,7 @@ pub fn lower(sem: &mut SemanticOutput, source: &str) -> TacOutput {
         decl_def,
         scopes,
         impls,
+        lambda_defs,
         ..
     } = sem;
     let i8_ty = tys.intern(TyKind::Int(IntKind::I8));
@@ -71,6 +72,7 @@ pub fn lower(sem: &mut SemanticOutput, source: &str) -> TacOutput {
         scopes,
         interner,
         impls,
+        lambda_defs,
     };
     lower::run(&mut sr, source, i8_ty)
 }

@@ -37,6 +37,7 @@ pub(crate) struct SemRef<'a> {
     pub interner: &'a mut Interner,
     /// M9 9b：impl 注册表（impl 方法体 lowering 用）
     pub impls: &'a [sem::TraitImpl],
+    pub lambda_defs: &'a std::collections::BTreeMap<u32, DefId>,
 }
 
 /// 值的存放处：Temp = 不可变局部（SSA 式单赋值，例外：短路布尔/in
@@ -114,6 +115,8 @@ pub(crate) struct Ctx<'r, 'a> {
     /// at statement end (or after cond eval / at branch end) -
     /// C++ [class.temporary]-style full-expression discipline, no pool.
     stmt_temps: Vec<(TempId, TyId)>,
+    /// M8 slice 2：lambda 函数体（lower_expr 创建，lower() 收集到 out.funs）
+    pub extra_funs: Vec<FunBody>,
     /// BlockId → blocks 下标（switch_to 维护；block_pos O(1)）
     block_index: std::collections::HashMap<BlockId, usize>,
     /// 顶层全局：Symbol → (DefId, 类型)；只含标量（v1）
@@ -499,6 +502,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             defers: Vec::new(),
             class_drops: Vec::new(),
             stmt_temps: Vec::new(),
+            extra_funs: Vec::new(),
             block_index: std::collections::HashMap::new(),
             globals,
             unsupported_globals,
