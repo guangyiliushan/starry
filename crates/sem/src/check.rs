@@ -640,6 +640,16 @@ fn assign_target_ty(target: &ExprWrap, target_ty: TyId, st: &mut SemState) -> Ty
         ExprKind::Ident(_) => match st.expr_def.get(target.id).copied() {
             Some(def) => match &st.defs.get(def).kind {
                 DefKind::LocalBinding { mutable, weak } => {
+                    // S2/P2-3：lambda 内对捕获名赋值 = 值捕获快照语义禁止
+                    if let Some((_, _, caps)) = st.lambda_cap_stack.last()
+                        && caps.iter().any(|(s, _)| st.defs.get(def).name == *s)
+                    {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnsupportedConstruct,
+                            target.span,
+                            "cannot assign to a captured variable (S2 value capture snapshot)",
+                        ));
+                    }
                     // M4 slice 3：weak 重赋值簿记（旧 weak_drop/新 weak_retain）未排期
                     if *weak {
                         st.diags.emit(Diagnostic::error(
@@ -1604,8 +1614,12 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
                 }
             };
             // create param scope with bindings
-            let root = st.scopes.root();
-            let scope = st.scopes.new_scope(Some(root));
+            let parent = st
+                .node_scope
+                .get(e.id)
+                .copied()
+                .unwrap_or_else(|| st.scopes.root());
+            let scope = st.scopes.new_scope(Some(parent));
             let mut sig_params: Vec<(Symbol, TyId)> = Vec::new();
             match params {
                 LambdaParams::It => {
@@ -1689,8 +1703,12 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
                 def: lambda_def,
             });
             // M8: resolve lambda body identifiers in lambda scope
+            // S2/P2-3：捕获窗口覆盖 resolve + type（赋值拒收在 type 期）
+            st.lambda_cap_stack.push((e.id.0, scope, Vec::new()));
             crate::resolve::resolve_block(body, st, scope);
             let body_ty = type_block(body, st, true);
+            let (_, _, caps) = st.lambda_cap_stack.pop().expect("capture stack");
+            st.lambda_caps.insert(e.id.0, caps);
             st.funs.pop();
             if !st.tys.assignable(body_ty, ret_ty) && !st.tys.is_error(body_ty) {
                 mismatch(st, e.span);

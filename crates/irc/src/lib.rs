@@ -55,9 +55,15 @@ pub fn lower(sem: &mut SemanticOutput, source: &str) -> TacOutput {
         scopes,
         impls,
         lambda_defs,
+        lambda_caps,
         ..
     } = sem;
     let i8_ty = tys.intern(TyKind::Int(IntKind::I8));
+    // S2/P2-3b：env 形参（引用类型 → scalar_ty ptr；interp 标量槽）
+    let env_ref_ty = tys.intern(TyKind::Ref {
+        inner: tys.unit,
+        mutable: false,
+    });
     let mut sr = lower::SemRef {
         source: ast,
         tys,
@@ -73,6 +79,8 @@ pub fn lower(sem: &mut SemanticOutput, source: &str) -> TacOutput {
         interner,
         impls,
         lambda_defs,
+        lambda_caps,
+        env_ref_ty,
     };
     lower::run(&mut sr, source, i8_ty)
 }

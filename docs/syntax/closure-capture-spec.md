@@ -84,6 +84,17 @@ lambda 体引用的**外层局部名**（非形参、非全局）：
   AllocClass + RuntimeFn）——最小侵入方案 P2-3 定；
 - golden/差分：lambda 用例全量入 diff（§5 矩阵）。
 
+## 6b. 切片账（P2-3 分批）
+
+- **P2-3a（已落地，`568d50f`）**：sem 捕获分析基建——捕获表
+  （`lambda_caps`，首现序）+ 三类稳定拒收（mutable 全局引用/
+  lambda 内捕获名赋值/捕获快照语义）；env box = ARC 对象不变。
+- **P2-3b（下一批）**：irc boxed lowering（AllocClosure/
+  Callee::Closure——所有 Fn 值统一 closure box，具名函数引用亦装箱）+
+  llvme 发射 + interp 注册表（无堆实现）+ 矩阵用例。class 捕获的
+  deinit meta 合成随 P2-3b（标量捕获先行时 alloc deinit=null，
+  class 捕获暂缓——矩阵 #4/#11 归 P2-3b）。
+
 ## 7. 明确不做（S2 非目标）
 
 - 借用捕获/逃逸分析/可变捕获/shared box；

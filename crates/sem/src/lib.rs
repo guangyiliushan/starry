@@ -108,6 +108,8 @@ pub struct SemanticOutput {
     /// M9 9b：impl 注册表导出（irc 的 impl 方法体 lowering 用）
     pub impls: Vec<def::TraitImpl>,
     pub lambda_defs: std::collections::BTreeMap<u32, DefId>,
+    /// S2/P2-3：lambda expr id → 捕获表（名称按首现序）
+    pub lambda_caps: std::collections::BTreeMap<u32, Vec<(ast::interner::Symbol, TyId)>>,
 }
 
 /// 语义分析入口；parser 诊断原样保留在前，语义诊断附加在后
@@ -169,6 +171,10 @@ pub(crate) struct SemState {
     pub lambda_exp: Vec<Option<TyId>>,
     /// M8: lambda expr id -> fun def
     pub lambda_defs: std::collections::BTreeMap<u32, DefId>,
+    /// S2/P2-3：捕获收集栈（node, lambda 作用域, 捕获表）
+    pub lambda_cap_stack: Vec<(u32, def::ScopeId, Vec<(ast::interner::Symbol, TyId)>)>,
+    /// S2/P2-3：lambda expr id → 捕获表（pop 时落账）
+    pub lambda_caps: std::collections::BTreeMap<u32, Vec<(ast::interner::Symbol, TyId)>>,
     // ---- M7 泛型单态化（generic-mono-spike.md） ----
     /// fun 实例化作业队列（struct 同步完成，不排队）
     pub mono_queue: Vec<mono::MonoJob>,
@@ -237,6 +243,8 @@ impl Sem {
             pkg_scopes: Vec::new(),
             impls: Vec::new(),
             lambda_defs: std::collections::BTreeMap::new(),
+            lambda_cap_stack: Vec::new(),
+            lambda_caps: std::collections::BTreeMap::new(),
             mono_queue: Vec::new(),
             in_impl_header: false,
             unsafe_depth: 0,
@@ -285,6 +293,7 @@ impl Sem {
             scopes: self.st.scopes,
             impls: self.st.impls,
             lambda_defs: self.st.lambda_defs,
+            lambda_caps: self.st.lambda_caps,
         }
     }
 }

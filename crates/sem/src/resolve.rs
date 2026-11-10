@@ -428,6 +428,52 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
                             ),
                         ));
                     }
+                    // S2/P2-3：lambda 捕获分析——lambda 作用域子树外的
+                    // 局部/形参 = 捕获（按值：标量快照 / class 引用）；
+                    // mutable 全局稳定拒收；val 全局直读不捕获
+                    if !st.lambda_cap_stack.is_empty() {
+                        let dscope = st.defs.get(def).scope;
+                        let dty = st.defs.get(def).sig.ty;
+                        let dmut = matches!(
+                            st.defs.get(def).kind,
+                            DefKind::LocalBinding { mutable: true, .. }
+                        );
+                        let is_binding = matches!(
+                            st.defs.get(def).kind,
+                            DefKind::LocalBinding { .. } | DefKind::Param
+                        );
+                        let lscope = st.lambda_cap_stack.last().unwrap().1;
+                        let mut s = Some(dscope);
+                        let mut inside = false;
+                        while let Some(x) = s {
+                            if x == lscope {
+                                inside = true;
+                                break;
+                            }
+                            s = st.scopes.parent_of(x);
+                        }
+                        if is_binding && !inside {
+                            let is_global = st
+                                .funs
+                                .first()
+                                .map(|f| st.defs.get(f.def).scope == dscope)
+                                .unwrap_or(false);
+                            if is_global && dmut {
+                                let text = st.interner.resolve(*name);
+                                st.diags.emit(Diagnostic::error(
+                                    DiagCode::SemUnsupportedConstruct,
+                                    e.span,
+                                    format!("lambda cannot reference mutable global `{text}` (S2 value capture)"),
+                                ));
+                            } else if !is_global {
+                                if let Some((_, _, caps)) = st.lambda_cap_stack.last_mut() {
+                                    if !caps.iter().any(|(s, _)| *s == *name) {
+                                        caps.push((*name, dty));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     st.expr_def.set(e.id, def);
                 }
                 None => {
@@ -570,7 +616,10 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
             }
         }
         // 跳过的区域（semantic-notes 有记录）：lambda/spawn 内部不解析
-        ExprKind::Lambda { .. } | ExprKind::Spawn(_) => {}
+        ExprKind::Lambda { .. } => {
+            st.node_scope.set(e.id, scope);
+        }
+        ExprKind::Spawn(_) => {}
         ExprKind::Async { block } => {
             resolve_block(block, st, scope);
         }

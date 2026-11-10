@@ -38,6 +38,10 @@ pub(crate) struct SemRef<'a> {
     /// M9 9b：impl 注册表（impl 方法体 lowering 用）
     pub impls: &'a [sem::TraitImpl],
     pub lambda_defs: &'a std::collections::BTreeMap<u32, DefId>,
+    /// S2/P2-3b：捕获表（lambda node → (名, ty) 首现序）
+    pub lambda_caps: &'a std::collections::BTreeMap<u32, Vec<(ast::interner::Symbol, sem::TyId)>>,
+    /// S2/P2-3b：env 形参类型（Ref<unit> → scalar_ty = ptr；入口预 intern）
+    pub env_ref_ty: sem::TyId,
 }
 
 /// 值的存放处：Temp = 不可变局部（SSA 式单赋值，例外：短路布尔/in
