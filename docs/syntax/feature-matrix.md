@@ -61,19 +61,27 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | `extern "c"` FFI | ✅ | ✅ | ✅ | ✅ | — | extern 调用须 `unsafe` 块（M6）；`build -- <clang 参数>` 链接；i128 标量 ABI 拒收 |
 | main 返回值=退出码 | ✅ | ✅ | ✅ | ✅ | — | int trunc/sext、bool zext |
 | 模块系统（M5 slice 2a–3） | ✅ | ✅ | ✅ | ✅ | — | package 段 + 目录默认 + 包命名空间 + `import a.b`/`import util` 限定访问 + 可见性（默认 public/internal 包私有/private 文件私有/protected 拒收）；循环/自导入合法 |
+| class/ARC（M4 切片 1–4b，Plan C） | ✅ | ✅ | ✅ | ✅ | ✅ | 构造/字段/方法/deinit/weak var + upgrade 读取（`?P`）/可空 class/形参 +0/返回 +1 统一/重赋值所有权/语句级 +1 临时释放（`stmt_temps`，full-expression 纪律）；继承、二级构造后置 |
+| 泛型单态化（M7） | ✅ | ✅ | ✅ | ✅ | — | fun/struct 单态化；显式/推断实参、类型形参默认值、bounds 兑现（`T: Show` 实例化查 impl 注册表）；泛型 impl for enum 后置 |
+| trait/impl 静态分派（M9） | ✅ | ✅ | ✅ | ✅ | — | trait 声明/impl/bounds/泛型 impl；aspect/provide 跳过清单 |
+| 指针 `*const T`/`*mut T`（T2 thin） | ✅ | ✅ | ✅ | ✅ | — | M2：类型 + FFI + `&x`/`*p` + StorePtr；T2 checked pointer 后置 M10（Q7） |
+| 引用 `&T`/`&mut T`（T1） | ✅ | ✅ | ✅ | ✅ | — | M2；v1 保守借用（R6：局部名/不逃逸/全局拒借/不可变只读）；重叠 `&mut`/区间追踪后置 M10 前专项 |
+| `--release` 构建 | — | — | — | ✅ | — | clang `-O2` + freestanding CRT stubs；语言语义不变（checked 溢出所有模式生效，D5） |
 
 ## 未实现（稳定诊断层）
 
 | 特性 | 拒收点 | 备注 |
 |---|---|---|
-| class/ARC（M4 切片 1–4b，Plan C 所有权闭环） | ✅ | 构造/字段/方法/deinit/weak var + upgrade 读取（?P）/可空 class/形参+0/返回+1 统一/重赋值所有权/语句级 +1 临时释放（`stmt_temps`，full-expression 纪律）；继承、二级构造后置 || trait/impl/aspect/provide | sem | 跳过清单 |
-| variance/where、泛型 impl（9d） | sem | 已落地：fun/struct 单态化、显式/推断类型实参、类型形参默认值、bounds 兑现（T: Show 实例化时查 impl 注册表）、trait 静态分派（9a/9b/9c） |
-| lambda 定型（捕获语义待裁定）、spawn/async/await、宏展开、grow | sem | 跳过清单 |
-| 指针 `*const T` / `*mut T`（T2 thin） | ✅ | D-007 / M2 已落地：类型+FFI+`&x`/`*p`+StorePtr；T2 checked pointer 后置 M10（Q7） |
-| 引用 `&T` / `&mut T`（T1） | 🟡 | D-007 / M2：类型 + `&x`/`*p` 落地；v1 保守借用（R6：局部名/不逃逸/全局拒借/不可变只读）；重叠 &mut/区间追踪后置 M10 前专项 |
+| class 继承 / 二级构造（init） | sem | R4：v1 默认 final、无二级构造，稳定拒收 |
+| lambda 捕获 / 捕获语义 | sem | 待裁定；当前仅无捕获 lambda |
+| aspect / provide | sem | 跳过清单 |
+| variance（类型形参型变标注） | sem | 语法扩展后置 |
+| spawn/async/await、宏展开、grow | sem | 跳过清单 |
 | 聚合顶层全局 | irc | `IrcUnsupportedLowering` |
 | extern 程序 interp 验证 | interp | `UnknownFun` trap（已知局限） |
 | i128 位宽语义 | interp | 按 64 位建模（已知局限） |
+| T2 checked pointer | — | 后置 M10（Q7） |
+| M10 并发（Mutex/actor、Send/Sync） | — | 模型选择待用户裁定 |
 
 ## Conformance（P1-7 骨架）
 

@@ -1623,3 +1623,29 @@ fn trait_dispatch_slice9b_semantics() {
         DiagCode::SemUnsupportedConstruct,
     );
 }
+
+#[test]
+fn class_inheritance_stable_rejection() {
+    // R4：v1 class 默认 final——继承语法稳定拒收（trait 继承同纪律）
+    assert_has(
+        "class Base {\n}\nclass Sub: Base {\n}\nfun main(): int {\n    return 0\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn bare_field_ident_requires_self() {
+    // 成员体（deinit/方法）裸字段名稳定拒收（irc 仅绑定 self，契约一致性）
+    assert_has(
+        "class N(var v: int) {\n    deinit {\n        print(v)\n    }\n}\nfun main(): int {\n    val a = N(1)\n    return 0\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    assert_has(
+        "class N(var v: int) {\n    fun get(): int {\n        return v\n    }\n}\nfun main(): int {\n    val a = N(1)\n    return a.get()\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    // self.field 合法（正向回归）
+    assert_clean(
+        "class N(var v: int) {\n    fun get(): int {\n        return self.v\n    }\n}\nfun main(): int {\n    val a = N(1)\n    return a.get()\n}",
+    );
+}

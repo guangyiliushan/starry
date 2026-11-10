@@ -266,7 +266,8 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   剩余：泛型 struct 默认值逐实例化检查未排期。
 - **class/ARC（M4）**：稳定拒收不变；spike 已按 D-004 重写（ARC 默认、
   arena 后置）。R3/R4 已裁定 v1 形态（线程本地非原子、`weak var`、
-  `deinit`、引用相等、默认 final、无二级构造）。
+  `deinit`、引用相等、默认 final、无二级构造）。class 继承语法稳定拒收
+  （`SemUnsupportedConstruct`，"v1 classes are final"；2026-11 审查修复）。
 - **泛型（M7 slice 1）**：fun/struct 单态化已落地（见 generic-mono-spike.md）；
   trait bounds/形参默认值/实参推断/泛型 enum 后置（R2 核心 exit 后不写进承诺）。
 
@@ -287,9 +288,10 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   `deinit { }` 走 init 同款文本槽位词（R4 拼写裁定；不升硬关键字，
   与 init 先例一致）；末引用 release 经 **header meta = deinit 函数
   指针**回调（AllocClass 指令两参：payload 字节 + deinit 或 null）。
-  **隐式 self 裸字段名未排期**——方法内须显式 `self.x`（裸名给
-  SemUndefinedName）；verify 覆盖断言在已有错误诊断时跳过（不再
-  panic 盖诊断）。
+  **隐式 self 裸字段名稳定拒收**——方法/deinit 体内须显式 `self.x`
+  （裸字段名经 Ident 守卫给 `SemUnsupportedConstruct`："field ... requires
+  self."；irc 仅绑定 self，契约一致性 2026-11 审查修复）；verify 覆盖
+  断言在已有错误诊断时跳过（不再 panic 盖诊断）。
 - **slice 3：weak var**——`weak` 走 **lexicon 修饰词表**（15 个，syntaxgen
   正道；语句级 `weak var` 前瞻分支，peak=weak 且次位 var/val 才走绑定）。
   初始化 `starry_weak_retain`（weak++），块出口 `starry_weak_drop`

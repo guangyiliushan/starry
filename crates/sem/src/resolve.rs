@@ -416,6 +416,18 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
             st.node_scope.set(e.id, scope);
             match lookup_with_imports(st, scope, *name) {
                 Some(def) => {
+                    // R4/M4 契约：裸字段名不可作标识符（irc 仅绑定 self）；
+                    // 成员体内访问字段必须 `self.field`——统一在此守卫
+                    if matches!(st.defs.get(def).kind, DefKind::StructField { .. }) {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnsupportedConstruct,
+                            e.span,
+                            format!(
+                                "field `{}` requires `self.` inside member functions",
+                                st.interner.resolve(*name)
+                            ),
+                        ));
+                    }
                     st.expr_def.set(e.id, def);
                 }
                 None => {

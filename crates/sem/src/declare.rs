@@ -631,6 +631,14 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
             if let Some(slot) = st.decl_def.last_mut() {
                 *slot = Some(def);
             }
+            // R4：v1 class 默认 final——继承语法稳定拒收（trait 继承同纪律）
+            if !c.supertypes.is_empty() {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    decl.span,
+                    "class inheritance is not supported in this slice (v1 classes are final)",
+                ));
+            }
             let ms = st.scopes.new_scope(Some(scope));
             st.defs.get_mut(def).member_scope = Some(ms);
             // 头字段注册（M3 三态纪律同 struct 主构造）
