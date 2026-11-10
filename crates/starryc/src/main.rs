@@ -45,7 +45,15 @@ fn main() -> ExitCode {
         [cmd, path] if cmd == "irc" => cmd_irc(path),
         [cmd, path] if cmd == "opt" => cmd_opt(path),
         [cmd, path] if cmd == "llvme" => cmd_llvme(path),
-        [cmd, rest @ ..] if cmd == "build" => cmd_build_args(rest),
+        [cmd, rest @ ..] if cmd == "build" => {
+            let release = rest.iter().any(|a| a.as_str() == "--release");
+            let clean: Vec<String> = rest
+                .iter()
+                .filter(|a| a.as_str() != "--release")
+                .cloned()
+                .collect();
+            cmd_build_args(&clean, release)
+        }
         _ => usage(),
     }
 }
@@ -401,14 +409,14 @@ fn llvm_tool_path(name: &str) -> PathBuf {
 
 /// `build <file> [output] [-- <clang 链接参数>...]`：`--` 之后的参数原样追加到
 /// clang 链接行（额外 .obj/.o、`-l`、`-L` 等 extern "c" FFI 用）
-fn cmd_build_args(args: &[String]) -> ExitCode {
+fn cmd_build_args(args: &[String], release: bool) -> ExitCode {
     let (head, link_args) = match args.iter().position(|a| a == "--") {
         Some(i) => (&args[..i], &args[i + 1..]),
         None => (args, &[][..]),
     };
     match head {
-        [path] => cmd_build(path, None, link_args),
-        [path, output] => cmd_build(path, Some(output), link_args),
+        [path] => cmd_build(path, None, link_args, release),
+        [path, output] => cmd_build(path, Some(output), link_args, release),
         _ => usage(),
     }
 }
@@ -610,7 +618,7 @@ fn resolve_build_input(path: &str) -> Result<BuildInput, String> {
         Ok(BuildInput::Single(p.to_path_buf()))
     }
 }
-fn cmd_build(path: &str, output: Option<&str>, link_args: &[String]) -> ExitCode {
+fn cmd_build(path: &str, output: Option<&str>, link_args: &[String], release: bool) -> ExitCode {
     let input = match resolve_build_input(path) {
         Ok(input) => input,
         Err(msg) => {
@@ -672,6 +680,9 @@ fn cmd_build(path: &str, output: Option<&str>, link_args: &[String]) -> ExitCode
     if cfg!(windows) {
         // The bundled runtime is freestanding and provides mainCRTStartup.
         clang.arg("-nostdlib").arg("-lkernel32");
+        if release {
+            clang.arg("-O2");
+        }
     }
     // `--` 透传的链接参数（extern "c" FFI：额外目标文件 / -l / -L）
     for arg in link_args {

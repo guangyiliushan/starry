@@ -10,6 +10,24 @@ __declspec(dllimport) int HeapFree(HANDLE, DWORD, void *);
 __declspec(dllimport) HANDLE GetStdHandle(DWORD);
 __declspec(dllimport) int WriteFile(HANDLE, const void *, DWORD, DWORD *, void *);
 __declspec(dllimport) void ExitProcess(unsigned int);
+// M10: freestanding memcpy — -O2 优化会在 fmt_i64/utf8_from_cp 等处
+// 生成 memcpy 调用（-nostdlib 无 CRT），必须自行提供。
+void *memset(void *dst, int val, unsigned long long n) {
+    unsigned char *d = (unsigned char *)dst;
+    for (unsigned long long i = 0; i < n; i++) d[i] = (unsigned char)val;
+    return dst;
+}
+unsigned long long strlen(const char *s) {
+    unsigned long long n = 0;
+    while (s[n]) n++;
+    return n;
+}
+void *memcpy(void *dst, const void *src, unsigned long long n) {
+    char *d = (char *)dst;
+    const char *s = (const char *)src;
+    for (unsigned long long i = 0; i < n; i++) d[i] = s[i];
+    return dst;
+}
 
 int _fltused;
 int main(void);
