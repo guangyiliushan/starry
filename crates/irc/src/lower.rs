@@ -97,7 +97,7 @@ pub(crate) struct Ctx<'r, 'a> {
     pub diags: Vec<Diagnostic>,
     pub fun: FunBody,
     next_temp: u32,
-    next_block: u32,
+    pub(crate) next_block: u32,
     cur: BlockId,
     cur_open: bool,
     /// 作用域栈：Symbol → (存放处, 类型)；param 在根作用域
@@ -250,6 +250,7 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
         ctx.lower_fun(def);
         out.diags.append(&mut ctx.diags);
         out.funs.push(ctx.fun);
+        out.funs.append(&mut ctx.extra_funs);
     }
     // M4 slice 2b：class 成员函数与 deinit 的 lowering。self = 首参对象
     // 指针（静态分派）；deinit 由 release 经 header meta 回调。
@@ -274,6 +275,7 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
                         ctx.lower_member_fun(f, mdef);
                         out.diags.append(&mut ctx.diags);
                         out.funs.push(ctx.fun);
+        out.funs.append(&mut ctx.extra_funs);
                     }
                 }
                 ClassMember::Deinit(b) => {
@@ -285,6 +287,7 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
                     ctx.lower_deinit(b, mdef);
                     out.diags.append(&mut ctx.diags);
                     out.funs.push(ctx.fun);
+        out.funs.append(&mut ctx.extra_funs);
                 }
                 _ => {}
             }
@@ -314,6 +317,7 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
             ctx.lower_member_fun(f, *mdef);
             out.diags.append(&mut ctx.diags);
             out.funs.push(ctx.fun);
+        out.funs.append(&mut ctx.extra_funs);
         }
     }
     reorder_globals(&mut out, sem.defs);
@@ -773,7 +777,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
         }
     }
 
-    fn finish_fun(&mut self, tail: Option<(Operand, TyId)>, tail_expr: Option<&ExprWrap2>) {
+    pub(crate) fn finish_fun(&mut self, tail: Option<(Operand, TyId)>, tail_expr: Option<&ExprWrap2>) {
         match tail {
             Some((op, from)) => {
                 let op = expr::coerce(self, op, from, self.fun.ret);

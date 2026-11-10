@@ -2,13 +2,15 @@
 //! 类型取自 expr_ty 侧表；隐式提升与显式 as 统一走 `coerce` 插 Conv
 //! （操作数类型均匀不变量，opt-notes）。
 
-use ast::syntax::expr::{CallArg, CastKind, ExprKind, ExprWrap};
+use ast::interner::Symbol;
+use ast::syntax::expr::{Block, CallArg, CastKind, ExprKind, ExprWrap, LambdaParams};
 use ast::syntax::node::{DiagCode, NodeId, Span};
+use ast::syntax::pat::PatKind;
 use ast::token::{LiteralKind, OperatorKind};
 use sem::{DefId, DefKind, TyId, TyKind};
 
 use crate::lower::{Ctx, Place};
-use crate::tac::{BinOp, Callee, Const, Instr, Operand, RuntimeFn, TempId, Term, UnOp};
+use crate::tac::{BinOp, Callee, Const, FunBody, Instr, Operand, RuntimeFn, TempId, Term, UnOp};
 
 /// lower_jump 的目标种类（与 sem::FlowKind 对齐，避免公开依赖其私有语义）
 #[derive(Debug, Clone, Copy)]
@@ -17,7 +19,46 @@ pub(crate) enum FlowTarget {
     Continue,
 }
 
+fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Block) -> Operand {
+    let Some(&ldef) = ctx.sem.lambda_defs.get(&e.id.0) else { return Operand::Const(Const::Unit) };
+    let lsig = ctx.sem.defs.get(ldef).sig.clone();
+    let saved_p = std::mem::take(&mut ctx.fun.params);
+    let saved_b = std::mem::take(&mut ctx.fun.blocks);
+    let saved_d = ctx.fun.def;
+    let saved_r = ctx.fun.ret;
+    let saved_e = ctx.fun.entry;
+    let saved_nb = ctx.next_block;
+    ctx.fun.def = ldef;
+    ctx.fun.ret = lsig.ret;
+    let entry = ctx.reserve_block();
+    ctx.switch_to(entry);
+    ctx.fun.entry = entry;
+    ctx.env_push();
+    let pnames: Vec<Symbol> = match lparams {
+        LambdaParams::It => vec![ctx.sem.interner.intern("it")],
+        LambdaParams::Explicit(ps) => ps.iter().filter_map(|p| match &p.kind { PatKind::Binding { name, .. } => Some(*name), _ => None }).collect(),
+    };
+    for (i, (_, ty)) in lsig.params.iter().enumerate() {
+        let t = ctx.temp();
+        ctx.fun.params.push((t, *ty));
+        let pn = pnames.get(i).copied().unwrap_or(lsig.params[i].0);
+        ctx.env_top().insert(pn, (Place::Temp(t), *ty));
+    }
+    let tail = ctx.lower_block(lbody);
+    ctx.finish_fun(tail, lbody.tail.as_deref());
+    ctx.env_pop();
+    let mut lfun = FunBody { def: saved_d, params: saved_p, ret: saved_r, blocks: saved_b, entry: saved_e };
+    std::mem::swap(&mut lfun, &mut ctx.fun);
+    ctx.extra_funs.push(lfun);
+    ctx.next_block = saved_nb;
+    ctx.switch_to(saved_e);
+    Operand::Const(Const::Fun(ldef))
+}
+
 pub(crate) fn lower_expr(ctx: &mut Ctx, e: &ExprWrap) -> Operand {
+    if let ExprKind::Lambda { params: lp, body: lb } = &e.kind {
+        return lambda_lower(ctx, e, lp, lb);
+    }
     match &e.kind {
         ExprKind::Literal(kind) => literal(ctx, *kind, e.span),
         ExprKind::Bool(b) => Operand::Const(Const::Bool(*b)),
