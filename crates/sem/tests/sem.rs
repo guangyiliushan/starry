@@ -1649,3 +1649,24 @@ fn bare_field_ident_requires_self() {
         "class N(var v: int) {\n    fun get(): int {\n        return self.v\n    }\n}\nfun main(): int {\n    val a = N(1)\n    return a.get()\n}",
     );
 }
+#[test]
+fn generic_type_impl_registration_after_sig_lower() {
+    // M9 9d 根因修复回归：impl 注册延后到签名 lower 后——impl 头对
+    // 泛型 enum/struct 的实例化不再缓存空壳 spec。
+    assert_clean(
+        "trait Show {\n    fun show(): string\n}\nenum Opt<T> {\n    Some(T),\n    None,\n}\nimpl Show for Opt<int> {\n    fun show(): string {\n        return \"i\"\n    }\n}\nfun main(): int {\n    val a = Opt.Some(1)\n    val s = a.show()\n    print(s)\n    return 0\n}",
+    );
+    assert_clean(
+        "trait Show {\n    fun show(): string\n}\nstruct Box<T>(val v: T)\nimpl Show for Box<int> {\n    fun show(): string {\n        return \"i\"\n    }\n}\nfun main(): int {\n    val a = Box(1)\n    val s = a.show()\n    print(s)\n    return 0\n}",
+    );
+    // 重复实例化 impl 仍拒收（type_def 指向同一 spec）
+    assert_has(
+        "trait Show {\n    fun show(): string\n}\nstruct Box<T>(val v: T)\nimpl Show for Box<int> {\n    fun show(): string {\n        return \"a\"\n    }\n}\nimpl Show for Box<int> {\n    fun show(): string {\n        return \"b\"\n    }\n}",
+        DiagCode::SemDuplicateDef,
+    );
+    // 签名不匹配仍拒收
+    assert_has(
+        "trait Show {\n    fun show(): string\n}\nstruct Box<T>(val v: T)\nimpl Show for Box<int> {\n    fun show(): int {\n        return 1\n    }\n}",
+        DiagCode::SemTypeMismatch,
+    );
+}

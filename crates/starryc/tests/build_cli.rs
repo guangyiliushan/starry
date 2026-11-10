@@ -1008,3 +1008,29 @@ fn generic_bounds_end_to_end() {
     };
     assert_eq!(out, "pt\nlbl\n");
 }
+#[test]
+fn generic_enum_impl_dispatch_end_to_end() {
+    // M9 9d 根因修复回归：impl 头对泛型 enum 的实例化原在 declare 期
+    // 急切执行（sig.variants 未 lower → 空壳 spec 缓存）→ 方法调用
+    // 无 expr_def。延后到签名 lower 后注册，两个实例化各自分派。
+    let Some(out) = build_and_run(
+        "generic_enum_impl",
+        "trait Show {\n    fun show(): string\n}\nenum Opt<T> {\n    Some(T),\n    None,\n}\nimpl Show for Opt<int> {\n    fun show(): string {\n        return \"int-opt\"\n    }\n}\nimpl Show for Opt<string> {\n    fun show(): string {\n        return \"str-opt\"\n    }\n}\nfun main(): int {\n    val a = Opt.Some(1)\n    val b = Opt.Some(\"x\")\n    print(a.show())\n    print(b.show())\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "int-opt\nstr-opt\n");
+}
+
+#[test]
+fn generic_struct_impl_ctor_end_to_end() {
+    // M9 9d 根因修复回归：泛型 struct 的 impl 头实例化曾缓存空构造
+    // 参数的 spec → ctor 槽位冲突。延后注册后构造 + 分派全通。
+    let Some(out) = build_and_run(
+        "generic_struct_impl",
+        "trait Show {\n    fun show(): string\n}\nstruct Box<T>(val v: T)\nimpl Show for Box<int> {\n    fun show(): string {\n        return \"int-box\"\n    }\n}\nfun main(): int {\n    val a = Box(1)\n    print(a.show())\n    print(a.v)\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "int-box\n1\n");
+}

@@ -29,6 +29,10 @@ pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
     // M5 slice 2b：import 延后到全部真实声明之后注册——同包本地定义
     // 恒优先于导入别名（同包自导入、跨文件同名合法化）；导入互撞仍诊断
     let mut pending_imports: Vec<(ScopeId, &DeclNode)> = Vec::new();
+    // M9 9d 根因修复：impl 注册延后到签名 lower 之后——impl 头对泛型
+    // enum/struct 的急切实例化（mono spec 缓存）原在 declare 期跑，
+    // 会缓存 sig.variants/params 未 lower 的空壳 spec（2026-11 审查）
+    let mut pending_impls: Vec<(ScopeId, usize)> = Vec::new();
     for (i, item) in ast.items.iter().enumerate() {
         if let DeclKind::PackageSeg(path) = &item.kind {
             cur = pkg_scope(path, root, &mut pkgs, st);
@@ -43,6 +47,11 @@ pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
             pending_imports.push((seg, item));
             continue;
         }
+        if matches!(item.kind, DeclKind::Impl(_)) {
+            st.decl_def.push(None);
+            pending_impls.push((seg, i));
+            continue;
+        }
         let vis = vis_of(item, st);
         declare_one(item, i, seg, cur, vis, st);
     }
@@ -50,6 +59,9 @@ pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
         register_import(scope, item, st);
     }
     lower_top_level_sigs(ast, st);
+    for (scope, index) in pending_impls {
+        register_impl(&ast.items[index], index, scope, st);
+    }
 }
 
 /// M5 slice 2b：注册导入别名。同名真实定义已占位（本地优先）则跳过；
@@ -102,6 +114,170 @@ fn register_import(scope: ScopeId, decl: &DeclNode, st: &mut SemState) {
         add_def(st, scope, name, decl.span, DefKind::ImportNs { segments });
     }
     // Native import：v1 注册别名名（调用解析为 unsupported）
+}
+
+/// M9 9d：impl 注册（延后到签名 lower 后；泛型 enum/struct 实例化
+/// 须先有代入前的 sig）。重复 impl 拒收；签名与 trait 逐一核对。
+fn register_impl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState) {
+    let DeclKind::Impl(i) = &decl.kind else {
+        return;
+    };
+    // M9 9a：impl 注册（Q4：v1 不限 orphan——单 crate whole-program；
+    // 重复 impl 拒收；泛型 impl 9d 后置；成员限函数；签名与 trait
+    // 逐一核对，Self 代入后类型相等）
+    st.in_impl_header = true;
+    // 注意字段名与语法位相反：parser 把 for 前的 trait 位存进
+    // type_ref、for 后的类型位存进 trait_ref（ ImplDecl 命名如此）
+    let iscope = if i.type_params.is_empty() {
+        scope
+    } else {
+        type_param_scope(st, scope, &i.type_params)
+    };
+    let trait_ty = lower_ty(st, scope, &i.type_ref);
+    let type_ty = lower_ty(st, iscope, &i.trait_ref);
+    st.in_impl_header = false;
+    let Some(tdef) = (match st.tys.kind(trait_ty) {
+        TyKind::Named(d, _) if matches!(st.defs.get(*d).kind, DefKind::Trait) => Some(*d),
+        _ => None,
+    }) else {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemTypeMismatch,
+            i.trait_ref.span,
+            "impl header must name a trait",
+        ));
+        return;
+    };
+    let Some(tydef) = (match st.tys.kind(type_ty) {
+        TyKind::Named(d, _) => Some(*d),
+        _ => None,
+    }) else {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemTypeMismatch,
+            i.type_ref.span,
+            "impl header must name a nominal type",
+        ));
+        return;
+    };
+    if st
+        .impls
+        .iter()
+        .any(|im| im.trait_def == tdef && im.type_def == tydef)
+    {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemDuplicateDef,
+            decl.span,
+            "duplicate impl for this trait and type",
+        ));
+        return;
+    }
+    let Some(tms) = st.defs.get(tdef).member_scope else {
+        return;
+    };
+    let self_sym = st.interner.intern("Self");
+    let Some(self_def) = st.scopes.lookup_local(tms, self_sym) else {
+        return;
+    };
+    // impl 方法注册进独立作用域（不污染段命名空间；经注册表解析）
+    let ims = st.scopes.new_scope(Some(scope));
+    let mut methods: Vec<(Symbol, DefId)> = Vec::new();
+    for member in &i.members {
+        let ast::syntax::decl::ClassMember::Declaration(d) = member else {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                decl.span,
+                "impl members must be function definitions",
+            ));
+            continue;
+        };
+        let ast::syntax::decl::DeclKind::Fun(f) = &d.kind else {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                decl.span,
+                "impl members must be function definitions",
+            ));
+            continue;
+        };
+        let fd = add_def(st, ims, f.name, d.span, DefKind::Fun);
+        let params = lower_params(st, iscope, &f.params, d.span);
+        let ret = match &f.ret {
+            Some(r) => lower_ty(st, scope, r),
+            None => st.tys.unit,
+        };
+        let defaults: Vec<bool> = f.params.iter().map(|p| p.default.is_some()).collect();
+        let s = &mut st.defs.get_mut(fd).sig;
+        s.params = params;
+        s.ret = ret;
+        s.param_defaults = defaults;
+        st.defs.get_mut(fd).decl = Some(index);
+        methods.push((f.name, fd));
+    }
+    // 覆盖与签名核对：trait 每个签名须恰有一个同名同型的 impl 方法
+    let trait_methods: Vec<(Symbol, DefId)> = st
+        .scopes
+        .entries(tms)
+        .iter()
+        .map(|(n, d)| (*n, *d))
+        .filter(|(_, d)| matches!(st.defs.get(*d).kind, DefKind::Fun))
+        .collect();
+    for (name, tfd) in &trait_methods {
+        match methods.iter().find(|(n, _)| n == name) {
+            None => {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnknownMember,
+                    decl.span,
+                    format!(
+                        "impl is missing trait method `{}`",
+                        st.interner.resolve(*name)
+                    ),
+                ));
+            }
+            Some((_, ifd)) => {
+                let (tparams, tret) = {
+                    let s = &st.defs.get(*tfd).sig;
+                    (s.params.clone(), s.ret)
+                };
+                let (iparams, iret) = {
+                    let s = &st.defs.get(*ifd).sig;
+                    (s.params.clone(), s.ret)
+                };
+                let ok_arity = tparams.len() == iparams.len();
+                let ok_params = ok_arity
+                    && tparams
+                        .iter()
+                        .zip(iparams.iter())
+                        .all(|((_, tt), (_, it))| subst_self(st, *tt, self_def, type_ty) == *it);
+                let ok_ret = subst_self(st, tret, self_def, type_ty) == iret;
+                if !ok_arity || !ok_params || !ok_ret {
+                    st.diags.emit(Diagnostic::error(
+                        DiagCode::SemTypeMismatch,
+                        decl.span,
+                        format!(
+                            "impl method `{}` does not match the trait signature",
+                            st.interner.resolve(*name)
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    for (name, _) in &methods {
+        if !trait_methods.iter().any(|(n, _)| n == name) {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnknownMember,
+                decl.span,
+                format!(
+                    "impl method `{}` is not declared by the trait",
+                    st.interner.resolve(*name)
+                ),
+            ));
+        }
+    }
+    st.impls.push(crate::def::TraitImpl {
+        trait_def: tdef,
+        type_def: tydef,
+        span: decl.span,
+        methods,
+    });
 }
 
 /// M5 slice 3：作用域的包身份链（祖先中的包作用域，根→叶序）
@@ -844,166 +1020,9 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
             let _ = m;
             // 宏定义注册：宏体展开是独立前置 pass（规格待定）；v1 展开前调用点报错
         }
-        DeclKind::Impl(i) => {
-            // M9 9a：impl 注册（Q4：v1 不限 orphan——单 crate whole-program；
-            // 重复 impl 拒收；泛型 impl 9d 后置；成员限函数；签名与 trait
-            // 逐一核对，Self 代入后类型相等）
-            st.in_impl_header = true;
-            // 注意字段名与语法位相反：parser 把 for 前的 trait 位存进
-            // type_ref、for 后的类型位存进 trait_ref（ ImplDecl 命名如此）
-            let iscope = if i.type_params.is_empty() {
-                scope
-            } else {
-                type_param_scope(st, scope, &i.type_params)
-            };
-            let trait_ty = lower_ty(st, scope, &i.type_ref);
-            let type_ty = lower_ty(st, iscope, &i.trait_ref);
-            st.in_impl_header = false;
-            let Some(tdef) = (match st.tys.kind(trait_ty) {
-                TyKind::Named(d, _) if matches!(st.defs.get(*d).kind, DefKind::Trait) => Some(*d),
-                _ => None,
-            }) else {
-                st.diags.emit(Diagnostic::error(
-                    DiagCode::SemTypeMismatch,
-                    i.trait_ref.span,
-                    "impl header must name a trait",
-                ));
-                return;
-            };
-            let Some(tydef) = (match st.tys.kind(type_ty) {
-                TyKind::Named(d, _) => Some(*d),
-                _ => None,
-            }) else {
-                st.diags.emit(Diagnostic::error(
-                    DiagCode::SemTypeMismatch,
-                    i.type_ref.span,
-                    "impl header must name a nominal type",
-                ));
-                return;
-            };
-            if st
-                .impls
-                .iter()
-                .any(|im| im.trait_def == tdef && im.type_def == tydef)
-            {
-                st.diags.emit(Diagnostic::error(
-                    DiagCode::SemDuplicateDef,
-                    decl.span,
-                    "duplicate impl for this trait and type",
-                ));
-                return;
-            }
-            let Some(tms) = st.defs.get(tdef).member_scope else {
-                return;
-            };
-            let self_sym = st.interner.intern("Self");
-            let Some(self_def) = st.scopes.lookup_local(tms, self_sym) else {
-                return;
-            };
-            // impl 方法注册进独立作用域（不污染段命名空间；经注册表解析）
-            let ims = st.scopes.new_scope(Some(scope));
-            let mut methods: Vec<(Symbol, DefId)> = Vec::new();
-            for member in &i.members {
-                let ast::syntax::decl::ClassMember::Declaration(d) = member else {
-                    st.diags.emit(Diagnostic::error(
-                        DiagCode::SemUnsupportedConstruct,
-                        decl.span,
-                        "impl members must be function definitions",
-                    ));
-                    continue;
-                };
-                let ast::syntax::decl::DeclKind::Fun(f) = &d.kind else {
-                    st.diags.emit(Diagnostic::error(
-                        DiagCode::SemUnsupportedConstruct,
-                        decl.span,
-                        "impl members must be function definitions",
-                    ));
-                    continue;
-                };
-                let fd = add_def(st, ims, f.name, d.span, DefKind::Fun);
-                let params = lower_params(st, iscope, &f.params, d.span);
-                let ret = match &f.ret {
-                    Some(r) => lower_ty(st, scope, r),
-                    None => st.tys.unit,
-                };
-                let defaults: Vec<bool> = f.params.iter().map(|p| p.default.is_some()).collect();
-                let s = &mut st.defs.get_mut(fd).sig;
-                s.params = params;
-                s.ret = ret;
-                s.param_defaults = defaults;
-                st.defs.get_mut(fd).decl = Some(index);
-                methods.push((f.name, fd));
-            }
-            // 覆盖与签名核对：trait 每个签名须恰有一个同名同型的 impl 方法
-            let trait_methods: Vec<(Symbol, DefId)> = st
-                .scopes
-                .entries(tms)
-                .iter()
-                .map(|(n, d)| (*n, *d))
-                .filter(|(_, d)| matches!(st.defs.get(*d).kind, DefKind::Fun))
-                .collect();
-            for (name, tfd) in &trait_methods {
-                match methods.iter().find(|(n, _)| n == name) {
-                    None => {
-                        st.diags.emit(Diagnostic::error(
-                            DiagCode::SemUnknownMember,
-                            decl.span,
-                            format!(
-                                "impl is missing trait method `{}`",
-                                st.interner.resolve(*name)
-                            ),
-                        ));
-                    }
-                    Some((_, ifd)) => {
-                        let (tparams, tret) = {
-                            let s = &st.defs.get(*tfd).sig;
-                            (s.params.clone(), s.ret)
-                        };
-                        let (iparams, iret) = {
-                            let s = &st.defs.get(*ifd).sig;
-                            (s.params.clone(), s.ret)
-                        };
-                        let ok_arity = tparams.len() == iparams.len();
-                        let ok_params = ok_arity
-                            && tparams
-                                .iter()
-                                .zip(iparams.iter())
-                                .all(|((_, tt), (_, it))| {
-                                    subst_self(st, *tt, self_def, type_ty) == *it
-                                });
-                        let ok_ret = subst_self(st, tret, self_def, type_ty) == iret;
-                        if !ok_arity || !ok_params || !ok_ret {
-                            st.diags.emit(Diagnostic::error(
-                                DiagCode::SemTypeMismatch,
-                                decl.span,
-                                format!(
-                                    "impl method `{}` does not match the trait signature",
-                                    st.interner.resolve(*name)
-                                ),
-                            ));
-                        }
-                    }
-                }
-            }
-            for (name, _) in &methods {
-                if !trait_methods.iter().any(|(n, _)| n == name) {
-                    st.diags.emit(Diagnostic::error(
-                        DiagCode::SemUnknownMember,
-                        decl.span,
-                        format!(
-                            "impl method `{}` is not declared by the trait",
-                            st.interner.resolve(*name)
-                        ),
-                    ));
-                }
-            }
-            st.impls.push(crate::def::TraitImpl {
-                trait_def: tdef,
-                type_def: tydef,
-                span: decl.span,
-                methods,
-            });
-        }
+        // M9 9d：impl 注册延后到签名 lower 后（run() 末尾 register_impl）——
+        // impl 头实例化泛型类型须先有代入前的 sig（variants/params）
+        DeclKind::Impl(_) => {}
         DeclKind::Actor(a) => {
             let _ = a;
             st.diags.emit(Diagnostic::error(

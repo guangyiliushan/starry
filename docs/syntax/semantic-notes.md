@@ -269,7 +269,14 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   `deinit`、引用相等、默认 final、无二级构造）。class 继承语法稳定拒收
   （`SemUnsupportedConstruct`，"v1 classes are final"；2026-11 审查修复）。
 - **泛型（M7 slice 1）**：fun/struct 单态化已落地（见 generic-mono-spike.md）；
-  trait bounds/形参默认值/实参推断/泛型 enum 后置（R2 核心 exit 后不写进承诺）。
+  trait bounds/形参默认值/实参推断/泛型 enum 已落地（R2 核心 exit
+  承诺边界仅约束工期，不约束能力清单）。
+- **trait/impl（M9）**：声明/静态分派/bounds/泛型 impl 已落地。契约：
+  impl 头对泛型 enum/struct 的实例化**延后到签名 lower 后注册**
+  （`register_impl`，2026-11 修复——declare 期急切实例化会缓存
+  sig.variants/params 未 lower 的空壳 spec，方法分派/构造槽位随之
+  破缺）；type_def 指向实例化 spec，重复 impl 按同一 spec 拒收；
+  trait 不作类型标注（静态分派 only）；v1 不限 orphan（单 crate）。
 
 ## class + ARC（M4 slice 1，R3/R4）
 
