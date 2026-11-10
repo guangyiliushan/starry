@@ -20,7 +20,9 @@ pub(crate) enum FlowTarget {
 }
 
 fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Block) -> Operand {
-    let Some(&ldef) = ctx.sem.lambda_defs.get(&e.id.0) else { return Operand::Const(Const::Unit) };
+    let Some(&ldef) = ctx.sem.lambda_defs.get(&e.id.0) else {
+        return Operand::Const(Const::Unit);
+    };
     let lsig = ctx.sem.defs.get(ldef).sig.clone();
     let saved_p = std::mem::take(&mut ctx.fun.params);
     let saved_b = std::mem::take(&mut ctx.fun.blocks);
@@ -36,7 +38,13 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
     ctx.env_push();
     let pnames: Vec<Symbol> = match lparams {
         LambdaParams::It => vec![ctx.sem.interner.intern("it")],
-        LambdaParams::Explicit(ps) => ps.iter().filter_map(|p| match &p.kind { PatKind::Binding { name, .. } => Some(*name), _ => None }).collect(),
+        LambdaParams::Explicit(ps) => ps
+            .iter()
+            .filter_map(|p| match &p.kind {
+                PatKind::Binding { name, .. } => Some(*name),
+                _ => None,
+            })
+            .collect(),
     };
     for (i, (_, ty)) in lsig.params.iter().enumerate() {
         let t = ctx.temp();
@@ -47,7 +55,13 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
     let tail = ctx.lower_block(lbody);
     ctx.finish_fun(tail, lbody.tail.as_deref());
     ctx.env_pop();
-    let mut lfun = FunBody { def: saved_d, params: saved_p, ret: saved_r, blocks: saved_b, entry: saved_e };
+    let mut lfun = FunBody {
+        def: saved_d,
+        params: saved_p,
+        ret: saved_r,
+        blocks: saved_b,
+        entry: saved_e,
+    };
     std::mem::swap(&mut lfun, &mut ctx.fun);
     ctx.extra_funs.push(lfun);
     ctx.next_block = saved_nb;
@@ -56,7 +70,11 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
 }
 
 pub(crate) fn lower_expr(ctx: &mut Ctx, e: &ExprWrap) -> Operand {
-    if let ExprKind::Lambda { params: lp, body: lb } = &e.kind {
+    if let ExprKind::Lambda {
+        params: lp,
+        body: lb,
+    } = &e.kind
+    {
         return lambda_lower(ctx, e, lp, lb);
     }
     match &e.kind {

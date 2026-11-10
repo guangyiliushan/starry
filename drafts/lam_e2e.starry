@@ -1,8 +1,0 @@
-fun apply(f: (int) -> int, x: int): int {
-    return f(x)
-}
-fun main(): int {
-    val r = apply({ x -> x + 1 }, 41)
-    print(r)
-    return 0
-}

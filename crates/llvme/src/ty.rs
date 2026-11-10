@@ -48,6 +48,7 @@ pub fn scalar_ty(tys: &TyArena, defs: &DefArena, ty: TyId) -> String {
         TyKind::String => "i8*".into(),
         // M8 slice 1: function value = opaque function pointer
         TyKind::Fn(..) => "ptr".into(),
+        TyKind::Param(_) => "i64".into(),
         // 引用/裸指针值 = 地址；不透明指针风格（LLVM 15+）
         TyKind::Ref { .. } => "ptr".into(),
         TyKind::Pointer { .. } => "ptr".into(),
@@ -82,6 +83,7 @@ pub fn class_of(tys: &TyArena, defs: &DefArena, ty: TyId) -> TyClass {
         TyKind::Named(def, _) if matches!(defs.get(*def).kind, DefKind::Class) => TyClass::Scalar,
         // M8 slice 1: function value = scalar function pointer
         TyKind::Fn(..) => TyClass::Scalar,
+        TyKind::Param(_) => TyClass::Scalar,
         _ => TyClass::Agg,
     }
 }

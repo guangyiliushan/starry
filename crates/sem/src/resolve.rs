@@ -233,7 +233,7 @@ fn resolve_fun_with_parent(
     st.funs.pop();
 }
 
-fn resolve_block(b: &Block, st: &mut SemState, parent: ScopeId) {
+pub(crate) fn resolve_block(b: &Block, st: &mut SemState, parent: ScopeId) {
     let scope = st.scopes.new_scope(Some(parent));
     for s in &b.stmts {
         resolve_stmt(s, st, scope);

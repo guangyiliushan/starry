@@ -275,7 +275,7 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
                         ctx.lower_member_fun(f, mdef);
                         out.diags.append(&mut ctx.diags);
                         out.funs.push(ctx.fun);
-        out.funs.append(&mut ctx.extra_funs);
+                        out.funs.append(&mut ctx.extra_funs);
                     }
                 }
                 ClassMember::Deinit(b) => {
@@ -287,7 +287,7 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
                     ctx.lower_deinit(b, mdef);
                     out.diags.append(&mut ctx.diags);
                     out.funs.push(ctx.fun);
-        out.funs.append(&mut ctx.extra_funs);
+                    out.funs.append(&mut ctx.extra_funs);
                 }
                 _ => {}
             }
@@ -317,7 +317,7 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
             ctx.lower_member_fun(f, *mdef);
             out.diags.append(&mut ctx.diags);
             out.funs.push(ctx.fun);
-        out.funs.append(&mut ctx.extra_funs);
+            out.funs.append(&mut ctx.extra_funs);
         }
     }
     reorder_globals(&mut out, sem.defs);
@@ -777,7 +777,11 @@ impl<'r, 'a> Ctx<'r, 'a> {
         }
     }
 
-    pub(crate) fn finish_fun(&mut self, tail: Option<(Operand, TyId)>, tail_expr: Option<&ExprWrap2>) {
+    pub(crate) fn finish_fun(
+        &mut self,
+        tail: Option<(Operand, TyId)>,
+        tail_expr: Option<&ExprWrap2>,
+    ) {
         match tail {
             Some((op, from)) => {
                 let op = expr::coerce(self, op, from, self.fun.ret);

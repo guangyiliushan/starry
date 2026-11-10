@@ -1589,7 +1589,11 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             // M8 slice 2: pop expected Fn type (pushed by check_call_args)
             let expected = st.lambda_exp.pop().flatten();
             let Some(ft) = expected else {
-                unsupported(st, e.span, "cannot infer lambda param types without function type context");
+                unsupported(
+                    st,
+                    e.span,
+                    "cannot infer lambda param types without function type context",
+                );
                 return st.tys.error;
             };
             let (param_tys, ret_ty) = match st.tys.kind(ft).clone() {
@@ -1612,9 +1616,18 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
                         name: sym,
                         scope,
                         span: e.span,
-                        sig: { let mut s = crate::def::DefSig::new(st.tys.unit, st.tys.error); s.ty = ty; s },
-                        resolving: false, alias_of: None, alias_resolved: None,
-                        member_scope: None, external: false, ty_params: 0, decl: None,
+                        sig: {
+                            let mut s = crate::def::DefSig::new(st.tys.unit, st.tys.error);
+                            s.ty = ty;
+                            s
+                        },
+                        resolving: false,
+                        alias_of: None,
+                        alias_resolved: None,
+                        member_scope: None,
+                        external: false,
+                        ty_params: 0,
+                        decl: None,
                     });
                     st.scopes.insert(scope, sym, def);
                     sig_params.push((sym, ty));
@@ -1628,9 +1641,18 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
                                 name: *name,
                                 scope,
                                 span: pat.span,
-                                sig: { let mut s = crate::def::DefSig::new(st.tys.unit, st.tys.error); s.ty = ty; s },
-                                resolving: false, alias_of: None, alias_resolved: None,
-                                member_scope: None, external: false, ty_params: 0, decl: None,
+                                sig: {
+                                    let mut s = crate::def::DefSig::new(st.tys.unit, st.tys.error);
+                                    s.ty = ty;
+                                    s
+                                },
+                                resolving: false,
+                                alias_of: None,
+                                alias_resolved: None,
+                                member_scope: None,
+                                external: false,
+                                ty_params: 0,
+                                decl: None,
                             });
                             st.scopes.insert(scope, *name, def);
                             sig_params.push((*name, ty));
@@ -1644,13 +1666,28 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
                 name: st.interner.intern("__lambda"),
                 scope,
                 span: e.span,
-                sig: { let mut s = crate::def::DefSig::new(st.tys.unit, st.tys.error); s.params = sig_params.clone(); s.ret = ret_ty; s },
-                resolving: false, alias_of: None, alias_resolved: None,
-                member_scope: None, external: false, ty_params: 0, decl: None,
+                sig: {
+                    let mut s = crate::def::DefSig::new(st.tys.unit, st.tys.error);
+                    s.params = sig_params.clone();
+                    s.ret = ret_ty;
+                    s
+                },
+                resolving: false,
+                alias_of: None,
+                alias_resolved: None,
+                member_scope: None,
+                external: false,
+                ty_params: 0,
+                decl: None,
             });
             st.lambda_defs.insert(e.id.0, lambda_def);
             // type body in lambda scope
-            st.funs.push(crate::FunFrame { node: e.id, def: lambda_def });
+            st.funs.push(crate::FunFrame {
+                node: e.id,
+                def: lambda_def,
+            });
+            // M8: resolve lambda body identifiers in lambda scope
+            crate::resolve::resolve_block(body, st, scope);
             let body_ty = type_block(body, st, true);
             st.funs.pop();
             if !st.tys.assignable(body_ty, ret_ty) && !st.tys.is_error(body_ty) {
