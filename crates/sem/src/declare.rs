@@ -847,19 +847,16 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
             // M9 9a：impl 注册（Q4：v1 不限 orphan——单 crate whole-program；
             // 重复 impl 拒收；泛型 impl 9d 后置；成员限函数；签名与 trait
             // 逐一核对，Self 代入后类型相等）
-            if !i.type_params.is_empty() {
-                st.diags.emit(Diagnostic::error(
-                    DiagCode::SemUnsupportedConstruct,
-                    decl.span,
-                    "generic impls are not supported in this slice (M9 9d)",
-                ));
-                return;
-            }
             st.in_impl_header = true;
             // 注意字段名与语法位相反：parser 把 for 前的 trait 位存进
             // type_ref、for 后的类型位存进 trait_ref（ ImplDecl 命名如此）
+            let iscope = if i.type_params.is_empty() {
+                scope
+            } else {
+                type_param_scope(st, scope, &i.type_params)
+            };
             let trait_ty = lower_ty(st, scope, &i.type_ref);
-            let type_ty = lower_ty(st, scope, &i.trait_ref);
+            let type_ty = lower_ty(st, iscope, &i.trait_ref);
             st.in_impl_header = false;
             let Some(tdef) = (match st.tys.kind(trait_ty) {
                 TyKind::Named(d, _) if matches!(st.defs.get(*d).kind, DefKind::Trait) => Some(*d),
@@ -923,7 +920,7 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                     continue;
                 };
                 let fd = add_def(st, ims, f.name, d.span, DefKind::Fun);
-                let params = lower_params(st, scope, &f.params, d.span);
+                let params = lower_params(st, iscope, &f.params, d.span);
                 let ret = match &f.ret {
                     Some(r) => lower_ty(st, scope, r),
                     None => st.tys.unit,

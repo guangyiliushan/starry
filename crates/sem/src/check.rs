@@ -2077,7 +2077,13 @@ fn type_call(
                                     Some(d) => st
                                         .impls
                                         .iter()
-                                        .filter(|im| im.type_def == d)
+                                        .filter(|im| {
+                                            // M9 9d: exact match OR same-name generic impl
+                                            im.type_def == d
+                                                || (st.defs.get(im.type_def).name
+                                                    == st.defs.get(d).name
+                                                    && st.defs.get(im.type_def).ty_params > 0)
+                                        })
                                         .filter_map(|im| {
                                             im.methods
                                                 .iter()
@@ -2757,6 +2763,7 @@ fn refine_pattern_types(pat: &PatWrap, subject_ty: TyId, st: &mut SemState) {
             // M7 slice 2：泛型 enum 模式的 ctor 重映射——subject 是
             // 实例化 spec（Named(spec, [])）时把 pat_res.ctor 从泛型
             // 原件的变体重映射到 spec 的对应变体（类型代入后）
+            #[allow(clippy::collapsible_if)]
             if let Some(spec) = (match st.tys.kind(subject_ty).clone() {
                 TyKind::Named(spec, _)
                     if matches!(st.defs.get(spec).kind, DefKind::Enum)

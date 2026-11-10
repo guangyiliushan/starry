@@ -1164,16 +1164,14 @@ pub(crate) fn coerce(ctx: &mut Ctx, op: Operand, from: TyId, to: TyId) -> Operan
     // 返回目标即可，None 的 flag=0 布局与 T 无关）
     if let (TyKind::Named(fd, fa), TyKind::Named(td, _)) =
         (ctx.sem.tys.kind(from).clone(), ctx.sem.tys.kind(to).clone())
+        && fa.is_empty()
+        && fd != td
+        && matches!(ctx.sem.defs.get(fd).kind, DefKind::Enum)
+        && matches!(ctx.sem.defs.get(td).kind, DefKind::Enum)
+        && ctx.sem.defs.get(td).ty_params == 0
+        && ctx.sem.defs.get(fd).name == ctx.sem.defs.get(td).name
     {
-        if fa.is_empty()
-            && fd != td
-            && matches!(ctx.sem.defs.get(fd).kind, DefKind::Enum)
-            && matches!(ctx.sem.defs.get(td).kind, DefKind::Enum)
-            && ctx.sem.defs.get(td).ty_params == 0
-            && ctx.sem.defs.get(fd).name == ctx.sem.defs.get(td).name
-        {
-            return op;
-        }
+        return op;
     }
     // Null → 裸指针：0 地址常量。不能先落 nullable_null——它的 flag
     // 形值只有 1 字节，按 ptr 加载会读到未初始化高位（指针 FFI 探针
