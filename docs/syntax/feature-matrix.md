@@ -75,7 +75,7 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | class 继承 / 二级构造（init） | sem | R4：v1 默认 final、无二级构造，稳定拒收 |
 | lambda 捕获 / 捕获语义 | sem | 待裁定；当前仅无捕获 lambda |
 | aspect / provide | sem | 跳过清单 |
-| variance（类型形参型变标注） | sem | 语法扩展后置 |
+| variance（类型形参型变标注） | sem | **声明点不变（invariant）**：v1 无子类型关系，variance 未实现；parser 保留 `in`/`out` 词法、sem 稳定拒收（S4：待 `open` 继承或 `dyn` + ≥2 惯用样例被挡才设计） |
 | spawn/async/await、宏展开、grow | sem | 跳过清单 |
 | 聚合顶层全局 | irc | `IrcUnsupportedLowering` |
 | extern 程序 interp 验证 | interp | `UnknownFun` trap（已知局限） |

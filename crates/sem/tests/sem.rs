@@ -1681,3 +1681,15 @@ fn lambda_explicit_params_paren_and_named_forms() {
         "fun add(f: (int, int) -> int, x: int, y: int): int {\n    return f(x, y)\n}\nfun main(): int {\n    print(add({ (a, b) -> a + b }, 1, 2))\n    return 0\n}",
     );
 }
+#[test]
+fn variance_annotations_stable_rejection() {
+    // S4：v1 声明点不变——parser 保留 in/out 词法，sem 稳定拒收
+    assert_has(
+        "struct Box<in T>(val v: T)",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    assert_has(
+        "struct Box<out T>(val v: T)",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
