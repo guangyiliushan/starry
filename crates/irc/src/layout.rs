@@ -1,11 +1,12 @@
 //! 槽位布局（opt-notes「数据布局」的实现）：值 = 基址 temp + Load/Store 槽寻址。
 //!
-//! 规则：标量 1 槽（8 字节，llvme 侧按需 bitcast）；struct 按字段序摊平；
+//! 规则：标量 1 槽（8 字节，llvme 侧按需 bitcast）；i128 聚合成员 2 槽
+//! （lo/hi，S3/P3-2，见 i128-layout-spec）；struct 按字段序摊平；
 //! 和类型（enum/nullable）槽 0 = i8 tag/flag，payload 自槽 1；
 //! enum payload 布局 = 最大槽数变体（并列取先者，确定性）；
 //! array = len × 元素槽；tuple 按元素序；range = lo,hi 两槽。
 
-use sem::{DefArena, DefId, DefKind, TyArena, TyId, TyKind};
+use sem::{DefArena, DefId, DefKind, IntKind, TyArena, TyId, TyKind};
 
 /// 槽布局查询的视图：Ctx（irc 内部）与 llvme 的消费端各自实现。
 /// 公开为 llvme 的跨 crate 契约（opt-notes：槽布局由 irc/llvme 共享）
@@ -51,6 +52,9 @@ pub fn is_aggregate(v: &impl LayoutView, ty: TyId) -> bool {
 /// ty 的摊平标量槽数（和类型含 tag 槽；unit/null = 0）
 pub fn scalar_slots(v: &impl LayoutView, ty: TyId) -> usize {
     match v.tys().kind(ty) {
+        // S3/P3-2：聚合内 i128 = lo/hi 两槽（i128-layout-spec §2；
+        // 标量 i128 temps 不走本函数的聚合摊平语义，仍单槽 alloca i128）
+        TyKind::Int(IntKind::I128) => 2,
         TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::String => 1,
         TyKind::Unit | TyKind::Null => 0,
         TyKind::Array(elem, len) => scalar_slots(v, *elem) * *len as usize,

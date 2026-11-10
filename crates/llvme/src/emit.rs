@@ -1,11 +1,11 @@
 //! 模块/函数发射：两遍（temp 存储分类 → 指令发射）。
 //!
 //! 存储分类（每个 temp 恰好一个 entry alloca，外部 mem2reg 可提升）：
-//! - Cell：i64 槽（标量与单槽窄聚合共用）
-//! - WideCell：i128 槽（i128 标量；16 字节）
-//! - Block(n)：`[n x i64]` 块（不含 i128 的聚合基址）
-//! - WideBlock(n)：`[n x i128]` 块（含 i128 成员的聚合；按类型加宽）
-//! - PtrCell(n)/WidePtrCell(n)：`ptr` 槽装聚合指针（聚合实参/返回值）
+//! - Cell：i64 槽（标量）
+//! - WideCell：i128 标量槽（alloca i128；S3 后仅标量 i128）
+//! - Block(n)：`[n x i64]` 块（聚合；i128 成员占 2 槽 lo/hi，
+//!   member 访问在 emit 侧 split/join——见 i128-layout-spec）
+//! - PtrCell(n)：`ptr` 槽装聚合指针（聚合实参/返回值）
 //!
 //! 不透明指针风格（LLVM 15+）：无指针 bitcast，load/store/ret 聚合
 //! 经 `ptr`；槽寻址统一 `getelementptr [n x E], ptr p, i64 0, i64 i`
@@ -173,14 +173,10 @@ enum Storage {
     Cell,
     /// i128 槽（i128 标量；16 字节）
     WideCell,
-    /// [n x i64] 块（不含 i128 的聚合）
+    /// [n x i64] 块（聚合；含 i128 成员时 n 按 2/成员计——i128-layout-spec）
     Block(u32),
-    /// [n x i128] 块（含 i128 成员的聚合；按类型加宽，避免所有槽翻倍）
-    WideBlock(u32),
     /// ptr 槽装聚合指针（聚合实参/返回值），n = 指向块的槽数
     PtrCell(u32),
-    /// 同 PtrCell，但指向 [n x i128] 块
-    WidePtrCell(u32),
 }
 
 /// 类型是否含 i128（决定聚合块/槽是否加宽到 16 字节）
@@ -213,8 +209,7 @@ fn contains_i128(lc: &Lc, ty: TyId) -> bool {
 impl Storage {
     fn slots(&self) -> u32 {
         match self {
-            Storage::Block(n) | Storage::WideBlock(n) => *n,
-            Storage::PtrCell(n) | Storage::WidePtrCell(n) => *n,
+            Storage::Block(n) | Storage::PtrCell(n) => *n,
             _ => 1,
         }
     }
@@ -299,12 +294,13 @@ fn classify(lc: &Lc, fun: &FunBody) -> Vec<Storage> {
         if class_of(lc.tys, lc.defs, *ty) == TyClass::Agg {
             ptr[t.0 as usize] = Some(scalar_slots(lc, *ty).max(1) as u32);
         }
-        if contains_i128(lc, *ty) {
+        // S3：wide 仅标量 i128（聚合含 i128 → Block(M x i64)，不加宽）
+        if contains_i128(lc, *ty) && class_of(lc.tys, lc.defs, *ty) == TyClass::Scalar {
             wide[t.0 as usize] = true;
         }
     }
     let mark = |t: TempId, ty: TyId, wide: &mut [bool]| {
-        if contains_i128(lc, ty) {
+        if contains_i128(lc, ty) && class_of(lc.tys, lc.defs, ty) == TyClass::Scalar {
             wide[t.0 as usize] = true;
         }
     };
@@ -325,18 +321,19 @@ fn classify(lc: &Lc, fun: &FunBody) -> Vec<Storage> {
                 }
                 Instr::Load { dst, base, idx, ty } => {
                     mark(*dst, *ty, &mut wide);
-                    mark(*base, *ty, &mut wide);
                     if let Operand::Const(Const::Int(k)) = idx {
-                        req[base.0 as usize] = req[base.0 as usize].max(*k as usize + 1);
+                        // S3：i128 成员占 2 槽——req 覆盖到 k + 成员槽数
+                        req[base.0 as usize] =
+                            req[base.0 as usize].max(*k as usize + scalar_slots(lc, *ty).max(1));
                     }
                 }
                 Instr::Store { base, idx, src, ty } => {
-                    mark(*base, *ty, &mut wide);
                     if let Operand::Temp(t) = src {
                         mark(*t, *ty, &mut wide);
                     }
                     if let Operand::Const(Const::Int(k)) = idx {
-                        req[base.0 as usize] = req[base.0 as usize].max(*k as usize + 1);
+                        req[base.0 as usize] =
+                            req[base.0 as usize].max(*k as usize + scalar_slots(lc, *ty).max(1));
                     }
                 }
                 Instr::AddrOf { .. }
@@ -380,9 +377,7 @@ fn classify(lc: &Lc, fun: &FunBody) -> Vec<Storage> {
     }
     (0..n)
         .map(|i| match ptr[i] {
-            Some(n) if wide[i] => Storage::WidePtrCell(n),
             Some(n) => Storage::PtrCell(n),
-            None if req[i] > 1 && wide[i] => Storage::WideBlock(req[i] as u32),
             None if req[i] > 1 => Storage::Block(req[i] as u32),
             _ if wide[i] => Storage::WideCell,
             _ => Storage::Cell,
@@ -412,17 +407,15 @@ impl<'e, 'l> FnEmit<'e, 'l> {
         let st = self.st[t.0 as usize];
         let (base, elem) = match st {
             Storage::Cell | Storage::WideCell => return format!("%t{}.slot", t.0),
-            Storage::Block(_) => (format!("%t{}.slot", t.0), "i64"),
-            Storage::WideBlock(_) => (format!("%t{}.slot", t.0), "i128"),
-            Storage::PtrCell(_) => {
-                let p = self.fresh();
-                let _ = writeln!(self.out, "  {} = load ptr, ptr %t{}.slot", p, t.0);
-                (p, "i64")
-            }
-            Storage::WidePtrCell(_) => {
-                let p = self.fresh();
-                let _ = writeln!(self.out, "  {} = load ptr, ptr %t{}.slot", p, t.0);
-                (p, "i128")
+            Storage::Block(_) | Storage::PtrCell(_) => {
+                let base = if matches!(st, Storage::Block(_)) {
+                    format!("%t{}.slot", t.0)
+                } else {
+                    let p = self.fresh();
+                    let _ = writeln!(self.out, "  {} = load ptr, ptr %t{}.slot", p, t.0);
+                    p
+                };
+                (base, "i64")
             }
         };
         let n = st.slots();
@@ -437,6 +430,43 @@ impl<'e, 'l> FnEmit<'e, 'l> {
         gep
     }
 
+    /// S3：i128 成员的 hi 槽地址（idx+1 的 gep；lo 槽由 slot_addr 给出）
+    fn slot_addr_next(&mut self, t: TempId, idx: &Operand) -> String {
+        let st = self.st[t.0 as usize];
+        let (base, elem) = match st {
+            Storage::Cell | Storage::WideCell => return format!("%t{}.slot", t.0),
+            Storage::Block(_) | Storage::PtrCell(_) => {
+                let base = if matches!(st, Storage::Block(_)) {
+                    format!("%t{}.slot", t.0)
+                } else {
+                    let p = self.fresh();
+                    let _ = writeln!(self.out, "  {} = load ptr, ptr %t{}.slot", p, t.0);
+                    p
+                };
+                (base, "i64")
+            }
+        };
+        let n = st.slots();
+        let ity = scalar_ty(self.lc.tys, self.lc.defs, self.lc.tys.default_int);
+        // 常量索引：idx+1 直接字面量；非常量：寄存器 add
+        let gep_idx = match idx {
+            Operand::Const(Const::Int(k)) => format!("{}", *k + 1),
+            _ => {
+                let iv = self.op_val(idx, self.lc.tys.default_int);
+                let one = self.fresh();
+                let _ = writeln!(self.out, "  {} = add {} {}, 1", one, ity, iv);
+                one
+            }
+        };
+        let gep = self.fresh();
+        let _ = writeln!(
+            self.out,
+            "  {} = getelementptr [{} x {}], ptr {}, i64 0, {} {}",
+            gep, n, elem, base, ity, gep_idx
+        );
+        gep
+    }
+
     /// 常量/临时量的值文本（标量按 ty 加载；聚合返回指针值）
     fn op_val(&mut self, op: &Operand, ty: TyId) -> String {
         match op {
@@ -444,7 +474,7 @@ impl<'e, 'l> FnEmit<'e, 'l> {
                 if class_of(self.lc.tys, self.lc.defs, ty) == TyClass::Agg {
                     // 聚合值 = 其块/指针的地址
                     match self.st[t.0 as usize] {
-                        Storage::PtrCell(_) | Storage::WidePtrCell(_) => {
+                        Storage::PtrCell(_) => {
                             let p = self.fresh();
                             let _ = writeln!(self.out, "  {} = load ptr, ptr %t{}.slot", p, t.0);
                             p
@@ -505,7 +535,7 @@ impl<'e, 'l> FnEmit<'e, 'l> {
     /// 把值写入 temp 的槽（按 ty；Cell/Block 第一槽）
     fn store_val(&mut self, t: TempId, ty: TyId, val: String) {
         match self.st[t.0 as usize] {
-            Storage::PtrCell(_) | Storage::WidePtrCell(_) => {
+            Storage::PtrCell(_) => {
                 let _ = writeln!(self.out, "  store ptr {}, ptr %t{}.slot", val, t.0);
             }
             _ => {
@@ -580,10 +610,7 @@ fn emit_fun_named(lc: &Lc, g: &mut Global, fun: &FunBody, body: &mut String, nam
             Storage::Block(n) => {
                 let _ = writeln!(e.out, "  %t{}.slot = alloca [{} x i64]", i, n);
             }
-            Storage::WideBlock(n) => {
-                let _ = writeln!(e.out, "  %t{}.slot = alloca [{} x i128]", i, n);
-            }
-            Storage::PtrCell(_) | Storage::WidePtrCell(_) => {
+            Storage::PtrCell(_) => {
                 let _ = writeln!(e.out, "  %t{}.slot = alloca ptr", i);
             }
         }
@@ -920,13 +947,9 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
             e.store_val(*dst, *ty, v);
         }
         Instr::Copy { dst, src, ty } => {
-            // 聚合拷贝：逐槽搬运；槽元素宽度按类型（含 i128 → [n x i128]）
+            // 聚合拷贝：逐 i64 槽搬运（S3：i128 成员 2 槽，统一 [M x i64]）
             let n = scalar_slots(e.lc, *ty).max(1);
-            let elem = if contains_i128(e.lc, *ty) {
-                "i128"
-            } else {
-                "i64"
-            };
+            let elem = "i64";
             match src {
                 Operand::Temp(_) => {
                     let src_ptr = e.op_val(src, *ty);
@@ -1015,16 +1038,57 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
         }
         Instr::Load { dst, base, idx, ty } => {
             let addr = e.slot_addr(*base, idx);
-            let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
-            let v = e.fresh();
-            let _ = writeln!(e.out, "  {} = load {}, ptr {}", v, lty, addr);
-            e.store_val(*dst, *ty, v);
+            // S3：块槽内的 i128 成员 = [lo, hi] 两 i64 槽——join 后给值
+            let is_i128_in_block = matches!(e.lc.tys.kind(*ty), TyKind::Int(IntKind::I128))
+                && matches!(
+                    e.st[base.0 as usize],
+                    Storage::Block(_) | Storage::PtrCell(_)
+                );
+            if is_i128_in_block {
+                let lo = e.fresh();
+                let _ = writeln!(e.out, "  {} = load i64, ptr {}", lo, addr);
+                let hi_addr = e.slot_addr_next(*base, idx);
+                let hi = e.fresh();
+                let _ = writeln!(e.out, "  {} = load i64, ptr {}", hi, hi_addr);
+                let lo128 = e.fresh();
+                let _ = writeln!(e.out, "  {} = zext i64 {} to i128", lo128, lo);
+                let hi128 = e.fresh();
+                let _ = writeln!(e.out, "  {} = zext i64 {} to i128", hi128, hi);
+                let sh = e.fresh();
+                let _ = writeln!(e.out, "  {} = shl i128 {}, 64", sh, hi128);
+                let v = e.fresh();
+                let _ = writeln!(e.out, "  {} = or i128 {}, {}", v, lo128, sh);
+                e.store_val(*dst, *ty, v);
+            } else {
+                let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
+                let v = e.fresh();
+                let _ = writeln!(e.out, "  {} = load {}, ptr {}", v, lty, addr);
+                e.store_val(*dst, *ty, v);
+            }
         }
         Instr::Store { base, idx, src, ty } => {
             let addr = e.slot_addr(*base, idx);
             let v = e.op_val(src, *ty);
-            let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
-            let _ = writeln!(e.out, "  store {} {}, ptr {}", lty, v, addr);
+            // S3：块槽内的 i128 成员 = [lo, hi] 两 i64 槽——split 后两 store
+            let is_i128_in_block = matches!(e.lc.tys.kind(*ty), TyKind::Int(IntKind::I128))
+                && matches!(
+                    e.st[base.0 as usize],
+                    Storage::Block(_) | Storage::PtrCell(_)
+                );
+            if is_i128_in_block {
+                let lo = e.fresh();
+                let _ = writeln!(e.out, "  {} = trunc i128 {} to i64", lo, v);
+                let sh = e.fresh();
+                let _ = writeln!(e.out, "  {} = lshr i128 {}, 64", sh, v);
+                let hi = e.fresh();
+                let _ = writeln!(e.out, "  {} = trunc i128 {} to i64", hi, sh);
+                let _ = writeln!(e.out, "  store i64 {}, ptr {}", lo, addr);
+                let hi_addr = e.slot_addr_next(*base, idx);
+                let _ = writeln!(e.out, "  store i64 {}, ptr {}", hi, hi_addr);
+            } else {
+                let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
+                let _ = writeln!(e.out, "  store {} {}, ptr {}", lty, v, addr);
+            }
         }
         Instr::LoadGlobal { dst, global, ty } => {
             let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
@@ -1254,11 +1318,7 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                     if class_of(e.lc.tys, e.lc.defs, *ty) == TyClass::Agg {
                         // 聚合返回值：callee 栈槽 → 调用方块（逐槽拷贝）
                         let n = scalar_slots(e.lc, *ty).max(1);
-                        let elem = if contains_i128(e.lc, *ty) {
-                            "i128"
-                        } else {
-                            "i64"
-                        };
+                        let elem = "i64";
                         let dst_ptr = e.op_val(&Operand::Temp(*d), *ty);
                         for i in 0..n {
                             let sa = e.fresh();

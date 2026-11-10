@@ -124,7 +124,8 @@ const CASES: &[&str] = &[
     print(big +% 1)
     print(big -% 1)
 }",
-    // nullable：elvis / == null / 构造取 payload
+    // i128 聚合：struct 字段/数组/2×i64 lo/hi split-join（S3/P3-2）
+    "struct Big {\n    a: i128,\n    b: int,\n    c: i128,\n}\nfun main(): int {\n    val x = Big(170141183460469231731687303715884105727, 7, -170141183460469231731687303715884105727)\n    var arr: [i128; 3] = [1 as i128, 9223372036854775808, -9223372036854775809]\n    print(x.a)\n    print(x.b)\n    print(x.c)\n    print(arr[0])\n    print(arr[1])\n    print(arr[2])\n    arr[1] = 18446744073709551617\n    print(arr[1])\n    return 0\n}", // nullable：elvis / == null / 构造取 payload
     "enum Opt { None, Some(int) }\nfun main() {\n    val o: Opt = Opt.Some(5)\n    print(o == Opt.Some(5))\n    print(o == Opt.None)\n    val n: int? = null\n    print(n == null)\n    print(n ?? 9)\n    val m: int? = 4\n    print(m ?? 9)\n}",
     // 区间：字面量 in / 物化 in（开闭）/ for 扫描
     "fun main() {\n    print(2 in 1..5)\n    print(5 in 1..5)\n    print(5 in 1..=5)\n    val r = 1..3\n    print(3 in r)\n    for x in r { print(x) }\n}",

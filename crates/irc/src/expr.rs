@@ -501,6 +501,22 @@ pub(crate) fn copy_slots(
         });
         return;
     }
+    // S3：标量源（i128 成员等 n>1 的标量值）单成员 Store——llvme 按
+    // ty=I128 split 到 lo/hi 两槽；聚合源才逐槽搬运
+    let src_is_agg_base =
+        matches!(&src, Operand::Temp(b) if crate::layout::is_aggregate(ctx, src_ty));
+    if !src_is_agg_base {
+        let sty = crate::layout::slot_ty(ctx, dst_ty, dst_off);
+        let from_sty = crate::layout::slot_ty(ctx, src_ty, 0);
+        let v = coerce(ctx, src.clone(), from_sty, sty);
+        ctx.emit(Instr::Store {
+            base: dst_base,
+            idx: Operand::Const(Const::Int(dst_off as i128)),
+            src: v,
+            ty: sty,
+        });
+        return;
+    }
     for s in 0..n {
         let from_sty = crate::layout::slot_ty(ctx, src_ty, s);
         let to_sty = crate::layout::slot_ty(ctx, dst_ty, s);
@@ -1632,9 +1648,9 @@ fn runtime_print(ctx: &mut Ctx, e: &ExprWrap, args: &[ast::syntax::expr::CallArg
         return Operand::Const(Const::Unit);
     }
     let ty = ctx.expr_ty(&args[0].value);
-    if crate::layout::scalar_slots(ctx, ty) != 1
-        || matches!(ctx.sem.tys.kind(ty), TyKind::Nullable(_))
-    {
+    // S3：标量判据 = 类型种类（i128 聚合成员 loads 后是单槽 WideCell 标量值，
+    // 槽数 2 不代表聚合——见 i128-layout-spec §3）
+    if crate::layout::is_aggregate(ctx, ty) || matches!(ctx.sem.tys.kind(ty), TyKind::Nullable(_)) {
         ctx.diag(
             args[0].value.span,
             "print 参数类型无 runtime 入口（sem 契约破缺）",
@@ -2109,7 +2125,8 @@ fn lower_index(
         idx = Operand::Temp(dst);
     }
     let dst = ctx.temp();
-    if es <= 1 {
+    if es <= 1 || !crate::layout::is_aggregate(ctx, elem) {
+        // S3：标量元素（含多槽 i128）单 Load——llvme split/join lo/hi
         ctx.emit(Instr::Load {
             dst,
             base: b,
@@ -3812,6 +3829,21 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
             let es = crate::layout::scalar_slots(ctx, elem);
             let iop = lower_expr(ctx, index);
             if !crate::layout::is_aggregate(ctx, elem) {
+                // S3：多槽标量元素（i128）索引 × es stride
+                let iop = if es > 1 {
+                    let ity = ctx.expr_ty(index);
+                    let m = ctx.temp();
+                    ctx.emit(Instr::Bin {
+                        dst: m,
+                        op: BinOp::Mul,
+                        l: iop,
+                        r: Operand::Const(Const::Int(es as i128)),
+                        ty: ity,
+                    });
+                    Operand::Temp(m)
+                } else {
+                    iop
+                };
                 ctx.emit(Instr::Store {
                     base: b,
                     idx: iop,

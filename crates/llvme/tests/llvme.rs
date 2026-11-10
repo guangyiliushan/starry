@@ -405,7 +405,9 @@ fn float_constants_use_llvm_bit_pattern() {
 }
 
 #[test]
-fn wide_slots_only_for_types_containing_i128() {
+fn i128_aggregates_use_paired_i64_slots() {
+    // S3/P3-2：聚合内 i128 = lo/hi 两个 i64 槽（i128-layout-spec）；
+    // 标量 i128 仍是 alloca i128；任何聚合都不再出现 [k x i128]
     let (text, codes) = emit("fun f(x: i128) : i128 {\n    return x + 1\n}");
     assert_eq!(codes, Vec::new(), "{codes:?}");
     if !llvm_as_ok(&text) {
@@ -419,7 +421,13 @@ fn wide_slots_only_for_types_containing_i128() {
     if !llvm_as_ok(&wide) {
         panic!("LLVM validator rejected:\n{wide}");
     }
-    assert!(wide.contains("getelementptr [2 x i128]"), "{wide}");
+    // a=i128 占槽 0,1（lo/hi）→ b 在槽 2；形参聚合 = ptr 槽 + [3 x i64] 块
+    assert!(wide.contains("alloca ptr"), "{wide}");
+    assert!(
+        wide.contains("getelementptr [3 x i64], ptr %u0, i64 0, i32 2"),
+        "{wide}"
+    );
+    assert!(!wide.contains("x i128"), "{wide}");
 
     let (narrow, codes) =
         emit("struct N { a: int, b: int }\nfun h(n: N) : int {\n    return n.b\n}");
