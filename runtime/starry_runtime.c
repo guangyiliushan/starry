@@ -22,12 +22,31 @@ unsigned long long strlen(const char *s) {
     while (s[n]) n++;
     return n;
 }
-/* P1-A0（提前落地项）：MSVC x64 大栈帧（>4KB 局部，如大聚合数组）
- * 会生成 __chkstk 栈探测调用——freestanding 无 CRT 必须自备。
- * 当前程序栈小（<1MB 预留页经启动已提交），跳过探测直接返回；
- * 若未来出现 >1MB 帧需改为真实逐页探测（/GUARD、栈提交策略随之定）。 */
+/* P1-A0-0：MSVC x64 __chkstk 真实逐页探测（N1 修复——1.2MB 栈帧
+ * naked ret 导致 ACCESS_VIOLATION）。ABI：RAX = 帧大小（字节），
+ * 从 RSP-RAX 到 RSP 逐 4KB 页触碰（触发 guard page 提交）。
+ * 保留 RCX/RAX（push/pop），>1MB 帧仍工作但无诊断（后续可加 stderr 告知）。 */
 __attribute__((naked)) void __chkstk(void) {
-    __asm__ volatile("ret");
+    __asm__ volatile(
+        ".intel_syntax noprefix\n"
+        "push rcx\n"
+        "push rax\n"
+        "cmp rax, 0x1000\n"
+        "jle 1f\n"
+        "mov rcx, rsp\n"
+        "sub rcx, rax\n"
+        "and rcx, -0x1000\n"
+        "1:\n"
+        "cmp rcx, rsp\n"
+        "jae 2f\n"
+        "mov al, byte ptr [rcx]\n"
+        "add rcx, 0x1000\n"
+        "jmp 1b\n"
+        "2:\n"
+        "pop rax\n"
+        "pop rcx\n"
+        "ret\n"
+    );
 }
 
 void *memcpy(void *dst, const void *src, unsigned long long n) {

@@ -680,6 +680,8 @@ fn cmd_build(path: &str, output: Option<&str>, link_args: &[String], release: bo
     if cfg!(windows) {
         // The bundled runtime is freestanding and provides mainCRTStartup.
         clang.arg("-nostdlib").arg("-lkernel32");
+        // P1-A0-0：默认 1MB 栈预留 < 大聚合数组帧——8MB 保证安全
+        clang.arg("-Wl,/STACK:8388608");
         if release {
             clang.arg("-O2");
         }
