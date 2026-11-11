@@ -95,7 +95,70 @@ lambda 体引用的**外层局部名**（非形参、非全局）：
   deinit meta 合成随 P2-3b（标量捕获先行时 alloc deinit=null，
   class 捕获暂缓——矩阵 #4/#11 归 P2-3b）。
 
-## 7. 明确不做（S2 非目标）
+## 6c. P2-3b-0 设计修正（2026-11-11，裁决表 Q4-a/Q5-a）
+
+### 修正 1：表示 = tagged（裸 fn + box），非统一 boxed
+
+裁决表撤回「统一 boxed」：C 回调（N3 实测 16/26 ✓）与无捕获零分配
+是硬需求。改为 **tagged 双形态**：
+
+| 形态 | 值表示 | 分配 | C 回调 | 适用 |
+|---|---|---|---|---|
+| **裸 fn** | `Const::Fun(def)` → 1 slot ptr | 零 | ✓ 直接 | 具名 fn + 无捕获 lambda |
+| **box** | AllocClosure → 1 slot ptr | ARC 对象 | ✗ 需 thunk | 有捕获 lambda |
+
+**判别**：调用点按 callee lowering 结果静态判别——
+`Operand::Const(Const::Fun(_))` → Indirect（裸 fn）；
+`Operand::Temp(_)` → Closure（box）。
+Fn 类型参数（`f: (int)->int`）在 TAC 层不区分形态（值统一 ptr 槽），
+调用点的 `Callee` 变体由被调实参的创建方式决定。
+
+**约束**：Fn 类型形参在传入已知裸 fn 时，间接调用退化为裸 fn 直调
+（零 env 开销）；传入 box 时走 Closure（多一次 load）。
+两种路径共存于同一 `Callee` 枚举（`Indirect` vs `Closure`），
+不引入新 TAC 指令变体。
+
+### 修正 2：具名函数引用 = 裸 fn（不装箱）
+
+`val g = add` → `Const::Fun(add)`（裸 fn 指针），零分配。
+fn_value_call 判别 Const::Fun → Indirect；Temp → Closure。
+具名 fn 被 Fn 形参消费时 = 间接调用（裸 fn 指针作目标），无 env 传递。
+
+### 修正 3：Fn 值的 ARC = 仅 box 形态参与
+
+- **裸 fn**：不参与 ARC（无分配/无释放/C 回调直通）
+- **box（有捕获）**：ARC 对象——copy retain、scope release、
+  meta = 环境释放器（class 捕获的 deinit 合成随 P2-3b 批次 2）
+- **Fn 类型字段/全局**：v1 拒收（聚合全局已拒；Fn 全局同纪律）
+
+### 修正 4：聚合拷贝缺 class retain（N2 预存缺陷）
+
+struct 含 class 字段的 Copy 路径当前只做裸指针拷贝（无 retain/
+release）→ UAF。**独立于 P2-3b**，需在 Copy 路径添加 class 字段
+的 retain（目标侧）+ 旧值 release（源侧）。归 P2-3b 批次 3 或
+独立 bug fix。
+
+### 修正 5：实现批次（P2-3b 拆 3 批）
+
+| 批次 | 内容 | 工期 |
+|---|---|---|
+| **P2-3b-1** | 裸 fn 保持（现状不变）+ 有捕获 lambda 装箱
+  （AllocClosure + ClosureEnv + Callee::Closure）+ 矩阵 #2/#3/#7/#8 | 1w |
+| **P2-3b-2** | class 捕获（retain +1 + deinit meta 合成）
+  + 矩阵 #4/#5/#11 | 1w |
+| **P2-3b-3** | 逃逸/嵌套/self + C 回调负测试 + diff 入选
+  + 矩阵 #6/#9/#10 | 1w |
+
+### 修正 6：捕获矩阵补全（新增用例）
+
+| # | 用例 | 期望 |
+|---|---|---|
+| 12 | 具名 fn 直接传 Fn 形参（裸 fn 路径） | Indirect，值正确 |
+| 13 | 无捕获 lambda 传 Fn 形参（裸 fn 路径） | Indirect，值正确 |
+| 14 | 有捕获 lambda 传 Fn 形参（box 路径） | Closure，值正确 |
+| 15 | C 回调：具名 fn / 无捕获 lambda 传 extern fn 形参 | 裸 fn 直通 |
+| 16 | C 回调：有捕获 lambda 传 extern fn 形参 | **稳定拒收** |
+
 
 - 借用捕获/逃逸分析/可变捕获/shared box；
 - thick（fn+env 双槽）表示；裸 fn 与 box 双形态；
