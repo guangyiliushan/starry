@@ -24,6 +24,14 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
         return Operand::Const(Const::Unit);
     };
     let lsig = ctx.sem.defs.get(ldef).sig.clone();
+    // S2/P2-3b: capture analysis + env box
+    let caps = ctx
+        .sem
+        .lambda_caps
+        .get(&e.id.0)
+        .cloned()
+        .unwrap_or_default();
+    let env_ty = ctx.sem.env_ref_ty;
     let saved_p = std::mem::take(&mut ctx.fun.params);
     let saved_b = std::mem::take(&mut ctx.fun.blocks);
     let saved_d = ctx.fun.def;
@@ -52,11 +60,24 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
             })
             .collect(),
     };
+    let env_t = ctx.temp();
+    ctx.fun.params.push((env_t, env_ty));
     for (i, (_, ty)) in lsig.params.iter().enumerate() {
         let t = ctx.temp();
         ctx.fun.params.push((t, *ty));
         let pn = pnames.get(i).copied().unwrap_or(lsig.params[i].0);
         ctx.env_top().insert(pn, (Place::Temp(t), *ty));
+    }
+    // S2/P2-3b: capture reads via ClosureEnv
+    for (k, (name, cty)) in caps.iter().enumerate() {
+        let t = ctx.temp();
+        ctx.emit(Instr::ClosureEnv {
+            dst: t,
+            env: env_t,
+            idx: k as u32,
+            ty: *cty,
+        });
+        ctx.env_top().insert(*name, (Place::Temp(t), *cty));
     }
     let tail = ctx.lower_block(lbody);
     ctx.finish_fun(tail, lbody.tail.as_deref());
@@ -73,7 +94,24 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
     ctx.next_block = saved_nb;
     ctx.block_index = saved_bi;
     ctx.switch_to(saved_e);
-    Operand::Const(Const::Fun(ldef))
+    // S2/P2-3b: Fn value = env box (ARC obj ptr; payload[0] = fn ptr)
+    let box_t = ctx.temp();
+    let cap_ops: Vec<(Operand, TyId)> = caps
+        .iter()
+        .map(|(name, cty)| {
+            let (place, _) = ctx.lookup(*name).expect("capture in env");
+            match place {
+                Place::Slot(t) | Place::Temp(t) => (Operand::Temp(t), *cty),
+                Place::Global(_) => (Operand::Const(Const::Unit), *cty),
+            }
+        })
+        .collect();
+    ctx.emit(Instr::AllocClosure {
+        dst: box_t,
+        fun: ldef,
+        caps: cap_ops,
+    });
+    Operand::Temp(box_t)
 }
 
 pub(crate) fn lower_expr(ctx: &mut Ctx, e: &ExprWrap) -> Operand {
@@ -1467,9 +1505,8 @@ fn fn_value_call(
             (v, to)
         })
         .collect();
-    let fty = ctx.expr_ty(callee);
+    // S2/P2-3b：Fn 值统一 closure box——env 隐式首参由 llvme/interp 注入
     let fop = lower_expr(ctx, callee);
-    ctx.emit(Instr::Param { a: fop, ty: fty });
     for (v, to) in arg_vals {
         ctx.emit(Instr::Param { a: v, ty: to });
     }
@@ -1480,7 +1517,7 @@ fn fn_value_call(
     };
     ctx.emit(Instr::Call {
         dst,
-        callee: Callee::Indirect,
+        callee: Callee::Closure { env_box: fop },
         ty: ret,
     });
     match dst {

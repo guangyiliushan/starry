@@ -79,13 +79,18 @@ pub enum UnOp {
 /// 调用目标：用户函数（sem 解析的 DefId）、外部符号（extern "c" 声明）
 /// 或运行时入口（llvme 侧 extern declare；std-only 红线下运行时以符号
 /// 存在，不进 crate）
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Callee {
     Def(DefId),
     Extern(DefId),
     Runtime(RuntimeFn),
     /// M8 slice 1：函数值间接调用——pending 首参为函数指针
     Indirect,
+    /// S2/P2-3b: closure call - env_box = ARC obj ptr (payload[0] = fn ptr)
+    /// env passed as implicit first param by llvme/interp
+    Closure {
+        env_box: Operand,
+    },
 }
 
 /// 运行时入口（v1：字符串化、拼接与 print；名字由 llvme 映射为
@@ -198,6 +203,19 @@ pub enum Instr {
     /// 聚合基址声明：dst 是 count 个槽的块基址。当前由数组填充
     /// [v; n] 发射（其槽写入全动态，llvme 需静态尺寸分配存储）。
     /// opt 侧契约：声明非计算值——DCE 永不删，fold/CSE/copy-prop 跳过
+    /// S2/P2-3b: closure env box (payload = [fn_ptr, caps...])
+    AllocClosure {
+        dst: TempId,
+        fun: DefId,
+        caps: Vec<(Operand, TyId)>,
+    },
+    /// S2/P2-3b: read current closure env capture at idx
+    ClosureEnv {
+        dst: TempId,
+        env: TempId,
+        idx: u32,
+        ty: TyId,
+    },
     Slot {
         dst: TempId,
         count: u32,
@@ -511,6 +529,25 @@ impl TacOutput {
             } => {
                 let _ = writeln!(out, "%t{} = offsetptr %t{}, {}", dst.0, base.0, bytes);
             }
+            Instr::AllocClosure { dst, fun, caps } => {
+                let _ = write!(
+                    out,
+                    "%t{} = alloc_closure {} [{} caps]",
+                    dst.0,
+                    interner.resolve(defs.get(*fun).name),
+                    caps.len()
+                );
+            }
+            Instr::ClosureEnv { dst, env, idx, ty } => {
+                let _ = write!(
+                    out,
+                    "%t{} = closure_env %t{}[{}] : {}",
+                    dst.0,
+                    env.0,
+                    idx,
+                    ty_display(tys, defs, interner, *ty)
+                );
+            }
             Instr::Slot { dst, count } => {
                 let _ = write!(out, "%t{} = slot [{}]", dst.0, count);
             }
@@ -526,6 +563,7 @@ impl TacOutput {
                 let name = match callee {
                     Callee::Def(d) => interner.resolve(defs.get(*d).name).to_string(),
                     Callee::Indirect => "indirect".to_string(),
+                    Callee::Closure { .. } => "closure".to_string(),
                     Callee::Extern(d) => {
                         format!("extern {}", interner.resolve(defs.get(*d).name))
                     }

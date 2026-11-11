@@ -1,4 +1,5 @@
 //! 模块/函数发射：两遍（temp 存储分类 → 指令发射）。
+//! S2/P2-3b：AllocClosure/ClosureEnv/Callee::Closure——闭包 env box（ARC）
 //!
 //! 存储分类（每个 temp 恰好一个 entry alloca，外部 mem2reg 可提升）：
 //! - Cell：i64 槽（标量）
@@ -139,6 +140,7 @@ struct Global {
     /// M1 (D2): @.str ids actually referenced (unused fun-name strings are
     /// not emitted, keeping .ll goldens stable)
     used_strs: std::collections::BTreeSet<usize>,
+    thunks: std::collections::BTreeSet<String>,
 }
 
 impl Global {
@@ -267,6 +269,15 @@ fn temp_max(fun: &FunBody) -> u32 {
                     see_op(src, &mut max);
                 }
                 Instr::Slot { dst, .. } => max = max.max(dst.0),
+                Instr::AllocClosure { dst, caps, .. } => {
+                    max = max.max(dst.0);
+                    for (op, _) in caps {
+                        see_op(op, &mut max);
+                    }
+                }
+                Instr::ClosureEnv { dst, env, .. } => {
+                    max = max.max(dst.0).max(env.0);
+                }
                 Instr::Param { a, .. } => see_op(a, &mut max),
                 Instr::Call { dst, .. } => {
                     if let Some(d) = dst {
@@ -316,6 +327,7 @@ fn classify(lc: &Lc, fun: &FunBody) -> Vec<Storage> {
                         mark(*t, *ty, &mut wide);
                     }
                 }
+                Instr::AllocClosure { .. } | Instr::ClosureEnv { .. } => {}
                 Instr::Slot { dst, count } => {
                     req[dst.0 as usize] = req[dst.0 as usize].max(*count as usize)
                 }
@@ -978,6 +990,35 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                 }
             }
         }
+        Instr::AllocClosure { dst, fun, caps } => {
+            let bytes = 24 + 8 * ((caps.len() as i64) + 1);
+            e.g.runtime_decls
+                .entry("starry_alloc_object".into())
+                .or_insert(("ptr".into(), "i64, ptr".into()));
+            let obj = e.fresh();
+            let _ = writeln!(
+                e.out,
+                "  {} = call ptr @starry_alloc_object(i64 {}, ptr null)",
+                obj, bytes
+            );
+            let faddr = e.fresh();
+            let _ = writeln!(e.out, "  {} = getelementptr i8, ptr {}, i64 24", faddr, obj);
+            let _ = writeln!(e.out, "  store ptr {}, ptr {}", fun_name(e.lc, *fun), faddr);
+            for (k, (op, ty)) in caps.iter().enumerate() {
+                let caddr = e.fresh();
+                let _ = writeln!(
+                    e.out,
+                    "  {} = getelementptr i8, ptr {}, i64 {}",
+                    caddr,
+                    obj,
+                    24 + 8 * ((k as i64) + 1)
+                );
+                let v = e.op_val(op, *ty);
+                let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
+                let _ = writeln!(e.out, "  store {} {}, ptr {}", lty, v, caddr);
+            }
+            let _ = writeln!(e.out, "  store ptr {}, ptr %t{}.slot", obj, dst.0);
+        }
         // M2 取址：base 的 alloca 地址本身就是 ptr 值
         Instr::AddrOf { dst, base, ty } => {
             let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
@@ -1035,6 +1076,22 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                 v, p, bytes
             );
             let _ = writeln!(e.out, "  store ptr {}, ptr %t{}.slot", v, dst.0);
+        }
+        Instr::ClosureEnv { dst, env, idx, ty } => {
+            let obj = e.fresh();
+            let _ = writeln!(e.out, "  {} = load ptr, ptr %t{}.slot", obj, env.0);
+            let addr = e.fresh();
+            let _ = writeln!(
+                e.out,
+                "  {} = getelementptr i8, ptr {}, i64 {}",
+                addr,
+                obj,
+                24 + 8 * ((*idx as i64) + 1)
+            );
+            let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
+            let v = e.fresh();
+            let _ = writeln!(e.out, "  {} = load {}, ptr {}", v, lty, addr);
+            e.store_val(*dst, *ty, v);
         }
         Instr::Load { dst, base, idx, ty } => {
             let addr = e.slot_addr(*base, idx);
@@ -1135,6 +1192,31 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                 // M8 slice 1：函数值间接调用——args[0] 为函数指针
                 // （"ptr %tN"），去掉类型前缀放在被调位；
                 // 形参签名由其余 pending 的 pty 携带
+                Callee::Closure { env_box } => {
+                    let box_val = match env_box {
+                        Operand::Temp(t) => {
+                            let p = e.fresh();
+                            let _ = writeln!(e.out, "  {} = load ptr, ptr %t{}.slot", p, t.0);
+                            p
+                        }
+                        _ => e.op_val(env_box, e.lc.tys.default_int),
+                    };
+                    let faddr = e.fresh();
+                    let _ = writeln!(
+                        e.out,
+                        "  {} = getelementptr i8, ptr {}, i64 24",
+                        faddr, box_val
+                    );
+                    let fnp = e.fresh();
+                    let _ = writeln!(e.out, "  {} = load ptr, ptr {}", fnp, faddr);
+                    let ret = if class_of(e.lc.tys, e.lc.defs, *ty) == TyClass::Agg {
+                        "ptr".to_string()
+                    } else {
+                        scalar_ty(e.lc.tys, e.lc.defs, *ty)
+                    };
+                    args.insert(0, format!("ptr {}", box_val));
+                    (fnp, ret)
+                }
                 Callee::Indirect => {
                     if args.is_empty() {
                         let _ =
