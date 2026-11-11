@@ -10,6 +10,12 @@ __declspec(dllimport) int HeapFree(HANDLE, DWORD, void *);
 __declspec(dllimport) HANDLE GetStdHandle(DWORD);
 __declspec(dllimport) int WriteFile(HANDLE, const void *, DWORD, DWORD *, void *);
 __declspec(dllimport) void ExitProcess(unsigned int);
+
+#ifdef _WIN32
+static void xfree(void *p) { HeapFree(GetProcessHeap(), 0, p); }
+#else
+static void xfree(void *p) { free(p); }
+#endif
 // M10: freestanding memcpy — -O2 优化会在 fmt_i64/utf8_from_cp 等处
 // 生成 memcpy 调用（-nostdlib 无 CRT），必须自行提供。
 void *memset(void *dst, int val, unsigned long long n) {
@@ -363,7 +369,7 @@ void starry_release(void *p) {
         /* M4 slice 2b：meta = deinit 函数指针（构造时塞入）；末引用先
          * 回调再释放（weak 侧 slice 3：weak>0 时 header 延迟释放） */
         if (h->meta) (*(void (*)(void *))h->meta)(p);
-        if (h->weak == 0) HeapFree(GetProcessHeap(), 0, h);
+        if (h->weak == 0) xfree(h);
     }
 }
 
@@ -392,5 +398,5 @@ void starry_weak_drop(void *p) {
     StarryArcHdr *h;
     if (!p) return;
     h = (StarryArcHdr *)p - 1;
-    if (--h->weak == 0 && h->strong == 0) HeapFree(GetProcessHeap(), 0, h);
+    if (--h->weak == 0 && h->strong == 0) xfree(h);
 }
