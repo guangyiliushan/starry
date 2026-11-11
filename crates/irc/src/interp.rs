@@ -201,11 +201,6 @@ fn run_fun_capturing(
                         Instr::Load { idx, .. } => ops.push(idx.clone()),
                         Instr::Store { idx, src, .. } => ops.extend([idx.clone(), src.clone()]),
                         Instr::Param { a, .. } => ops.push(a.clone()),
-                        Instr::AllocClosure { caps, .. } => {
-                            for (op, _) in caps {
-                                ops.push(op.clone());
-                            }
-                        }
                         Instr::StorePtr { src, .. } => ops.push(src.clone()),
                         _ => {}
                     }
@@ -239,8 +234,6 @@ fn run_fun_capturing(
         strings,
         str_ids,
         globals: Vec::new(),
-        closure_registry: Vec::new(),
-        closure_frames: Vec::new(),
         printed: Vec::new(),
     };
     // 全局初始化：按源序执行合成 init 函数，后续函数经 globals 表读写。
@@ -270,8 +263,6 @@ fn run_fun_capturing(
                 Instr::LoadPtr { dst, ptr, .. } => Some(dst.0.max(ptr.0)),
                 Instr::OffsetPtr { dst, base, .. } => Some(dst.0.max(base.0)),
                 Instr::AllocClass { dst, .. } => Some(dst.0),
-                Instr::AllocClosure { dst, .. } => Some(dst.0),
-                Instr::ClosureEnv { dst, .. } => Some(dst.0),
                 Instr::StorePtr { ptr, .. } => Some(ptr.0),
                 Instr::Store { base, .. } => Some(base.0),
                 Instr::LoadGlobal { dst, .. } => Some(dst.0),
@@ -300,10 +291,6 @@ struct Machine<'a> {
     /// Const::Str → 侧表 id（预 intern；op() 只读，查表不 intern）
     str_ids: std::collections::HashMap<Symbol, u128>,
     globals: Vec<(DefId, u128)>,
-    /// AllocClosure registry: id = idx+1
-    closure_registry: Vec<(DefId, Vec<u128>)>,
-    /// active closure frame for ClosureEnv reads
-    closure_frames: Vec<Vec<u128>>,
     /// print 输出收集（差分 harness；每条 = 一行，与 runtime write_line 对齐）
     printed: Vec<String>,
 }
@@ -670,26 +657,6 @@ impl<'a> Machine<'a> {
             // M4 slice 1: class objects live on the native heap; the
             // interpreter has no address-space model for them (same
             // discipline as pointer ops and extern calls)
-            Instr::AllocClosure { dst, fun, caps } => {
-                let vals: Vec<u128> = caps.iter().map(|(op, _ty)| self.op(cells, op)).collect();
-                self.closure_registry.push((*fun, vals));
-                Self::put(cells, *dst, self.closure_registry.len() as u128);
-                Ok(())
-            }
-            Instr::ClosureEnv {
-                dst,
-                env: _,
-                idx,
-                ty,
-            } => {
-                let frame = self
-                    .closure_frames
-                    .last()
-                    .ok_or(InterpError::Trap("closure env outside closure call"))?;
-                let v = frame.get(*idx as usize).copied().unwrap_or(0);
-                Self::put(cells, *dst, self.norm(v, *ty));
-                Ok(())
-            }
             Instr::AllocClass { .. } => Err(InterpError::Trap("class object alloc (AllocClass)")),
             Instr::OffsetPtr { .. } => {
                 Err(InterpError::Trap("class object addressing (OffsetPtr)"))
@@ -769,30 +736,6 @@ impl<'a> Machine<'a> {
                         let mut s = self.strings[(a.max(1) - 1) as usize].clone();
                         s.push_str(&self.strings[(b.max(1) - 1) as usize]);
                         self.str_id(&s)
-                    }
-                    // S2/P2-3b: closure call - box value = registry id
-                    Callee::Closure { env_box } => {
-                        let id = self.op(cells, env_box) as usize;
-                        let (fun_def, cap_vals) = self
-                            .closure_registry
-                            .get(id.wrapping_sub(1))
-                            .cloned()
-                            .ok_or(InterpError::Trap("closure registry lookup"))?;
-                        let callee_fun = self.tac.funs.iter().find(|f| f.def == fun_def).ok_or(
-                            InterpError::UnknownFun(format!("closure def {}", fun_def.0)),
-                        )?;
-                        let mut decoded: Vec<Value> = Vec::new();
-                        for ((_, pty), a) in callee_fun.params.iter().zip(args.iter()) {
-                            let (v, _) = a;
-                            decoded.push(self.decode(*v, *pty));
-                        }
-                        self.closure_frames.push(cap_vals);
-                        let r = self.exec_nested(callee_fun, &decoded, depth)?;
-                        self.closure_frames.pop();
-                        match r {
-                            Some((rv, _)) => rv,
-                            None => 0,
-                        }
                     }
                     // M8 slice 1：函数值间接调用——args[0] 为函数指针
                     // （DefId 编码），其余为实参

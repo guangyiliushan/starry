@@ -367,12 +367,6 @@ fn copy_fun(fun: &mut FunBody) -> bool {
                 Instr::Copy { src, .. } => subst(src, &map, &mut changed),
                 Instr::Load { idx, .. } => subst(idx, &map, &mut changed),
                 Instr::OffsetPtr { .. } | Instr::AllocClass { .. } => {}
-                Instr::AllocClosure { caps, .. } => {
-                    for (op, _) in caps {
-                        subst(op, &map, &mut changed);
-                    }
-                }
-                Instr::ClosureEnv { .. } => {}
                 Instr::Store { idx, src, .. } => {
                     subst(idx, &map, &mut changed);
                     subst(src, &map, &mut changed);
@@ -579,16 +573,6 @@ fn dce_fun(fun: &mut FunBody) -> bool {
                 }
                 Instr::AllocClass { dst, .. } => {
                     used.insert(*dst);
-                }
-                Instr::AllocClosure { dst, caps, .. } => {
-                    used.insert(*dst);
-                    for (op, _) in caps {
-                        mark(op, &mut used);
-                    }
-                }
-                Instr::ClosureEnv { dst, env, .. } => {
-                    used.insert(*dst);
-                    used.insert(*env);
                 }
                 Instr::Store { base, idx, src, .. } => {
                     used.insert(*base);
