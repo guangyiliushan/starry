@@ -339,12 +339,24 @@ fn verify_ir(text: &str) -> Result<(), String> {
                 .arg("-o")
                 .arg(&bc)
                 .output();
-            let _ = std::fs::remove_file(&ll);
-            let _ = std::fs::remove_file(&bc);
+            // 校验失败保留 .ll（调试可观测；成功路径照常清理）
             match out {
-                Ok(o) if o.status.success() => return Ok(()),
-                Ok(o) => return Err(String::from_utf8_lossy(&o.stderr).to_string()),
-                Err(_) => {}
+                Ok(o) if o.status.success() => {
+                    let _ = std::fs::remove_file(&ll);
+                    let _ = std::fs::remove_file(&bc);
+                    return Ok(());
+                }
+                Ok(o) => {
+                    return Err(format!(
+                        "{}\n(IR kept at {})",
+                        String::from_utf8_lossy(&o.stderr),
+                        ll.display()
+                    ));
+                }
+                Err(_) => {
+                    let _ = std::fs::remove_file(&ll);
+                    let _ = std::fs::remove_file(&bc);
+                }
             }
         }
     }
@@ -373,11 +385,18 @@ fn verify_ir(text: &str) -> Result<(), String> {
         .arg("-o")
         .arg(&obj)
         .output();
-    let _ = std::fs::remove_file(&ll);
-    let _ = std::fs::remove_file(&obj);
+    // 校验失败保留 .ll（调试可观测；成功路径照常清理）
     match out {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => Err(String::from_utf8_lossy(&o.stderr).to_string()),
+        Ok(o) if o.status.success() => {
+            let _ = std::fs::remove_file(&ll);
+            let _ = std::fs::remove_file(&obj);
+            Ok(())
+        }
+        Ok(o) => Err(format!(
+            "{}\n(IR kept at {})",
+            String::from_utf8_lossy(&o.stderr),
+            ll.display()
+        )),
         Err(_) => Ok(()),
     }
 }
