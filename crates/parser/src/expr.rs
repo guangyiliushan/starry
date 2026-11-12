@@ -717,13 +717,10 @@ fn parse_lambda(session: &mut ParseSession<'_>, open: Span) -> Result<ExprWrap, 
             TokenKind::Punctuation(PunctuationKind::LParen)
             | TokenKind::Punctuation(PunctuationKind::LBracket) => depth += 1,
             TokenKind::Punctuation(PunctuationKind::RParen)
-            | TokenKind::Punctuation(PunctuationKind::RBracket) => depth -= 1,
-            TokenKind::Punctuation(PunctuationKind::RBrace) => {
-                if depth == 1 {
-                    break;
-                }
-                depth -= 1;
+            | TokenKind::Punctuation(PunctuationKind::RBracket) => {
+                depth = depth.saturating_sub(1);
             }
+            TokenKind::Punctuation(PunctuationKind::RBrace) => break,
             TokenKind::Operator(OperatorKind::Arrow) if depth == 1 => {
                 has_arrow = true;
                 break;
@@ -755,10 +752,39 @@ fn parse_lambda(session: &mut ParseSession<'_>, open: Span) -> Result<ExprWrap, 
         .cursor
         .bump_if(&TokenKind::Operator(OperatorKind::Arrow));
     let block = if has_arrow {
+        // S2/P2-3b-3（矩阵 #6 字面嵌套）：`->` 后的 `{` 消歧——前瞻扫描
+        // 配对 `}` 之前是否出现深度 1 的 `->`（括号/花括号/方括号深度
+        // 感知）：是 = 嵌套 lambda 表达式（含显式参数注解），否 = 块。
+        // 此前一律 parse_block，`{ (b: int) -> … }` 内层注解参数误归块
+        //（UnexpectedToken ':'）。
         if session
             .cursor
             .check(&TokenKind::Punctuation(PunctuationKind::LBrace))
+            && body_brace_is_lambda(session)
         {
+            let brace = session.cursor.peek().span;
+            // 嵌套 lambda 以单尾表达式块形式作为 body（与 parse_if 的
+            // else-if 包装同式，line 924 既有先例）
+            let nested = parse_lambda(session, brace)?;
+            // 外层 lambda 的闭合 '}' 由本分支消费（parse_block_after_open
+            // 的对应职责转移至此）
+            session.cursor.skip_nl();
+            let close = session.cursor.peek().span;
+            if !session
+                .cursor
+                .bump_if(&TokenKind::Punctuation(PunctuationKind::RBrace))
+            {
+                expected(session, "'}'", close);
+            }
+            Block {
+                stmts: Vec::new(),
+                tail: Some(Box::new(nested)),
+            }
+        } else if session
+            .cursor
+            .check(&TokenKind::Punctuation(PunctuationKind::LBrace))
+        {
+            eprintln!("[dbg] helper returned false -> parse_block");
             parse_block(session)?
         } else {
             parse_block_after_open(session)?.0
@@ -776,6 +802,41 @@ fn parse_lambda(session: &mut ParseSession<'_>, open: Span) -> Result<ExprWrap, 
             body: Box::new(block),
         },
     ))
+}
+
+/// S2/P2-3b-3：lambda body 位 `{` 的嵌套 lambda 前瞻——从当前 `{` 起
+/// 扫描（深度自 1 起）：配对 `}` 前出现深度 1 的 `->` = 嵌套 lambda
+///（`{ (b: int) -> … }` 显式参数注解形式）；扫到配对 `}` 仍无 = 块
+///（`{ stmts }` / `{ it + 1 }` It 形式——It 无箭头，块路径保持既有行为）。
+/// 扫描上限 = MAX_PARSE_DEPTH × 8（防病态长体失控）；越限按块处理。
+fn body_brace_is_lambda(session: &ParseSession<'_>) -> bool {
+    // cursor 停在 '{'（未消费）：peek_ahead(1) = '{' 后第一个 token，
+    // 与 parse_lambda 自身扫描的起点约定一致
+    let mut depth = 1usize;
+    let mut pos = 1usize;
+    let cap = MAX_PARSE_DEPTH * 8;
+    while pos < cap {
+        let Some(token) = session.cursor.peek_ahead(pos) else {
+            return false;
+        };
+        match token.kind {
+            TokenKind::Punctuation(PunctuationKind::LBrace)
+            | TokenKind::Punctuation(PunctuationKind::LParen)
+            | TokenKind::Punctuation(PunctuationKind::LBracket) => depth += 1,
+            TokenKind::Punctuation(PunctuationKind::RBrace) => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return false;
+                }
+            }
+            TokenKind::Punctuation(PunctuationKind::RParen)
+            | TokenKind::Punctuation(PunctuationKind::RBracket) => depth = depth.saturating_sub(1),
+            TokenKind::Operator(OperatorKind::Arrow) if depth == 1 => return true,
+            _ => {}
+        }
+        pos += 1;
+    }
+    false
 }
 
 pub(crate) fn parse_block(session: &mut ParseSession<'_>) -> Result<Block, ParserError> {
