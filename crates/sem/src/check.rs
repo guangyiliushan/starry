@@ -348,7 +348,25 @@ fn check_top_binding(b: &BindingDecl, st: &mut SemState) {
         }
         return;
     };
+    // S2/P2-3b：绑定位置 lambda 的期望 Fn 类型（注解驱动）——与
+    // check_call_args 的实参压栈同纪律；仅 Lambda init 压栈（配对弹出）
+    if matches!(&init.kind, ExprKind::Lambda { .. })
+        && let Some(&def) = st.pat_binding_def.get(b.pattern.id)
+    {
+        let ann = st.defs.get(def).sig.ty;
+        if matches!(st.tys.kind(ann), TyKind::Fn(..)) {
+            st.lambda_exp.push(Some(ann));
+        }
+    }
     let init_ty = type_expr(init, st, true);
+    // S2/P2-3b-2：顶层 Fn 绑定 = 全局逃逸（无全局 release 站点）——v1 拒收
+    if matches!(st.tys.kind(init_ty), TyKind::Fn(..)) {
+        unsupported(
+            st,
+            init.span,
+            "top-level Fn bindings are not supported in v1 (no global release site)",
+        );
+    }
     check_binding_pattern(init, &b.pattern, init_ty, st);
 }
 
@@ -368,6 +386,16 @@ fn check_local_binding(b: &BindingDecl, st: &mut SemState) {
         }
         return;
     };
+    // S2/P2-3b：绑定位置 lambda 的期望 Fn 类型（注解驱动）——与
+    // check_call_args 的实参压栈同纪律；仅 Lambda init 压栈（配对弹出）
+    if matches!(&init.kind, ExprKind::Lambda { .. })
+        && let Some(&def) = st.pat_binding_def.get(b.pattern.id)
+    {
+        let ann = st.defs.get(def).sig.ty;
+        if matches!(st.tys.kind(ann), TyKind::Fn(..)) {
+            st.lambda_exp.push(Some(ann));
+        }
+    }
     let init_ty = type_expr(init, st, true);
     // M4 slice 3：weak 绑定只接受 class 值（弱引用语义）
     if weak && !crate::declare::is_class_ty(st, init_ty) {
@@ -901,6 +929,20 @@ fn require_bool(ty: TyId, span: Span, st: &mut SemState) {
             span,
             "condition must be Boolean",
         ));
+    }
+}
+
+/// S2/N2：聚合容器（tuple/array 字面量）中的非拥有安全元素判定——
+/// class / 可空 class / Fn 的拷贝无字段级 ARC（裸指针拷贝 + 源 binding
+/// 出口 release = UAF）→ v1 稳定拒收。
+fn agg_element_unsafe(st: &SemState, ty: TyId) -> bool {
+    if crate::declare::is_class_ty(st, ty) {
+        return true;
+    }
+    match st.tys.kind(ty) {
+        TyKind::Fn(..) => true,
+        TyKind::Nullable(inner) => crate::declare::is_class_ty(st, *inner),
+        _ => false,
     }
 }
 
@@ -1478,6 +1520,17 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             for x in xs {
                 ts.push(type_expr(x, st, true));
             }
+            // S2/N2：class/可空 class/Fn 元素 v1 拒收——聚合拷贝无字段级
+            // ARC（裸指针拷贝 + 源 binding 出口 release = UAF）
+            for t in &ts {
+                if agg_element_unsafe(st, *t) {
+                    unsupported(
+                        st,
+                        e.span,
+                        "this element type in tuple literals is not supported in v1 (no field-level ARC on aggregate copies)",
+                    );
+                }
+            }
             st.tys.intern(TyKind::Tuple(ts))
         }
         ExprKind::Array(xs) => {
@@ -1501,11 +1554,27 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
                     }
                 }
             }
+            // S2/N2：class/可空 class/Fn 元素 v1 拒收（同 tuple 字面量）
+            if agg_element_unsafe(st, acc) {
+                unsupported(
+                    st,
+                    e.span,
+                    "this element type in array literals is not supported in v1 (no field-level ARC on aggregate copies)",
+                );
+            }
             let n = xs.len() as u32;
             st.tys.intern(TyKind::Array(acc, n))
         }
         ExprKind::ArrayRepeat { value, count } => {
             let v = type_expr(value, st, true);
+            // S2/N2：class/可空 class/Fn 元素 v1 拒收（同 array 字面量）
+            if agg_element_unsafe(st, v) {
+                unsupported(
+                    st,
+                    e.span,
+                    "this element type in array repeat expressions is not supported in v1 (no field-level ARC on aggregate copies)",
+                );
+            }
             st.tys.intern(TyKind::Array(v, *count))
         }
         ExprKind::StringInterp { parts } => {
@@ -1596,23 +1665,9 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             ty
         }
         ExprKind::Lambda { params, body } => {
-            // M8 slice 2: pop expected Fn type (pushed by check_call_args)
+            // M8 slice 2: pop expected Fn type（check_call_args 实参或
+            // S2/P2-3b 绑定注解压栈）
             let expected = st.lambda_exp.pop().flatten();
-            let Some(ft) = expected else {
-                unsupported(
-                    st,
-                    e.span,
-                    "cannot infer lambda param types without function type context",
-                );
-                return st.tys.error;
-            };
-            let (param_tys, ret_ty) = match st.tys.kind(ft).clone() {
-                TyKind::Fn(ps, r) => (ps, r),
-                _ => {
-                    unsupported(st, e.span, "expected type is not a function type");
-                    return st.tys.error;
-                }
-            };
             // create param scope with bindings
             let parent = st
                 .node_scope
@@ -1620,6 +1675,30 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
                 .copied()
                 .unwrap_or_else(|| st.scopes.root());
             let scope = st.scopes.new_scope(Some(parent));
+            // S2/P2-3b：推断回退——无期望 Fn 类型时，显式参数全带类型
+            // 标注则从标注构造参数表，返回型由 body 推断
+            //（`val f = { (n: int) -> n + 1 }`）；`it` 形式与无标注参数
+            // 仍稳定拒收（无信息可推）
+            let (param_tys, ret_ty, infer_ret) = match expected {
+                Some(ft) => match st.tys.kind(ft).clone() {
+                    TyKind::Fn(ps, r) => (ps, r, false),
+                    _ => {
+                        unsupported(st, e.span, "expected type is not a function type");
+                        return st.tys.error;
+                    }
+                },
+                None => match lambda_params_from_annotations(params, scope, st) {
+                    Some(ps) => (ps, st.tys.unit, true),
+                    None => {
+                        unsupported(
+                            st,
+                            e.span,
+                            "cannot infer lambda param types without function type context",
+                        );
+                        return st.tys.error;
+                    }
+                },
+            };
             let mut sig_params: Vec<(Symbol, TyId)> = Vec::new();
             match params {
                 LambdaParams::It => {
@@ -1710,8 +1789,18 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             let (_, _, caps) = st.lambda_cap_stack.pop().expect("capture stack");
             st.lambda_caps.insert(e.id.0, caps);
             st.funs.pop();
-            if !st.tys.assignable(body_ty, ret_ty) && !st.tys.is_error(body_ty) {
-                mismatch(st, e.span);
+            let ret_ty = if infer_ret {
+                body_ty
+            } else {
+                if !st.tys.assignable(body_ty, ret_ty) && !st.tys.is_error(body_ty) {
+                    mismatch(st, e.span);
+                }
+                ret_ty
+            };
+            // S2/P2-3b：推断路径的 def sig.ret 是压栈占位（unit）——
+            // 回填 body 推断型（irc lambda_lower 按 def sig lower 签名）
+            if infer_ret {
+                st.defs.get_mut(lambda_def).sig.ret = body_ty;
             }
             st.tys.intern(TyKind::Fn(param_tys, ret_ty))
         }
@@ -1729,6 +1818,33 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
         }
     }
 }
+/// S2/P2-3b：无期望 Fn 类型时的 lambda 参数推断——显式参数全部携带
+/// 类型标注（`{ (n: int) -> … }`）才可行；任一参数缺标注或 `it` 形式
+/// 返回 None（调用方稳定拒收）。零参 lambda（`{ () -> e }`）返回空表。
+fn lambda_params_from_annotations(
+    params: &LambdaParams,
+    scope: crate::def::ScopeId,
+    st: &mut SemState,
+) -> Option<Vec<TyId>> {
+    match params {
+        LambdaParams::It => None,
+        LambdaParams::Explicit(_) => {
+            let mut out = Vec::new();
+            for kind in params.param_kinds() {
+                match kind {
+                    PatKind::Binding {
+                        ty: Some(ty_wrap), ..
+                    } => {
+                        out.push(crate::declare::lower_ty(st, scope, ty_wrap));
+                    }
+                    _ => return None,
+                }
+            }
+            Some(out)
+        }
+    }
+}
+
 // ==================== 二元运算 / 调用 / when ====================
 
 /// 二元运算定型：先各定型一侧（Error 投毒直接短路），再按算子类别汇合

@@ -1210,6 +1210,25 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                                 "reference struct fields are not supported in semantic v1",
                             ));
                         }
+                        // S2/P2-3b（修正 3）：Fn 字段 v1 拒收（聚合拷贝无
+                        // 字段级 ARC——matrix #5 的拒绝面）
+                        if matches!(st.tys.kind(ty), TyKind::Fn(..)) {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemUnsupportedConstruct,
+                                item.span,
+                                "Fn struct fields are not supported in v1 (aggregate copies have no field-level ARC)",
+                            ));
+                        }
+                        // S2/N2：class 字段 v1 拒收——聚合拷贝无字段级 ARC
+                        //（裸指针拷贝 + 源 binding 出口 release = UAF；
+                        // 字段级 ARC 设计归后续切片）
+                        if crate::declare::is_class_ty(st, ty) {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemUnsupportedConstruct,
+                                item.span,
+                                "class struct fields are not supported in v1 (aggregate copies have no field-level ARC)",
+                            ));
+                        }
                         fields.push((p.name, ty));
                     }
                 }
@@ -1221,6 +1240,22 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                             DiagCode::SemUnsupportedConstruct,
                             f.ty.span,
                             "reference struct fields are not supported in semantic v1",
+                        ));
+                    }
+                    // S2/P2-3b（修正 3）：Fn 字段 v1 拒收（matrix #5 拒绝面）
+                    if matches!(st.tys.kind(ft), TyKind::Fn(..)) {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnsupportedConstruct,
+                            f.ty.span,
+                            "Fn struct fields are not supported in v1 (aggregate copies have no field-level ARC)",
+                        ));
+                    }
+                    // S2/N2：class 字段 v1 拒收（同 head 字段）
+                    if crate::declare::is_class_ty(st, ft) {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnsupportedConstruct,
+                            f.ty.span,
+                            "class struct fields are not supported in v1 (aggregate copies have no field-level ARC)",
                         ));
                     }
                     (f.name, ft)
