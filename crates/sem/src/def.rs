@@ -10,7 +10,12 @@ use ast::syntax::ty::TypeWrap;
 
 use crate::ty::TyId;
 
-/// 定义 ID
+/// 定义 ID。
+///
+/// 字段公开是下游（`irc/src/interp.rs` 等）直接构造所需；sem **不假设**
+/// 外部传来的 id 合法，受控路径用 `DefArena::try_get`（越界 `None`，与
+/// `SideTable::get` 同姿态），`DefArena::get`/`get_mut` 的索引 panic 属
+/// 不变量破缺（见其文档）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DefId(pub u32);
 
@@ -163,10 +168,20 @@ impl DefArena {
         id
     }
 
+    /// # Panics
+    ///
+    /// 越界 id = 不变量破缺（`DefId` 字段公开，外部可造出任意 id）。
+    /// 受控访问请用 `try_get`；sem 内部的 id 全部由 `DefArena::push` 铸出。
     pub fn get(&self, id: DefId) -> &Def {
         &self.defs[id.0 as usize]
     }
 
+    /// 受控访问：越界返回 None（不 panic）
+    pub fn try_get(&self, id: DefId) -> Option<&Def> {
+        self.defs.get(id.0 as usize)
+    }
+
+    /// 同 `get`：越界 id 属不变量破缺，按索引 panic
     pub fn get_mut(&mut self, id: DefId) -> &mut Def {
         &mut self.defs[id.0 as usize]
     }

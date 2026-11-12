@@ -8,7 +8,11 @@ use std::collections::BTreeMap;
 
 use crate::def::DefId;
 
-/// 类型 ID（arena 索引；`Copy`，跨 pass 稳定）
+/// 类型 ID（arena 索引；`Copy`，跨 pass 稳定）。
+///
+/// 字段公开是下游（`irc`）直接构造所需；sem **不假设**外部传来的 id 合法，
+/// 受控路径用 `TyArena::try_kind`（越界 `None`），`TyArena::kind` 的索引
+/// panic 属不变量破缺（见其文档）。sem 内部的 id 全部由 `TyArena` 铸出。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TyId(pub u32);
 
@@ -133,18 +137,35 @@ impl TyArena {
     }
 
     /// 结构去重入池；返回的 TyId 跨 pass 稳定（IR 阶段构造类型用同一入口）
+    ///
+    /// 成本：未命中时恰一次 `TyKind` 克隆（`kinds` 与 `dedup` 各持一份所有权；
+    /// 要压到零次需要把 `kinds` 换成 `Rc<TyKind>`，会给热路径 `kind()` 加一层
+    /// 间接寻址，未测量前不做）。
     pub fn intern(&mut self, kind: TyKind) -> TyId {
         if let Some(&id) = self.dedup.get(&kind) {
             return id;
         }
         let id = TyId(self.kinds.len() as u32);
-        self.kinds.push(kind.clone());
-        self.dedup.insert(kind, id);
+        self.dedup.insert(kind.clone(), id);
+        self.kinds.push(kind);
         id
     }
 
+    /// 取类型结构。
+    ///
+    /// # Panics
+    ///
+    /// `TyId` 的字段是公开的（下游 `irc` 直接构造），因此越界 id 理论上可达；
+    /// 此处与 `SideTable` 的「越界返回 None」姿态对齐，用 `try_kind` 做受控访问。
+    /// `kind` 只接受 arena 自己铸出的 id（sem 内部所有 TyId 都来自
+    /// `intern`/预置槽），越界 = 不变量破缺，按索引 panic 而非静默。
     pub fn kind(&self, id: TyId) -> &TyKind {
         &self.kinds[id.0 as usize]
+    }
+
+    /// 受控访问：越界返回 None（与 `SideTable::get` 同姿态，不 panic）
+    pub fn try_kind(&self, id: TyId) -> Option<&TyKind> {
+        self.kinds.get(id.0 as usize)
     }
 
     /// builtin 命名类型（无泛型实参）的缓存 Named 类型
@@ -329,22 +350,9 @@ impl TyArena {
             }
             (TyKind::Int(_), TyKind::Float(t)) => Some(self.intern(TyKind::Float(*t))),
             (TyKind::Float(f), TyKind::Int(_)) => Some(self.intern(TyKind::Float(*f))),
-            (
-                TyKind::Pointer {
-                    mutable: fm,
-                    inner: fi,
-                },
-                TyKind::Pointer {
-                    mutable: tm,
-                    inner: ti,
-                },
-            ) if fm == tm => {
-                let j = self.join(*fi, *ti)?;
-                Some(self.intern(TyKind::Ref {
-                    mutable: *fm,
-                    inner: j,
-                }))
-            }
+            // 裸指针汇合仍是裸指针（历史 bug：此处曾误写成 Ref，把
+            // `*const T ∨ *const U` 静默降级为借用引用，且下述同守卫
+            // Pointer 臂因此不可达）——见 join_pointer_stays_pointer
             (
                 TyKind::Pointer {
                     mutable: fm,
