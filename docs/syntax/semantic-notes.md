@@ -404,6 +404,78 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   比较）。
 - `unsafe { }` 是块表达式，值 = 块尾式；FFI 调用的结果照常参与定型。
 
+## 闭包捕获（S2/P2-3，2026-11-11；spec = closure-capture-spec.md §6c/修正 7）
+
+- **捕获分析（P2-3a，sem 已落地）**：`lambda_cap_stack`/`lambda_caps`
+  （首现序）+ 三类稳定拒收——mutable 全局引用、lambda 内捕获名赋值、
+  捕获快照语义（捕获外层 `var` 后外层再改不影响已捕获值）。
+- **表示（P2-3b-1 落地，tagged 双形态）**：无捕获 lambda / 具名 fn =
+  裸函数指针（`Const::Fun`，零分配，C 回调直通）；有捕获 lambda =
+  ARC box（`AllocClass`，payload = [fn_ptr, caps...]）+ **tag 位**
+  （值 = payload 指针 | 1；裸 fn bit0=0）。payload 布局：fn_ptr 在
+  raw+0，caps 自 raw+8；lambda 体以 **raw box 为 env 首参** 读槽。
+- **调用约定（修正 7）**：`Callee::Indirect` 统一 runtime tag 分派
+  （bit0=0 裸 fn 直调；bit0=1 取 payload[0] + env 首参）——形参持有的
+  Fn 值静态未知形态，分派开销实测 +3%（drafts/p2b-exp/RESULT.md）。
+  `Const::Fun`（@ 常量）保留直调特例，零开销。
+- **C 边界（矩阵 #16）**：捕获 lambda 作 extern "c" 实参 → irc 稳定
+  拒收（tag 位会被当代码地址）；裸 fn 直通不变。
+- **box ARC（批次 2 已落地，2026-11-11）**：class 捕获创建侧 retain
+  +1；box 的 meta = 合成 env 释放函数（llvme 按 `env_caps` 生成，逐
+  class 捕获槽 release）；Fn 绑定走 class 同纪律（创建 +1 take →
+  scope 出口 release；借用拷贝显式 retain）——Retain/Release 按 tag
+  位分派（裸 fn no-op）。`is_aggregate(Fn)` 改为 false（Fn = 标量化
+  指针，与 scalar_slots=1 / class_of=Scalar 对齐——此前 Fn 落进聚合
+  别名路径导致绑定 drop 缺失，已修）。e2e：矩阵 #4/#11 deinit 恰好
+  一次（`class_capture_deinit_balance_e2e`）。
+- **批次 3（同日落地）**：矩阵 #6（lambda 捕获外层 fn 形参 + 逃逸
+  返回）与 self 捕获 e2e（deinit 平衡）；Fn struct 字段 declare 侧
+  稳定拒收（主构造头字段 + body 字段两路，矩阵 #5 拒绝面）；4 个
+  闭包用例入选 diff_native（interp 注册表 vs native tag 位逐行对拍，
+  含绑定位置推断与快照语义）。
+- **N2 裁定（2026-11-11）：class 值不进聚合容器**——struct 字段
+  （declare，主构造头 + body 两路）/ tuple / array 字面量 / array
+  repeat 的 class、可空 class、Fn 元素稳定拒收（`agg_element_unsafe`，
+  SemUnsupportedConstruct）。理由：聚合拷贝无字段级 ARC（裸指针拷贝 +
+  源 binding 出口 release = UAF）；字段级 retain 有「转移 vs 借用」
+  逐调用点判定（nullable payload 转移 / 构造快照），拒绝面先行，字段
+  级 ARC + 结构化 drop glue 归后续切片。负测试
+  `class_in_aggregate_rejected`（三路）。
+- **Fn var 重赋值（已落地，2026-11-11）**：lower_assignment 的
+  classish 门扩展到 Fn——release 旧 box / retain 或转移新值（tag 分派，
+  裸 fn no-op）；e2e `fn_var_reassign_arc_e2e`（deinit 平衡）。
+- **可空 class 捕获（已落地，2026-11-12）**：前置问题已修——
+  `emit_indirect_call` 的 Agg 返回缺槽拷贝（间接调用把 callee 栈地址当
+  值存）补齐 `emit_agg_result_copy`（与标准 Call 臂同式）；启用 2 槽
+  env（flag i8 + payload ptr）+ 创建侧 flag 分支 retain + env 释放
+  函数 flag 分支 release + body 2 槽重建（payload 从 box 借用）。
+  e2e：Some（payload 保活）/ None（flag=0 不 retain）/ 柯里化
+  （`mk(1)(2)`）全通。**柯里化调用**（callee = 调用结果表达式）call()
+  增加 Fn 类型判别走 fn_value_call。**lambda-in-lambda 解析修复**：
+  parse_lambda body 位 `{` 前瞻消歧（配对 `}` 前深度 1 的 `->` =
+  嵌套 lambda，否则块；parse_lambda 期望 cursor 停在 `{`——调用侧
+  不得预消费）。两个 lambda 扫描器 RBrace 深度下溢 saturating 防护。
+- **指向可空的类型（`*const ?int` / `*const int?` / `?&int`）**：
+  D-007 契约保留（类型语法 + typing 验收 assert_clean 不变）；解引用/
+  存储 dst 按 Cell(i64) 分类 = flag 视图（payload 槽缺失）——登记为
+  已知限制（nullable-abi-audit.md §3.2），解引用位稳定诊断归后续。
+- **Nullable ABI 审计（2026-11-12，nullable-abi-audit.md）**：可空
+  class = 块指针 ABI 全闭环；登记两个未覆盖面——顶层标量可空全局
+  （全局存储 1 槽缺 payload）与指向可空的指针（LoadPtr dst Cell 缺
+  payload 槽）；scalar_ty 建议加显式 Nullable 臂（防新调用点误用）。
+- **剩余限制（登记）**：i128/聚合捕获仍拒收（聚合位 ARC 缺失，与 N2 同源）；i128 捕获已落地
+  （2 槽 WideCell 经多槽 env，槽位游标按 scalar_slots 累计；classify
+  LoadPtr dst 宽槽标记；e2e i128 全精度保持）；
+  Fn var 重赋值的可空 class 变体待验证；ASan 面待接。
+- **绑定位置 lambda（已落地，2026-11-11）**：`val f: Fn注解 = {…}` 把
+  注解 Fn 型作期望压栈（与 check_call_args 实参压栈同纪律）；无注解
+  绑定的显式参数全带类型标注时从标注构造参数表、返回型由 body 推断
+  并回填 lambda def 的 sig.ret（占位 unit 必须回填——irc 按 def sig
+  lower 签名）。`it` 形式/无标注参数仍稳定拒收（无信息可推）。
+- **interp**：闭包注册表（无堆，`ClosureBox{fn_def, caps}`）；槽值
+  编码与 native tag 对齐（裸 fn = def<<1，box = (id<<32)|1，payload
+  地址 = (id<<32)+8j）；不建模 ARC（spec §4.4-6 纪律）。
+
 ## 诊断码
 
 全部 `Sem*` 前缀，定义在 `crates/ast/src/syntax/node.rs::DiagCode`，

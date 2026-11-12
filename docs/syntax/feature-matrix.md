@@ -23,7 +23,7 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | `as` 数值转换 | ✅ | ✅ | ✅ | ✅ | — | 全有符号 Conv |
 | `print` 内建 | ✅ | ✅ | ✅ | ✅ | ✅ | 标量六类入口（i1/i128 特判） |
 | 具名/默认/命名实参 | ✅ | ✅ | ✅ | ✅ | — | 默认值调用点重放 |
-| 函数值类型 `(int, int) -> int` | ✅ | ✅ | ✅ | ✅ | — | M8：具名函数作值 + 无捕获 lambda（`{ x -> expr }` it/显式参数）+ 经形参间接调用 |
+| 函数值类型 `(int, int) -> int` | ✅ | ✅ | ✅ | ✅ | — | M8 + P2-3b-1：具名函数作值 + 无捕获 lambda（裸 fn 直调）+ 标量捕获 lambda（ARC box + tag 位分派）+ 经形参间接调用 + 绑定位置 lambda（注解/参数标注驱动定型） |
 
 ## 数据布局（Feature Group 1）
 
@@ -62,6 +62,7 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | main 返回值=退出码 | ✅ | ✅ | ✅ | ✅ | — | int trunc/sext、bool zext |
 | 模块系统（M5 slice 2a–3） | ✅ | ✅ | ✅ | ✅ | — | package 段 + 目录默认 + 包命名空间 + `import a.b`/`import util` 限定访问 + 可见性（默认 public/internal 包私有/private 文件私有/protected 拒收）；循环/自导入合法 |
 | class/ARC（M4 切片 1–4b，Plan C） | ✅ | ✅ | ✅ | ✅ | ✅ | 构造/字段/方法/deinit/weak var + upgrade 读取（`?P`）/可空 class/形参 +0/返回 +1 统一/重赋值所有权/语句级 +1 临时释放（`stmt_temps`，full-expression 纪律）；继承、二级构造后置 |
+| 闭包捕获（P2-3b-1/2） | ✅ | ✅ | ✅ | ✅ | ✅ | 标量/class 捕获 box（tagged）+ runtime tag 分派 + 快照语义 + box ARC（meta 逐 class 捕获 release，deinit 平衡 e2e）+ C 边界拒收；可空/i128/聚合捕获归批次 3（见未实现表） |
 | 泛型单态化（M7） | ✅ | ✅ | ✅ | ✅ | — | fun/struct 单态化；显式/推断实参、类型形参默认值、bounds 兑现（`T: Show` 实例化查 impl 注册表）；泛型 enum/struct 的 trait impl 分派已落地（9d：impl 注册延后到签名 lower 后，避免缓存空壳 spec） |
 | trait/impl 静态分派（M9） | ✅ | ✅ | ✅ | ✅ | — | trait 声明/impl/bounds/泛型 impl；aspect/provide 跳过清单 |
 | 指针 `*const T`/`*mut T`（T2 thin） | ✅ | ✅ | ✅ | ✅ | — | M2：类型 + FFI + `&x`/`*p` + StorePtr；T2 checked pointer 后置 M10（Q7） |
@@ -73,7 +74,13 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | 特性 | 拒收点 | 备注 |
 |---|---|---|
 | class 继承 / 二级构造（init） | sem | R4：v1 默认 final、无二级构造，稳定拒收 |
-| lambda 捕获 / 捕获语义 | sem | 待裁定；当前仅无捕获 lambda |
+| lambda 可空 class 捕获 | ✅ | ✅ | ✅ | ✅ | ✅ | 2 槽 env（flag+payload）+ flag 分支 retain/release + 间接调用 Agg 返回槽拷贝 |
+| lambda i128 捕获 | ✅ | ✅ | ✅ | ✅ | — | 2 槽 WideCell 标量经多槽 env（槽位游标按 scalar_slots 累计）；聚合捕获归后续 |
+| 顶层标量可空全局 | ❌ | ❌ | ❌ | ❌ | — | nullable-abi-audit.md §3.1：全局 1 槽缺 payload（类型语法可用、irc M-later 拒收已覆盖） |
+| 指向可空的类型解引用（`*p` / `*p = v`） | ✅ | ✅ | ❌ | ❌ | — | D-007 类型语法契约保留；dst Cell(i64) = flag 视图（payload 缺失）——解引用位稳定诊断归后续（audit §3.2） |
+| lambda-in-lambda 字面嵌套 + 柯里化调用 | ✅ | ✅ | ✅ | ✅ | — | parser body 位 `{` 消歧（深度感知 `->` 前瞻）+ 柯里化 Fn 值链；捕获外层参数逐层正确（e2e 3/7/15） |
+| lambda 存 struct 字段（矩阵 #5） | sem | 修正 3：Fn 字段稳定拒收（主构造头字段 + body 字段两路已接，declare 侧） |
+| class/可空 class/Fn 进聚合容器（struct 字段/tuple/array） | sem | N2 裁定：v1 稳定拒收（聚合拷贝无字段级 ARC）；字段级 ARC + 结构化 drop glue 归后续切片 |
 | aspect / provide | sem | 跳过清单 |
 | variance（类型形参型变标注） | sem | **声明点不变（invariant）**：v1 无子类型关系，variance 未实现；parser 保留 `in`/`out` 词法、sem 稳定拒收（S4：待 `open` 继承或 `dyn` + ≥2 惯用样例被挡才设计） |
 | spawn/async/await、宏展开、grow | sem | 跳过清单 |

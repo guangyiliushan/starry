@@ -89,7 +89,17 @@ lambda 体引用的**外层局部名**（非形参、非全局）：
 - **P2-3a（已落地，`568d50f`）**：sem 捕获分析基建——捕获表
   （`lambda_caps`，首现序）+ 三类稳定拒收（mutable 全局引用/
   lambda 内捕获名赋值/捕获快照语义）；env box = ARC 对象不变。
-- **P2-3b（下一批）**：irc boxed lowering（AllocClosure/
+- **P2-3b（批次 1+2+3 已落地，2026-11-11/12；批次 3 追加：可空 class
+  捕获 2 槽 env、lambda-in-lambda 解析修复、柯里化调用、间接调用 Agg
+  返回槽拷贝、Fn var 重赋值 ARC、diff 4 用例）**：irc boxed lowering
+  （批次 2 追加：class 捕获 retain +1、env 释放函数合成（meta 逐 class
+  捕获 release）、Fn 绑定/scope 出口的 box ARC（tag 分派 retain/release）、
+  `is_aggregate(Fn)=false`（Fn 值标量化指针，布局口径对齐）、顶层 Fn
+  绑定拒收、矩阵 #4/#11/#12–#16）。**批次 3 同日落地**：矩阵 #6（捕获
+  外层 fn 形参 + 逃逸）e2e + diff 入选、self 捕获 e2e（deinit 平衡）、
+  Fn struct 字段 declare 侧拒收（矩阵 #5 拒绝面）、4 个闭包用例入
+  diff_native（interp 闭包注册表 vs native tag 位逐行对拍）：
+  irc boxed lowering（AllocClosure/
   Callee::Closure——所有 Fn 值统一 closure box，具名函数引用亦装箱）+
   llvme 发射 + interp 注册表（无堆实现）+ 矩阵用例。class 捕获的
   deinit meta 合成随 P2-3b（标量捕获先行时 alloc deinit=null，
@@ -131,12 +141,15 @@ fn_value_call 判别 Const::Fun → Indirect；Temp → Closure。
   meta = 环境释放器（class 捕获的 deinit 合成随 P2-3b 批次 2）
 - **Fn 类型字段/全局**：v1 拒收（聚合全局已拒；Fn 全局同纪律）
 
-### 修正 4：聚合拷贝缺 class retain（N2 预存缺陷）
+### 修正 4：聚合拷贝缺 class retain（N2）→ v1 裁定：class 不进聚合容器
 
-struct 含 class 字段的 Copy 路径当前只做裸指针拷贝（无 retain/
-release）→ UAF。**独立于 P2-3b**，需在 Copy 路径添加 class 字段
-的 retain（目标侧）+ 旧值 release（源侧）。归 P2-3b 批次 3 或
-独立 bug fix。
+struct/tuple/array 聚合拷贝路径无字段级 ARC（裸指针拷贝 + 源 binding
+出口 release = UAF）。字段级 retain 涉及「转移 vs 借用」的逐调用点
+判定（nullable payload 转移不可 retain、构造/快照必须 retain）——
+2026-11-11 裁定：**v1 class 值不进聚合容器，三路稳定拒收**（struct
+字段 declare 侧、tuple/array 字面量 + array repeat sem 侧，含可空
+class 与 Fn 元素）；负测试 `class_in_aggregate_rejected`。字段级 ARC
+（含 struct 字段 release 面 = 结构化 drop glue）归后续切片设计。
 
 ### 修正 5：实现批次（P2-3b 拆 3 批）
 
@@ -163,3 +176,33 @@ release）→ UAF。**独立于 P2-3b**，需在 Copy 路径添加 class 字段
 - 借用捕获/逃逸分析/可变捕获/shared box；
 - thick（fn+env 双槽）表示；裸 fn 与 box 双形态；
 - C 回调（有捕获闭包不可过 extern "c"——spike 记录）。
+
+### 修正 7：调用约定统一 = runtime tag 分派（2026-11-11，实验后修正）
+
+修正 1 的「静态判别」（`Const::Fun` → Indirect / `Temp` → Closure）在
+**Fn 形参持有场景失效**：`f(x)` 的 callee 经槽传递时，调用点静态未知
+裸 fn 还是 box——这是 cb6fcd5 首次实施回退（4c4ecf3）的根因 #3。
+
+**实验收据**（`drafts/p2b-exp/RESULT.md`，repr_bench.c，本机 5 次取最小）：
+
+| 场景 | tagged | uniform+hoist | 结论 |
+|---|---|---|---|
+| 间接调用（runtime tag 分派） | 1.96ns | 1.89ns | 分派 +3%（≈0.07ns） |
+| HOF apply（含形参绑定） | 1.68ns | 2.60ns | tagged 快 36%（裸 fn 零 ARC） |
+| 非提升物化（32B 分配/次） | — | 68.5ns | uniform 无提升真实成本 |
+
+反转条件未触发 → **tagged 确认**，且统一采用 runtime tag 分派：
+
+1. **值表示**：裸 fn = 原函数指针（偶数）；box = `alloc_object` payload
+   指针 **+1**（奇数 tag）。HeapAlloc 16B 对齐 → bit0 可用；函数 16B
+   对齐 → bit0 恒 0。
+2. **调用**：`Callee::Indirect` 统一发射 tag 分派——bit0=0 → 裸 fn
+   直调；bit0=1 → `payload[0]` 取 fn ptr + env 首参。`Const::Fun`
+   已知裸 fn 时保留直调特例（零开销）。
+3. **ARC**：Fn 槽的 copy/release 同样按 tag 分派（bit0=1 才
+   retain/release；裸 fn 无 ARC）。
+4. **C 边界**：callee 为 `Const::Fun` → 裸 fn 直通；其他（Temp）→
+   稳定拒收（矩阵 #16）。
+
+interp 同步：tag 分派在 TAC 语义层建模（registry id 隐含形态，值槽
+按 tag 位区分裸 fn id 与 box id）。
