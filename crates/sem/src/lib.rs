@@ -84,6 +84,11 @@ impl<T: Clone> SideTable<T> {
     }
 }
 
+/// S2/P2-3：捕获表条目（名, ty），首现序
+pub type LambdaCaps = Vec<(ast::interner::Symbol, TyId)>;
+/// S2/P2-3：捕获收集栈元素（lambda node, 捕获作用域, 捕获表）
+pub(crate) type CapFrame = (u32, def::ScopeId, LambdaCaps);
+
 /// 语义分析产物（IR 生成阶段的输入契约）
 pub struct SemanticOutput {
     pub source: SourceFile,
@@ -172,9 +177,9 @@ pub(crate) struct SemState {
     /// M8: lambda expr id -> fun def
     pub lambda_defs: std::collections::BTreeMap<u32, DefId>,
     /// S2/P2-3：捕获收集栈（node, lambda 作用域, 捕获表）
-    pub lambda_cap_stack: Vec<(u32, def::ScopeId, Vec<(ast::interner::Symbol, TyId)>)>,
+    pub lambda_cap_stack: Vec<CapFrame>,
     /// S2/P2-3：lambda expr id → 捕获表（pop 时落账）
-    pub lambda_caps: std::collections::BTreeMap<u32, Vec<(ast::interner::Symbol, TyId)>>,
+    pub lambda_caps: std::collections::BTreeMap<u32, LambdaCaps>,
     // ---- M7 泛型单态化（generic-mono-spike.md） ----
     /// fun 实例化作业队列（struct 同步完成，不排队）
     pub mono_queue: Vec<mono::MonoJob>,

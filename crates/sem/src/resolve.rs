@@ -465,12 +465,11 @@ pub(crate) fn resolve_expr(e: &ExprWrap, st: &mut SemState, scope: ScopeId) {
                                     e.span,
                                     format!("lambda cannot reference mutable global `{text}` (S2 value capture)"),
                                 ));
-                            } else if !is_global {
-                                if let Some((_, _, caps)) = st.lambda_cap_stack.last_mut() {
-                                    if !caps.iter().any(|(s, _)| *s == *name) {
-                                        caps.push((*name, dty));
-                                    }
-                                }
+                            } else if !is_global
+                                && let Some((_, _, caps)) = st.lambda_cap_stack.last_mut()
+                                && !caps.iter().any(|(s, _)| *s == *name)
+                            {
+                                caps.push((*name, dty));
                             }
                         }
                     }
