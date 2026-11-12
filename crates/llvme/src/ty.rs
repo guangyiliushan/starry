@@ -54,6 +54,11 @@ pub fn scalar_ty(tys: &TyArena, defs: &DefArena, ty: TyId) -> String {
         TyKind::Pointer { .. } => "ptr".into(),
         // M4 slice 1: class value = object ptr (header lives on the heap)
         TyKind::Named(def, _) if matches!(defs.get(*def).kind, DefKind::Class) => "ptr".into(),
+        // S2/N2 审计（nullable-abi-audit.md §3.3）：Nullable 无标量形式
+        //（2 槽 flag+payload = Agg，经 class_of 走块路径）——到达此臂 =
+        // 路由 bug；"i64" 为 flag 槽 i64 视图的既有约定（小端低字节），
+        // 保持行为不变、显式化防新调用点误用
+        TyKind::Nullable(..) => "i64".into(),
         TyKind::Unit => "void".into(),
         TyKind::Null => "i64".into(),
         // 聚合出现在标量位 = 契约破缺（irc 已门禁），兜底 i64

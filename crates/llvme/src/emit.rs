@@ -123,6 +123,10 @@ pub fn emit_module(
     out.push_str(&globals);
     out.push_str(&decls);
     out.push_str(&body);
+    // S2/P2-3b-2：闭包 env 释放函数（meta 回调）在模块末 flush
+    for f in &g.env_release_fns {
+        out.push_str(f);
+    }
     let _ = defined;
     out
 }
@@ -134,6 +138,10 @@ struct Global {
     extern_decls: BTreeMap<String, (String, String)>,
     /// M1 (D2): def to (@.str id, byte len incl NUL) for trap messages
     fun_str: BTreeMap<DefId, (usize, usize)>,
+    /// S2/P2-3b-2：闭包 env 释放函数（meta 回调）文本，模块末统一 flush
+    env_release_fns: Vec<String>,
+    /// S2/P2-3b-2：env 释放函数命名计数
+    env_release_n: u32,
     /// M1 (D2): starry_overflow_panic was referenced (emit noreturn attrs)
     used_ovf_panic: bool,
     /// M1 (D2): @.str ids actually referenced (unused fun-name strings are
@@ -336,8 +344,13 @@ fn classify(lc: &Lc, fun: &FunBody) -> Vec<Storage> {
                             req[base.0 as usize].max(*k as usize + scalar_slots(lc, *ty).max(1));
                     }
                 }
+                Instr::LoadPtr { dst, ty, .. } => {
+                    // S2/P2-3b-3：i128 捕获经 LoadPtr 装载——dst 需 WideCell
+                    if contains_i128(lc, *ty) && class_of(lc.tys, lc.defs, *ty) == TyClass::Scalar {
+                        wide[dst.0 as usize] = true;
+                    }
+                }
                 Instr::AddrOf { .. }
-                | Instr::LoadPtr { .. }
                 | Instr::StorePtr { .. }
                 | Instr::OffsetPtr { .. }
                 | Instr::AllocClass { .. } => {}
@@ -599,6 +612,8 @@ fn emit_fun_named(lc: &Lc, g: &mut Global, fun: &FunBody, body: &mut String, nam
         u: 0,
         fun: fun_str,
     };
+    // S2/P2-3b-2：Param 是否携带 Fn 值（Retain/Release 的 tag 分派依据）
+    let mut pending_fn: Vec<bool> = Vec::new();
     for (i, s) in st.iter().enumerate() {
         match s {
             Storage::Cell => {
@@ -634,7 +649,7 @@ fn emit_fun_named(lc: &Lc, g: &mut Global, fun: &FunBody, body: &mut String, nam
         let _ = bi;
         let _ = writeln!(e.out, "{}:", block_label(b.id.0));
         for instr in &b.instrs {
-            emit_instr(&mut e, &mut pending, instr);
+            emit_instr(&mut e, &mut pending, &mut pending_fn, instr);
         }
         emit_term(&mut e, &b.term);
     }
@@ -756,7 +771,12 @@ fn emit_checked_div(e: &mut FnEmit, dst: TempId, op: BinOp, ty: TyId, lv: &str, 
     let _ = writeln!(e.out, "  {} = {} {} {}, {}", v, mnemonic, tname, lv, rv);
     e.store_val(dst, ty, v);
 }
-fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr) {
+fn emit_instr(
+    e: &mut FnEmit,
+    pending: &mut Vec<(String, String)>,
+    pending_fn: &mut Vec<bool>,
+    instr: &Instr,
+) {
     match instr {
         Instr::Bin { dst, op, l, r, ty } => {
             let lv = e.op_val(l, *ty);
@@ -1006,14 +1026,104 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
         }
         // M4 slice 2b: class alloc -- deinit fn ptr (or null) goes to header meta
         Instr::AllocClass {
-            dst, bytes, deinit, ..
+            dst,
+            bytes,
+            deinit,
+            env_caps,
+            ty,
+            ..
         } => {
             e.g.runtime_decls
                 .entry("starry_alloc_object".into())
                 .or_insert(("ptr".into(), "i64, ptr".into()));
-            let d = match deinit {
-                Some(d) => fun_name(e.lc, *d),
-                None => "null".to_string(),
+            // S2/P2-3b-2：闭包 box（有 class 捕获）合成 env 释放函数——
+            // meta 逐 class 捕获槽 release（标量槽无动作）
+            let d = match (deinit, env_caps) {
+                (Some(d), _) => fun_name(e.lc, *d),
+                (None, Some(caps)) => {
+                    // S2/P2-3b-2/3：逐捕获槽走查——class 槽直接 release；
+                    // 可空 class 槽按 flag 分支（Some 才 release payload）；
+                    // 标量槽无动作。槽位游标 = scalar_slots 累计（fn=0）
+                    use irc::layout::{is_class, scalar_slots};
+                    let mut slot: i64 = 1;
+                    let mut ftxt = String::new();
+                    let mut has_release = false;
+                    e.g.runtime_decls
+                        .entry("starry_release".into())
+                        .or_insert(("void".into(), "ptr".into()));
+                    for t in caps {
+                        let slots = scalar_slots(e.lc, *t) as i64;
+                        let class_cap = is_class(e.lc, *t);
+                        let nullable_class_cap = matches!(
+                            e.lc.tys.kind(*t),
+                            TyKind::Nullable(inner) if is_class(e.lc, *inner)
+                        );
+                        if class_cap {
+                            has_release = true;
+                            let addr = e.fresh();
+                            let _ = writeln!(
+                                ftxt,
+                                "  {} = getelementptr i8, ptr %env, i64 {}",
+                                addr,
+                                8 * slot
+                            );
+                            let v = e.fresh();
+                            let _ = writeln!(ftxt, "  {} = load ptr, ptr {}", v, addr);
+                            let _ = writeln!(ftxt, "  call void @starry_release(ptr {})", v);
+                        } else if nullable_class_cap {
+                            has_release = true;
+                            let flag_addr = e.fresh();
+                            let _ = writeln!(
+                                ftxt,
+                                "  {} = getelementptr i8, ptr %env, i64 {}",
+                                flag_addr,
+                                8 * slot
+                            );
+                            let flag = e.fresh();
+                            let _ = writeln!(ftxt, "  {} = load i8, ptr {}", flag, flag_addr);
+                            let payload_addr = e.fresh();
+                            let _ = writeln!(
+                                ftxt,
+                                "  {} = getelementptr i8, ptr %env, i64 {}",
+                                payload_addr,
+                                8 * (slot + 1)
+                            );
+                            let payload = e.fresh();
+                            let _ =
+                                writeln!(ftxt, "  {} = load ptr, ptr {}", payload, payload_addr);
+                            let cond = e.fresh();
+                            let _ = writeln!(ftxt, "  {} = icmp ne i8 {}, 0", cond, flag);
+                            let rel = e.fresh();
+                            let end = e.fresh();
+                            let _ = writeln!(
+                                ftxt,
+                                "  br i1 {}, label %{}, label %{}",
+                                cond,
+                                &rel[1..],
+                                &end[1..]
+                            );
+                            let _ = writeln!(ftxt, "{}:", &rel[1..]);
+                            let _ = writeln!(ftxt, "  call void @starry_release(ptr {})", payload);
+                            let _ = writeln!(ftxt, "  br label %{}", &end[1..]);
+                            let _ = writeln!(ftxt, "{}:", &end[1..]);
+                        }
+                        slot += slots;
+                    }
+                    if !has_release {
+                        "null".to_string()
+                    } else {
+                        e.g.env_release_n += 1;
+                        let name = format!("__closure_env_release.{}", e.g.env_release_n);
+                        let mut full = format!("define private void @{}(ptr %env) {{\n", name);
+                        full.push_str(&ftxt);
+                        let _ = writeln!(full, "  ret void");
+                        let _ = writeln!(full, "}}");
+                        let _ = writeln!(full);
+                        e.g.env_release_fns.push(full);
+                        format!("@{name}")
+                    }
+                }
+                _ => "null".to_string(),
             };
             let v = e.fresh();
             let _ = writeln!(
@@ -1021,7 +1131,17 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
                 "  {} = call ptr @starry_alloc_object(i64 {}, ptr {})",
                 v, bytes, d
             );
-            let _ = writeln!(e.out, "  store ptr {}, ptr %t{}.slot", v, dst.0);
+            // S2/P2-3b（修正 7）：闭包 box 的值 = 对象指针 | 1（tag 位）。
+            // 裸 fn 值 bit0=0（函数 16B 对齐）；HeapAlloc 16B 对齐 →
+            // bit0 可用。Indirect 调用按 bit0 分派。
+            let stored = if matches!(e.lc.tys.kind(*ty), TyKind::Fn(..)) {
+                let t = e.fresh();
+                let _ = writeln!(e.out, "  {} = getelementptr i8, ptr {}, i64 1", t, v);
+                t
+            } else {
+                v
+            };
+            let _ = writeln!(e.out, "  store ptr {}, ptr %t{}.slot", stored, dst.0);
         } // M4 slice 1: object field addressing (GEP i8, const byte offset)
         Instr::OffsetPtr {
             dst, base, bytes, ..
@@ -1124,12 +1244,35 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
             };
             let v = e.op_val(a, *ty);
             pending.push((v, pty));
+            // S2/P2-3b-2：Fn 值标记（Retain/Release 的 tag 分派依据）
+            pending_fn.push(matches!(e.lc.tys.kind(*ty), TyKind::Fn(..)));
         }
         Instr::Call { dst, callee, ty } => {
             let mut args: Vec<String> = pending
                 .drain(..)
                 .map(|(v, t)| format!("{} {}", t, v))
                 .collect();
+            let fn_flags: Vec<bool> = std::mem::take(pending_fn);
+            // S2/P2-3b（修正 7）：函数值间接调用 = runtime tag 分派
+            //（静态 Const::Fun 直调特例在 emit_indirect_call 内）
+            if matches!(callee, Callee::Indirect) {
+                emit_indirect_call(e, *dst, *ty, &mut args);
+                return;
+            }
+            // S2/P2-3b-2：Fn 值的 retain/release = tag 分派（box untag 后
+            // 真操作；裸 fn no-op）——见 emit_fn_arc_op
+            if matches!(
+                callee,
+                Callee::Runtime(RuntimeFn::Retain) | Callee::Runtime(RuntimeFn::Release)
+            ) && fn_flags.first() == Some(&true)
+            {
+                emit_fn_arc_op(
+                    e,
+                    matches!(callee, Callee::Runtime(RuntimeFn::Release)),
+                    &mut args,
+                );
+                return;
+            }
             let mut is_str_eq = false;
             let (callee_name, ret) = match callee {
                 // M8 slice 1：函数值间接调用——args[0] 为函数指针
@@ -1344,6 +1487,147 @@ fn emit_instr(e: &mut FnEmit, pending: &mut Vec<(String, String)>, instr: &Instr
             }
         }
     }
+}
+
+/// S2/P2-3b（修正 7）：函数值间接调用的 runtime tag 分派。
+/// 值约定：裸 fn = 原函数指针（bit0=0）；闭包 box = payload 指针 | 1。
+/// bit0=0 → 裸 fn 直调（无 env）；bit0=1 → box-1 取 payload[0] 为目标、
+/// box-1 作 env 首参（与 lambda 体 OffsetPtr 读取同一 raw 基址约定）。
+/// `@name` 常量（Const::Fun 静态裸 fn）直调，零分派开销——C 回调
+/// 契约（矩阵 #15）与既有 fn_values IR 形态均不变。
+/// S2/P2-3b-3：聚合返回值的槽拷贝（与标准 Call 臂同式）——callee 返回
+/// 栈槽地址，caller 逐 i64 槽拷入 dst 块（nullable class 等聚合 Fn 返回
+/// 经此落地；直接 store_val 会把栈地址当值存——可空捕获探针抓到）
+fn emit_agg_result_copy(e: &mut FnEmit, dst: TempId, ty: TyId, v: &str) {
+    let n = scalar_slots(e.lc, ty).max(1);
+    let elem = "i64";
+    let dst_ptr = e.op_val(&Operand::Temp(dst), ty);
+    for i in 0..n {
+        let sa = e.fresh();
+        let _ = writeln!(
+            e.out,
+            "  {} = getelementptr [{} x {}], ptr {}, i64 0, i64 {}",
+            sa, n, elem, v, i
+        );
+        let val = e.fresh();
+        let _ = writeln!(e.out, "  {} = load {}, ptr {}", val, elem, sa);
+        let da = e.fresh();
+        let _ = writeln!(
+            e.out,
+            "  {} = getelementptr [{} x {}], ptr {}, i64 0, i64 {}",
+            da, n, elem, dst_ptr, i
+        );
+        let _ = writeln!(e.out, "  store {} {}, ptr {}", elem, val, da);
+    }
+}
+
+fn emit_indirect_call(e: &mut FnEmit, dst: Option<TempId>, ty: TyId, args: &mut Vec<String>) {
+    if args.is_empty() {
+        let _ = writeln!(e.out, "  ; ERROR: indirect call without a function pointer");
+        return;
+    }
+    let target = args.remove(0);
+    let tv = target.strip_prefix("ptr ").unwrap_or(&target).to_string();
+    let ret = if class_of(e.lc.tys, e.lc.defs, ty) == TyClass::Agg {
+        "ptr".to_string()
+    } else {
+        scalar_ty(e.lc.tys, e.lc.defs, ty)
+    };
+    let rest = args.join(", ");
+    if tv.starts_with('@') {
+        if ret == "void" {
+            let _ = writeln!(e.out, "  call void {}({})", tv, rest);
+        } else {
+            let v = e.fresh();
+            let _ = writeln!(e.out, "  {} = call {} {}({})", v, ret, tv, rest);
+            if let Some(d) = dst {
+                e.store_val(d, ty, v);
+            }
+        }
+        return;
+    }
+    let iv = e.fresh();
+    let _ = writeln!(e.out, "  {} = ptrtoint ptr {} to i64", iv, tv);
+    let bit = e.fresh();
+    let _ = writeln!(e.out, "  {} = and i64 {}, 1", bit, iv);
+    let cond = e.fresh();
+    let _ = writeln!(e.out, "  {} = icmp ne i64 {}, 0", cond, bit);
+    let bare_l = e.fresh();
+    let box_l = e.fresh();
+    let merge_l = e.fresh();
+    let _ = writeln!(e.out, "  br i1 {}, label {}, label {}", cond, box_l, bare_l);
+    let _ = writeln!(e.out, "{}:", &bare_l[1..]);
+    if ret == "void" {
+        let _ = writeln!(e.out, "  call void {}({})", tv, rest);
+    } else {
+        let v = e.fresh();
+        let _ = writeln!(e.out, "  {} = call {} {}({})", v, ret, tv, rest);
+        if let Some(d) = dst {
+            if class_of(e.lc.tys, e.lc.defs, ty) == TyClass::Agg {
+                emit_agg_result_copy(e, d, ty, &v);
+            } else {
+                e.store_val(d, ty, v);
+            }
+        }
+    }
+    let _ = writeln!(e.out, "  br label %{}", &merge_l[1..]);
+    let _ = writeln!(e.out, "{}:", &box_l[1..]);
+    let boxp = e.fresh();
+    let _ = writeln!(e.out, "  {} = getelementptr i8, ptr {}, i64 -1", boxp, tv);
+    let fp = e.fresh();
+    let _ = writeln!(e.out, "  {} = load ptr, ptr {}", fp, boxp);
+    let boxed_args = if rest.is_empty() {
+        format!("ptr {}", boxp)
+    } else {
+        format!("ptr {}, {}", boxp, rest)
+    };
+    if ret == "void" {
+        let _ = writeln!(e.out, "  call void {}({})", fp, boxed_args);
+    } else {
+        let v = e.fresh();
+        let _ = writeln!(e.out, "  {} = call {} {}({})", v, ret, fp, boxed_args);
+        if let Some(d) = dst {
+            if class_of(e.lc.tys, e.lc.defs, ty) == TyClass::Agg {
+                emit_agg_result_copy(e, d, ty, &v);
+            } else {
+                e.store_val(d, ty, v);
+            }
+        }
+    }
+    let _ = writeln!(e.out, "  br label %{}", &merge_l[1..]);
+    let _ = writeln!(e.out, "{}:", &merge_l[1..]);
+}
+
+/// S2/P2-3b-2：Fn 值（tagged box | 裸 fn）的 retain/release——bit0 分派：
+/// box → untag 后对 ARC 对象真操作；裸 fn → no-op。
+fn emit_fn_arc_op(e: &mut FnEmit, release: bool, args: &mut Vec<String>) {
+    let target = args.remove(0);
+    let tv = target.strip_prefix("ptr ").unwrap_or(&target).to_string();
+    let iv = e.fresh();
+    let _ = writeln!(e.out, "  {} = ptrtoint ptr {} to i64", iv, tv);
+    let bit = e.fresh();
+    let _ = writeln!(e.out, "  {} = and i64 {}, 1", bit, iv);
+    let cond = e.fresh();
+    let _ = writeln!(e.out, "  {} = icmp ne i64 {}, 0", cond, bit);
+    let do_l = e.fresh();
+    let end_l = e.fresh();
+    let _ = writeln!(e.out, "  br i1 {}, label {}, label {}", cond, do_l, end_l);
+    let _ = writeln!(e.out, "{}:", &do_l[1..]);
+    let boxp = e.fresh();
+    let _ = writeln!(e.out, "  {} = getelementptr i8, ptr {}, i64 -1", boxp, tv);
+    if release {
+        e.g.runtime_decls
+            .entry("starry_release".into())
+            .or_insert(("void".into(), "ptr".into()));
+        let _ = writeln!(e.out, "  call void @starry_release(ptr {})", boxp);
+    } else {
+        e.g.runtime_decls
+            .entry("starry_retain".into())
+            .or_insert(("ptr".into(), "ptr".into()));
+        let _ = writeln!(e.out, "  call ptr @starry_retain(ptr {})", boxp);
+    }
+    let _ = writeln!(e.out, "  br label %{}", &end_l[1..]);
+    let _ = writeln!(e.out, "{}:", &end_l[1..]);
 }
 
 fn runtime_param_ty(args: &[String]) -> String {
