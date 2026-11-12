@@ -37,6 +37,11 @@ pub fn is_aggregate(v: &impl LayoutView, ty: TyId) -> bool {
     {
         return false;
     }
+    // S2/P2-3b：Fn 值 = 标量化指针（裸 fn / tagged box；scalar_slots=1、
+    // llvme class_of=Scalar 同口径）——绑定/拷贝走标量路径，ARC 按 tag 位
+    if matches!(v.tys().kind(ty), TyKind::Fn(..)) {
+        return false;
+    }
     !matches!(
         v.tys().kind(ty),
         TyKind::Int(_)

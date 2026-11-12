@@ -109,6 +109,120 @@ fn int_range(w: u32) -> (f64, f64) {
 
 const STEP_CAP: u64 = 10_000_000;
 
+/// 函数体需要的槽跨度（params + 全部 def/use temp + Slot 声明跨度）。
+/// TempId 全局单调，lambda 体的 temp id 不从 0 起——固定小容量会越界。
+/// 闭包 payload 地址解码：(id<<32) + 8j → (id, j)。
+/// 非闭包形态（低 32 位非 8 对齐）返回 None → 调用方 trap。
+fn decode_closure_addr(v: u128) -> Option<(usize, usize)> {
+    let id = (v >> 32) as usize;
+    if id == 0 {
+        return None;
+    }
+    let off = (v & 0xFFFF_FFFF) as usize;
+    if !off.is_multiple_of(8) {
+        return None;
+    }
+    Some((id, off / 8))
+}
+
+fn bump(max: &mut u32, t: u32) {
+    if t > *max {
+        *max = t;
+    }
+}
+
+fn cell_span(fun: &FunBody) -> usize {
+    let mut max: u32 = fun.params.iter().map(|(t, _)| t.0).max().unwrap_or(0);
+    for b in &fun.blocks {
+        for i in &b.instrs {
+            match i {
+                Instr::Bin { dst, l, r, .. } => {
+                    bump(&mut max, dst.0);
+                    if let Operand::Temp(t) = l {
+                        bump(&mut max, t.0);
+                    }
+                    if let Operand::Temp(t) = r {
+                        bump(&mut max, t.0);
+                    }
+                }
+                Instr::Un { dst, a, .. } | Instr::Copy { dst, src: a, .. } => {
+                    bump(&mut max, dst.0);
+                    if let Operand::Temp(t) = a {
+                        bump(&mut max, t.0);
+                    }
+                }
+                Instr::Load { dst, base, idx, .. } => {
+                    bump(&mut max, dst.0);
+                    bump(&mut max, base.0);
+                    if let Operand::Temp(t) = idx {
+                        bump(&mut max, t.0);
+                    }
+                }
+                Instr::Store { base, idx, src, .. } => {
+                    bump(&mut max, base.0);
+                    if let Operand::Temp(t) = idx {
+                        bump(&mut max, t.0);
+                    }
+                    if let Operand::Temp(t) = src {
+                        bump(&mut max, t.0);
+                    }
+                }
+                Instr::AddrOf { dst, base, .. } => {
+                    bump(&mut max, dst.0);
+                    bump(&mut max, base.0);
+                }
+                Instr::LoadPtr { dst, ptr, .. } => {
+                    bump(&mut max, dst.0);
+                    bump(&mut max, ptr.0);
+                }
+                Instr::OffsetPtr { dst, base, .. } => {
+                    bump(&mut max, dst.0);
+                    bump(&mut max, base.0);
+                }
+                Instr::StorePtr { ptr, src, .. } => {
+                    bump(&mut max, ptr.0);
+                    if let Operand::Temp(t) = src {
+                        bump(&mut max, t.0);
+                    }
+                }
+                Instr::Slot { dst, count } => bump(&mut max, dst.0 + *count),
+                Instr::Param { a, .. } => {
+                    if let Operand::Temp(t) = a {
+                        bump(&mut max, t.0);
+                    }
+                }
+                Instr::AllocClass { dst, .. } => bump(&mut max, dst.0),
+                Instr::LoadGlobal { dst, .. } => bump(&mut max, dst.0),
+                Instr::Call { dst, .. } => {
+                    if let Some(d) = dst {
+                        bump(&mut max, d.0);
+                    }
+                }
+                Instr::StoreGlobal { src, .. } => {
+                    if let Operand::Temp(t) = src {
+                        bump(&mut max, t.0);
+                    }
+                }
+            }
+        }
+        if let Term::Ret {
+            value: Some(Operand::Temp(t)),
+            ..
+        } = &b.term
+        {
+            bump(&mut max, t.0);
+        }
+        if let Term::Br {
+            cond: Operand::Temp(t),
+            ..
+        } = &b.term
+        {
+            bump(&mut max, t.0);
+        }
+    }
+    (max as usize) + 8
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     I(i64),
@@ -235,6 +349,7 @@ fn run_fun_capturing(
         str_ids,
         globals: Vec::new(),
         printed: Vec::new(),
+        closures: Vec::new(),
     };
     // 全局初始化：按源序执行合成 init 函数，后续函数经 globals 表读写。
     for global in &tac.globals {
@@ -284,6 +399,17 @@ fn run_fun_capturing(
     Ok((value, machine.printed))
 }
 
+/// S2/P2-3b：闭包 box 的无堆注册表模型（spec §4.4-6：interp 不建模
+/// ARC，只建模值语义）。槽值编码与 llvme tag 位对齐：
+/// 裸 fn = def<<1（bit0=0）；box Fn 值 = raw|1（bit0=1）；
+/// raw 基址 = id<<32（低 32 位零）；OffsetPtr 纯字节算术后，
+/// payload 槽 j 的地址 = (id<<32) + 24 + 8j（Load/StorePtr 按此解码）。
+#[derive(Debug, Clone)]
+struct ClosureBox {
+    fn_def: DefId,
+    caps: Vec<u128>,
+}
+
 struct Machine<'a> {
     tac: &'a TacOutput,
     tys: &'a TyArena,
@@ -293,6 +419,8 @@ struct Machine<'a> {
     globals: Vec<(DefId, u128)>,
     /// print 输出收集（差分 harness；每条 = 一行，与 runtime write_line 对齐）
     printed: Vec<String>,
+    /// S2/P2-3b：闭包 box 注册表（AllocClass{Fn} 创建；StorePtr 填充）
+    closures: Vec<ClosureBox>,
 }
 
 impl<'a> Machine<'a> {
@@ -423,8 +551,9 @@ impl<'a> Machine<'a> {
                 Const::Null | Const::Unit => 0,
                 // 字符串常量：查预 intern 的侧表（构建期已全量收集）
                 Const::Str(sym) => self.str_ids.get(sym).copied().unwrap_or(0),
-                // M8 slice 1：函数引用 = DefId 编码（间接调用时解码）
-                Const::Fun(d) => d.0 as u128,
+                // M8 slice 1：函数引用 = DefId 编码（间接调用时解码）。
+                // S2/P2-3b：<<1 留 bit0 给 tag（box = (id<<1)|1）
+                Const::Fun(d) => (d.0 as u128) << 1,
             },
         }
     }
@@ -650,16 +779,73 @@ impl<'a> Machine<'a> {
                 Ok(())
             }
             // M2 指针指令：解释器无地址空间模型，一律 trap
-            //（差分 harness 不选指针程序；native build 为验收路径）
-            Instr::AddrOf { .. } | Instr::LoadPtr { .. } | Instr::StorePtr { .. } => {
-                Err(InterpError::Trap("pointer op (AddrOf/LoadPtr/StorePtr)"))
+            //（差分 harness 不选指针程序；native build 为验收路径）。
+            // S2/P2-3b：闭包 env 地址（id<<32）例外
+            Instr::AddrOf { .. } => Err(InterpError::Trap("pointer op (AddrOf)")),
+            Instr::LoadPtr { dst, ptr, ty } => {
+                let v = self.op(cells, &Operand::Temp(*ptr));
+                match decode_closure_addr(v) {
+                    Some((id, slot)) => {
+                        let Some(entry) = self.closures.get(id.wrapping_sub(1)) else {
+                            return Err(InterpError::Trap("closure env read"));
+                        };
+                        let val = if slot == 0 {
+                            (entry.fn_def.0 as u128) << 1
+                        } else {
+                            entry.caps.get(slot - 1).copied().unwrap_or(0)
+                        };
+                        Self::put(cells, *dst, self.norm(val, *ty));
+                        Ok(())
+                    }
+                    None => Err(InterpError::Trap("pointer op (LoadPtr)")),
+                }
+            }
+            Instr::StorePtr { ptr, src, ty } => {
+                let pv = self.op(cells, &Operand::Temp(*ptr));
+                match decode_closure_addr(pv) {
+                    Some((id, slot)) => {
+                        let sv = self.norm(self.op(cells, src), *ty);
+                        let Some(entry) = self.closures.get_mut(id.wrapping_sub(1)) else {
+                            return Err(InterpError::Trap("closure env write"));
+                        };
+                        if slot == 0 {
+                            entry.fn_def = DefId((sv >> 1) as u32);
+                        } else if let Some(c) = entry.caps.get_mut(slot - 1) {
+                            *c = sv;
+                        }
+                        Ok(())
+                    }
+                    None => Err(InterpError::Trap("pointer op (StorePtr)")),
+                }
             }
             // M4 slice 1: class objects live on the native heap; the
             // interpreter has no address-space model for them (same
             // discipline as pointer ops and extern calls)
-            Instr::AllocClass { .. } => Err(InterpError::Trap("class object alloc (AllocClass)")),
-            Instr::OffsetPtr { .. } => {
-                Err(InterpError::Trap("class object addressing (OffsetPtr)"))
+            // S2/P2-3b：闭包 box（Fn ty）例外——注册表建模（无堆）
+            Instr::AllocClass { dst, bytes, ty, .. } => {
+                if matches!(self.tys.kind(*ty), TyKind::Fn(..)) {
+                    let id = self.closures.len() + 1;
+                    self.closures.push(ClosureBox {
+                        fn_def: DefId(0),
+                        caps: vec![0u128; ((*bytes as usize) / 8).saturating_sub(4)],
+                    });
+                    // Fn 值 = raw|1（tag 位）；raw = id<<32
+                    Self::put(cells, *dst, ((id as u128) << 32) | 1);
+                    Ok(())
+                } else {
+                    Err(InterpError::Trap("class object alloc (AllocClass)"))
+                }
+            }
+            // S2/P2-3b：OffsetPtr = 纯字节算术（与 llvme GEP 同式）。
+            // 闭包 box：tagged 基址（raw|1）+ IRC 侧 (23+8j) 与 raw 基址
+            // + (24+8j) 在低 32 位汇合为同一 payload 地址（24+8j）。
+            // 非 Fn 基址只会出现在 class lowering—— AllocClass 已先 trap。
+            Instr::OffsetPtr {
+                dst, base, bytes, ..
+            } => {
+                let v = self.op(cells, &Operand::Temp(*base));
+                Self::put(cells, *dst, v.wrapping_add(*bytes as u128));
+                Ok(())
             }
             Instr::Slot { dst, count } => {
                 let slot = &mut cells[dst.0 as usize];
@@ -720,11 +906,14 @@ impl<'a> Machine<'a> {
                         self.printed.push(self.print_line(v, pty));
                         0
                     }
+                    // S2/P2-3b-2：Fn ARC（tag 分派）在 interp 无堆模型下
+                    // 为 no-op（裸 fn/box 均无副作用；class 程序已在
+                    // AllocClass trap，retain 不可达）
                     Callee::Runtime(RuntimeFn::Retain)
                     | Callee::Runtime(RuntimeFn::Release)
                     | Callee::Runtime(RuntimeFn::WeakRetain)
-                    | Callee::Runtime(RuntimeFn::WeakDrop)
-                    | Callee::Runtime(RuntimeFn::WeakUpgrade) => {
+                    | Callee::Runtime(RuntimeFn::WeakDrop) => 0,
+                    Callee::Runtime(RuntimeFn::WeakUpgrade) => {
                         return Err(InterpError::Trap("class object runtime op"));
                     }
                     Callee::Extern(def) => {
@@ -738,25 +927,46 @@ impl<'a> Machine<'a> {
                         self.str_id(&s)
                     }
                     // M8 slice 1：函数值间接调用——args[0] 为函数指针
-                    // （DefId 编码），其余为实参
+                    // S2/P2-3b（修正 7）：tag 分派——bit0=0 裸 fn（def<<1）；
+                    // bit0=1 闭包 box（id<<1|1）→ 首参传 raw env 基址
                     Callee::Indirect => {
-                        let fid = args.first().map(|(v, _)| *v).unwrap_or(0) as u32;
-                        let def = sem::DefId(fid);
-                        let callee_fun = self
-                            .tac
-                            .funs
-                            .iter()
-                            .find(|f| f.def == def)
-                            .ok_or(InterpError::UnknownFun(format!("indirect def {fid}")))?;
-                        let decoded: Vec<Value> = callee_fun
-                            .params
-                            .iter()
-                            .zip(args.iter().skip(1))
-                            .map(|((_, pty), (v, _))| self.decode(*v, *pty))
-                            .collect();
-                        match self.exec_nested(callee_fun, &decoded, depth)? {
-                            Some((rv, _)) => rv,
-                            None => 0,
+                        let fid = args.first().map(|(v, _)| *v).unwrap_or(0);
+                        if fid & 1 == 0 {
+                            let def = sem::DefId((fid >> 1) as u32);
+                            let callee_fun = self.tac.funs.iter().find(|f| f.def == def).ok_or(
+                                InterpError::UnknownFun(format!("indirect def {}", fid >> 1)),
+                            )?;
+                            let decoded: Vec<Value> = callee_fun
+                                .params
+                                .iter()
+                                .zip(args.iter().skip(1))
+                                .map(|((_, pty), (v, _))| self.decode(*v, *pty))
+                                .collect();
+                            match self.exec_nested(callee_fun, &decoded, depth)? {
+                                Some((rv, _)) => rv,
+                                None => 0,
+                            }
+                        } else {
+                            // box Fn 值 = (id<<32)|1 → id 取高位，raw env = 值-1
+                            let id = (fid >> 32) as usize;
+                            let env_raw = fid - 1;
+                            let Some(entry) = self.closures.get(id.wrapping_sub(1)) else {
+                                return Err(InterpError::Trap("closure call"));
+                            };
+                            let fn_def = entry.fn_def;
+                            let callee_fun = self.tac.funs.iter().find(|f| f.def == fn_def).ok_or(
+                                InterpError::UnknownFun(format!("closure def {}", fn_def.0)),
+                            )?;
+                            let mut decoded: Vec<Value> = vec![Value::I(env_raw as i64)];
+                            for ((_, pty), (v, _)) in
+                                callee_fun.params.iter().skip(1).zip(args.iter().skip(1))
+                            {
+                                decoded.push(self.decode(*v, *pty));
+                            }
+                            match self.exec_nested(callee_fun, &decoded, depth)? {
+                                Some((rv, _)) => rv,
+                                None => 0,
+                            }
                         }
                     }
                     Callee::Def(def) => {
@@ -793,23 +1003,11 @@ impl<'a> Machine<'a> {
         depth: usize,
     ) -> Result<Option<(u128, sem::TyId)>, InterpError> {
         // 子调用：独立槽存储（值语义拷贝，同 llvme 聚合参数按指针的
-        // 差异在解释器层无感——sem v1 形参不可变，拷贝等价）
+        // 差异在解释器层无感——sem v1 形参不可变，拷贝等价）。
+        // S2/P2-3b：TempId 全局单调（跨 lambda 继续），固定 64 会越界
+        // panic——按函数体实际 temp/槽跨度分配
         let n = 64usize;
-        let mut cells: Vec<Vec<u128>> = vec![
-            Vec::new();
-            n.max(
-                fun.blocks
-                    .iter()
-                    .flat_map(|b| b.instrs.iter())
-                    .filter_map(|i| match i {
-                        Instr::Slot { dst, count } => Some(dst.0 as usize + *count as usize),
-                        _ => None,
-                    })
-                    .max()
-                    .unwrap_or(0)
-                    + 8,
-            )
-        ];
+        let mut cells: Vec<Vec<u128>> = vec![Vec::new(); n.max(cell_span(fun))];
         for ((t, ty), arg) in fun.params.iter().zip(args) {
             self.bind_arg(&mut cells[t.0 as usize], *ty, arg)?;
         }

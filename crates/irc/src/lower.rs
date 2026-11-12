@@ -952,7 +952,10 @@ impl<'r, 'a> Ctx<'r, 'a> {
             self.sem.tys.kind(to),
             TyKind::Nullable(inner) if crate::layout::is_class(self, *inner)
         );
-        let class_binding = crate::layout::is_class(self, to) || nullable_class;
+        // S2/P2-3b-2：Fn 绑定走同一 ARC 纪律（裸 fn no-op / box 真 retain；
+        // scope 出口 release）——llvme 按 tag 位分派
+        let fn_binding = matches!(self.sem.tys.kind(to), TyKind::Fn(..));
+        let class_binding = crate::layout::is_class(self, to) || nullable_class || fn_binding;
         // M4 slice 3：weak var——初始化时 weak_retain（weak++），
         // 块出口 weak_drop；读取/重赋值 sem 已拒收（无悬垂面）
         let weak_binding = self
@@ -1096,7 +1099,10 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 self.sem.tys.kind(to),
                 TyKind::Nullable(inner) if crate::layout::is_class(self, *inner)
             );
-            let classish = crate::layout::is_class(self, to) || nullable_class;
+            // S2/P2-3b-2：Fn var 重赋值走同一 ARC 纪律（release 旧 box /
+            // retain 新值按 tag 位分派；裸 fn no-op）
+            let fn_asg = matches!(self.sem.tys.kind(to), TyKind::Fn(..));
+            let classish = crate::layout::is_class(self, to) || nullable_class || fn_asg;
             let self_assign = match (&target.kind, &value.kind) {
                 (
                     ast::syntax::expr::ExprKind::Ident(tn),
@@ -1817,7 +1823,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
         e: &ast::syntax::expr::ExprWrap,
         ty: TyId,
     ) {
-        if !crate::expr::classish_ty(self, ty) {
+        if !crate::expr::classish_ty(self, ty) && !matches!(self.sem.tys.kind(ty), TyKind::Fn(..)) {
             return;
         }
         if crate::expr::plus1_origin(self, e) {

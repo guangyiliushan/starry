@@ -185,6 +185,9 @@ pub enum Instr {
         dst: TempId,
         bytes: i64,
         deinit: Option<DefId>,
+        /// S2/P2-3b-2：闭包 box 的捕获类型表（按源码序；仅闭包 box 填写）
+        /// ——llvme 据此合成 env 释放函数（meta 回调逐 class 捕获 release）
+        env_caps: Option<Vec<TyId>>,
         ty: TyId,
     },
     /// M4 slice 1: field addressing inside an object: dst = base + bytes (GEP i8).

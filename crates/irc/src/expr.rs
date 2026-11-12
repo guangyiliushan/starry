@@ -7,7 +7,7 @@ use ast::syntax::expr::{Block, CallArg, CastKind, ExprKind, ExprWrap, LambdaPara
 use ast::syntax::node::{DiagCode, NodeId, Span};
 use ast::syntax::pat::PatKind;
 use ast::token::{LiteralKind, OperatorKind};
-use sem::{DefId, DefKind, TyId, TyKind};
+use sem::{DefId, DefKind, IntKind, TyId, TyKind};
 
 use crate::lower::{Ctx, Place};
 use crate::tac::{BinOp, Callee, Const, FunBody, Instr, Operand, RuntimeFn, TempId, Term, UnOp};
@@ -24,6 +24,40 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
         return Operand::Const(Const::Unit);
     };
     let lsig = ctx.sem.defs.get(ldef).sig.clone();
+    // S2/P2-3b：捕获表驱动装箱。允许：标量（含 i128 2 槽 WideCell）/
+    // class（1 槽标量化指针）/ 可空 class（2 槽 env + flag 分支）；
+    // 聚合整体归后续（聚合位 ARC 缺失，与 N2 同源）
+    let caps: Vec<(Symbol, TyId)> = ctx
+        .sem
+        .lambda_caps
+        .get(&e.id.0)
+        .cloned()
+        .unwrap_or_default();
+    for (name, cty) in &caps {
+        if !matches!(
+            ctx.sem.tys.kind(*cty),
+            TyKind::Int(IntKind::I4)
+                | TyKind::Int(IntKind::I8)
+                | TyKind::Int(IntKind::I16)
+                | TyKind::Int(IntKind::I32)
+                | TyKind::Int(IntKind::I64)
+                | TyKind::Int(IntKind::I128)
+                | TyKind::Float(_)
+                | TyKind::Bool
+                | TyKind::Char
+                | TyKind::String
+                | TyKind::Unit
+        ) && !is_class_ty(ctx, *cty)
+        {
+            ctx.diag(
+                e.span,
+                format!(
+                    "capture `{}` of this type lands in a later batch (scalar/class/nullable-class captures only; aggregate captures need aggregate-position ARC)",
+                    ctx.sem.interner.resolve(*name)
+                ),
+            );
+        }
+    }
     let saved_p = std::mem::take(&mut ctx.fun.params);
     let saved_b = std::mem::take(&mut ctx.fun.blocks);
     let saved_d = ctx.fun.def;
@@ -52,11 +86,43 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
             })
             .collect(),
     };
+    // S2/P2-3b（修正 7）：env 首参（raw box ptr）——仅捕获形态；
+    // 调用点 tag 分派传 raw 基址，lambda 体 OffsetPtr 读取同一约定
+    let env_t = if caps.is_empty() {
+        None
+    } else {
+        let t = ctx.temp();
+        ctx.fun.params.push((t, ctx.sem.env_ref_ty));
+        Some(t)
+    };
     for (i, (_, ty)) in lsig.params.iter().enumerate() {
         let t = ctx.temp();
         ctx.fun.params.push((t, *ty));
         let pn = pnames.get(i).copied().unwrap_or(lsig.params[i].0);
         ctx.env_top().insert(pn, (Place::Temp(t), *ty));
+    }
+    if let Some(env_t) = env_t {
+        // 捕获名 → env 槽读取（槽位游标，每捕获 1 槽：标量/class 均
+        // 1 槽标量化指针；可空 class 待 nullable ABI 审计后启用）
+        let mut slot = 1usize;
+        for (name, cty) in &caps {
+            let slots = crate::layout::scalar_slots(ctx, *cty);
+            let addr = ctx.temp();
+            ctx.emit(Instr::OffsetPtr {
+                dst: addr,
+                base: env_t,
+                bytes: (8 * slot) as i64,
+                ty: ctx.sem.tys.unit,
+            });
+            let v = ctx.temp();
+            ctx.emit(Instr::LoadPtr {
+                dst: v,
+                ptr: addr,
+                ty: *cty,
+            });
+            ctx.env_top().insert(*name, (Place::Temp(v), *cty));
+            slot += slots;
+        }
     }
     let tail = ctx.lower_block(lbody);
     ctx.finish_fun(tail, lbody.tail.as_deref());
@@ -73,7 +139,78 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
     ctx.next_block = saved_nb;
     ctx.block_index = saved_bi;
     ctx.switch_to(saved_e);
-    Operand::Const(Const::Fun(ldef))
+    if caps.is_empty() {
+        // 无捕获：裸 fn 指针（零分配；C 回调直通不变）
+        return Operand::Const(Const::Fun(ldef));
+    }
+    // S2/P2-3b：捕获 lambda = ARC box + tag 位（llvme 侧 ptr|1）。
+    // payload = [fn_ptr, caps...]；box 的 ARC（copy retain / scope
+    // release）随批次 2/3——batch 1 值语义正确优先
+    let fn_ty = ctx.expr_ty(e);
+    let cap_vals: Vec<(Operand, TyId)> = caps
+        .iter()
+        .map(|(name, cty)| {
+            let v = match ctx.lookup(*name) {
+                Some((place, ty)) => read_place(ctx, place, ty, e.span),
+                None => {
+                    ctx.diag(e.span, "捕获名不在 lowering 环境（sem 契约破缺）");
+                    Operand::Const(Const::Int(0))
+                }
+            };
+            (v, *cty)
+        })
+        .collect();
+    let box_t = ctx.temp();
+    // S2/P2-3b-2：有 class 捕获时填 env_caps——llvme 合成 env 释放函数
+    //（meta 逐 class 捕获 release）；纯标量捕获保持 meta=null（IR 不变）
+    let has_class_cap = caps.iter().any(|(_, cty)| is_class_ty(ctx, *cty));
+    ctx.emit(Instr::AllocClass {
+        dst: box_t,
+        bytes: crate::expr::ARC_HEADER_BYTES + (1 + caps.len() as i64) * 8,
+        deinit: None,
+        env_caps: has_class_cap.then(|| caps.iter().map(|(_, t)| *t).collect()),
+        ty: fn_ty,
+    });
+    // S2/P2-3b：box_t 持 tag 位值（raw|1）——创建侧 GEP 从 tagged 基址
+    // 起算。payload 布局 = alloc_object 返回的 raw 基址 + 槽 j*8：
+    // fn_ptr 在 raw+0（dispatch 从 boxp+0 取），caps 自 raw+8。
+    // tagged + bytes == raw + 槽址 → bytes = 槽址 - 1。
+    let a0 = ctx.temp();
+    ctx.emit(Instr::OffsetPtr {
+        dst: a0,
+        base: box_t,
+        bytes: -1,
+        ty: ctx.sem.tys.unit,
+    });
+    ctx.emit(Instr::StorePtr {
+        ptr: a0,
+        src: Operand::Const(Const::Fun(ldef)),
+        ty: fn_ty,
+    });
+    let mut slot_j = 1usize;
+    for (v, cty) in cap_vals.into_iter() {
+        let cap_slots = crate::layout::scalar_slots(ctx, cty);
+        // class 捕获 +1（box meta 释放时归还）；标量无动作
+        if let Operand::Temp(t) = &v
+            && is_class_ty(ctx, cty)
+        {
+            ctx.emit_class_retain(crate::lower::Place::Temp(*t), cty);
+        }
+        let a = ctx.temp();
+        ctx.emit(Instr::OffsetPtr {
+            dst: a,
+            base: box_t,
+            bytes: (8 * slot_j) as i64 - 1,
+            ty: ctx.sem.tys.unit,
+        });
+        ctx.emit(Instr::StorePtr {
+            ptr: a,
+            src: v,
+            ty: cty,
+        });
+        slot_j += cap_slots;
+    }
+    Operand::Temp(box_t)
 }
 
 pub(crate) fn lower_expr(ctx: &mut Ctx, e: &ExprWrap) -> Operand {
@@ -194,6 +331,8 @@ pub(crate) fn plus1_origin(ctx: &Ctx, e: &ExprWrap) -> bool {
             classish_ty(ctx, ctx.expr_ty(e))
         }
         ExprKind::If { .. } => classish_ty(ctx, ctx.expr_ty(e)),
+        // S2/P2-3b-2：lambda 创建即 +1（box；裸 fn 无 ARC，take 无害）
+        ExprKind::Lambda { .. } => true,
         _ => false,
     }
 }
@@ -398,6 +537,7 @@ fn class_ctor(ctx: &mut Ctx, e: &ExprWrap, def: DefId, args: &[CallArg]) -> Oper
         dst: obj,
         bytes: ARC_HEADER_BYTES + payload,
         deinit,
+        env_caps: None,
         ty: obj_ty,
     });
     // 主构造槽机：sig.params（头参数全量，含仅构造参数）；字段参数落
@@ -1202,6 +1342,15 @@ fn deref_read(ctx: &mut Ctx, e: &ExprWrap, target: &ExprWrap) -> Operand {
         ctx.diag(e.span, "解引结果类型破缺（sem 契约破缺）");
         return Operand::Const(Const::Unit);
     };
+    // S2/N2 审计（nullable-abi-audit.md §3.2）：解引指向可空的指针——
+    // dst 按 Cell(i64) 分类 = flag 视图（payload 槽缺失，Some 值错）
+    if matches!(ctx.sem.tys.kind(inner), TyKind::Nullable(..)) {
+        ctx.diag(
+            e.span,
+            "dereferencing a pointer to a nullable type is not supported in v1 (single-slot load drops the payload)",
+        );
+        return Operand::Const(Const::Unit);
+    }
     let ptr = match op {
         Operand::Temp(t) => t,
         Operand::Const(_) => {
@@ -1519,6 +1668,11 @@ fn call(
             }
         }
     }
+    // S2/P2-3b-3：柯里化调用——callee 是 Fn 类型的表达式（调用结果 /
+    // 括号表达式等，无 expr_def）→ 函数值间接调用
+    if def.is_none() && matches!(ctx.sem.tys.kind(ctx.expr_ty(callee)), TyKind::Fn(..)) {
+        return fn_value_call(ctx, e, callee, args);
+    }
     let Some(mut def) = def else {
         ctx.diag(e.span, "调用目标无 expr_def（sem 契约破缺）");
         return Operand::Const(Const::Unit);
@@ -1604,6 +1758,21 @@ fn call(
                 };
                 let v = lower_expr_as(ctx, default, param_tys[idx].1);
                 slots[idx] = Some(v);
+            }
+        }
+    }
+    // S2/P2-3b（修正 7）：C 回调边界——只允许裸 fn 直通（Const::Fun）；
+    // box（tagged ptr）过 extern 会把 tag 位当代码地址调用（矩阵 #16）
+    if ctx.sem.defs.get(def).external {
+        for (idx, slot) in slots.iter().enumerate() {
+            if let Some(v) = slot
+                && matches!(ctx.sem.tys.kind(param_tys[idx].1), TyKind::Fn(..))
+                && !matches!(v, Operand::Const(Const::Fun(_)))
+            {
+                ctx.diag(
+                    e.span,
+                    "captured lambda cannot cross the extern \"c\" boundary (bare fn only)",
+                );
             }
         }
     }
@@ -3756,6 +3925,12 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
                 .get(target.id)
                 .copied()
                 .unwrap_or(ctx.sem.tys.unit);
+            // S2/N2 审计（nullable-abi-audit.md §3.2）：写入指向可空的
+            // 指针——StorePtr 按 Cell(i64) 只写 flag 槽（payload 缺失）
+            if matches!(ctx.sem.tys.kind(ty), TyKind::Nullable(..)) {
+                ctx.diag(span, "write through a pointer to a nullable type is not supported in v1 (single-slot store drops the payload)");
+                return;
+            }
             ctx.emit(Instr::StorePtr { ptr, src: v, ty });
         }
         ExprKind::Member {
