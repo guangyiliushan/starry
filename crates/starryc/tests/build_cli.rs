@@ -1046,3 +1046,318 @@ fn lambda_explicit_params_and_nested_fn_value_e2e() {
     };
     assert_eq!(out, "18\n7\n");
 }
+#[test]
+fn scalar_capture_end_to_end() {
+    // P2-3b-1（矩阵 #2/#3）：标量捕获装箱（tagged box）——单/多捕获值
+    // 正确、槽序 = 源码序、裸 fn 与 box 混用同一 Fn 形参（tag 分派）
+    let Some(out) = build_and_run(
+        "scalar_capture",
+        "fun twice(f: (int) -> int, x: int): int {\n    return f(f(x))\n}\nfun apply(f: (int) -> int, x: int): int {\n    return f(x) + f(x + 1)\n}\nfun main(): int {\n    val k = 10\n    print(twice({ (n: int) -> n + k }, 1))\n    val m = 100\n    print(apply({ (n: int) -> n + k + m }, 1))\n    print(twice({ it * 3 }, 2))\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "21\n223\n18\n");
+}
+
+#[test]
+fn capture_snapshot_semantics_e2e() {
+    // P2-3b-1（矩阵 #8）：捕获 = 创建时刻快照——同一 var 在 lambda 创建
+    // 后修改不影响已捕获值；先后创建的两个 box 各持各的快照
+    let Some(out) = build_and_run(
+        "capture_snapshot",
+        "fun apply(f: (int) -> int, x: int): int {\n    return f(x) + f(x + 1)\n}\nfun main(): int {\n    var x = 1\n    print(apply({ (n: int) -> n + x }, 5))\n    x = 100\n    print(apply({ (n: int) -> n + x }, 5))\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "13\n211\n");
+}
+
+#[test]
+fn fn_value_dual_form_e2e() {
+    // P2-3b-1（矩阵 #12/#13/#14）：具名 fn / 无捕获 lambda / 有捕获
+    // lambda 三种来源经同一 Fn 形参调用（裸 fn 直调 / box tag 分派）；
+    // 具名 fn 绑定 `val g = add` 回归钉（cb6fcd5 首次实施曾把具名 fn
+    // 装箱导致参数错位）
+    let Some((out, _err, code)) = build_and_exec(
+        "fn_dual_form",
+        "fun add(a: int, b: int): int {\n    return a + b\n}\nfun apply2(f: (int, int) -> int, x: int, y: int): int {\n    return f(x, y) + 1000\n}\nfun main(): int {\n    val g = add\n    val a = apply2(g, 20, 22)\n    val b = apply2({ (x: int, y: int) -> x * y }, 3, 14)\n    return a + b\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "");
+    assert_eq!(code, 2084);
+}
+
+#[test]
+fn captured_lambda_rejected_at_extern_boundary() {
+    // P2-3b-1（矩阵 #16）：捕获 lambda（box/tagged）作 extern "c" 实参
+    // → 稳定拒收（tag 位会被 C 侧当代码地址调用）；裸 fn 直通（矩阵
+    // #15）由 extern_c_* 既有测试钉住
+    if !clang_available() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("starry_cap_ffi_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("cap_ffi.starry");
+    std::fs::write(
+        &path,
+        "extern \"c\" fun run_cb(f: () -> int) : int\nfun main() : int {\n    val k = 1\n    return unsafe { run_cb({ () -> k }) }\n}\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_starryc"))
+        .args(["build", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !out.status.success(),
+        "captured lambda must not cross the extern boundary"
+    );
+    assert!(
+        combined.contains("cannot cross the extern"),
+        "diagnostic missing: {combined}"
+    );
+}
+#[test]
+fn binding_lambda_context_end_to_end() {
+    // P2-3b-1 补切片（绑定位置 lambda 定型）：注解绑定提供期望 Fn 类型
+    //（`val f: (int) -> int = { … }`）；无注解绑定的显式参数标注驱动
+    // 推断（`val g = { (n: int) -> … }`，返回型由 body 推断）；
+    // `it` 形式无信息仍稳定拒收（sem 层）
+    let Some(out) = build_and_run(
+        "binding_lambda",
+        "fun main(): int {\n    val k = 10\n    val f: (int) -> int = { (n: int) -> n + k }\n    print(f(5))\n    val g = { (n: int) -> n * 2 }\n    print(g(21))\n    val h: () -> int = { () -> k + 1 }\n    print(h())\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "15\n42\n11\n");
+}
+#[test]
+fn class_capture_deinit_balance_e2e() {
+    // P2-3b-2（矩阵 #4/#11）：class 捕获 retain +1 + box meta（env 释放
+    // 函数）逐捕获 release——deinit 恰好一次。逃逸返回（box +1 转移）与
+    // 直接捕获两条路径都平衡；Fn 绑定 scope 出口释放 box（tag 分派）
+    let Some(out) = build_and_run(
+        "class_capture",
+        "class P(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun callit(f: () -> int): int {\n    return f()\n}\nfun makef(p: P): () -> int {\n    return { () -> p.x }\n}\nfun main(): int {\n    val a = P(1)\n    val f = makef(a)\n    print(callit(f))\n    val b = P(2)\n    val g = { () -> b.x }\n    print(g())\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "1\n2\n2\n1\n");
+}
+#[test]
+fn nested_lambda_capture_e2e() {
+    // P2-3b-3（矩阵 #6）：lambda 捕获外层 fn 形参并逃逸返回；外层局部
+    // 捕获（wrap）同批对拍
+    let Some(out) = build_and_run(
+        "nested_capture",
+        "fun mkadd(a: int): (int) -> int {\n    return { (b: int) -> a + b }\n}\nfun main(): int {\n    val inner = mkadd(1)\n    print(inner(2))\n    val outer = 100\n    val wrap = { (x: int) -> x + outer }\n    print(wrap(5))\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "3\n105\n");
+}
+
+#[test]
+fn self_capture_method_lambda_e2e() {
+    // P2-3b-3（self 捕获）：方法内 lambda 捕获 self（class +1）——box
+    // meta 释放归还，deinit 恰好一次
+    let Some(out) = build_and_run(
+        "self_capture",
+        "class C(val v: int) {\n    deinit {\n        print(self.v)\n    }\n    fun adder(): () -> int {\n        return { () -> self.v }\n    }\n}\nfun main(): int {\n    val c = C(7)\n    val f = c.adder()\n    print(f())\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "7\n7\n");
+}
+
+#[test]
+fn fn_struct_field_rejected() {
+    // P2-3b-3（矩阵 #5 拒绝面，修正 3）：Fn 字段 v1 稳定拒收（聚合拷贝
+    // 无字段级 ARC）——主构造头字段与 body 字段两条声明路径
+    if !clang_available() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("starry_fnfield_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("fnfield.starry");
+    std::fs::write(
+        &path,
+        "struct Store(val f: (int) -> int)\nfun main(): int {\n    val s = Store({ (n: int) -> n })\n    return 0\n}\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_starryc"))
+        .args(["build", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!out.status.success(), "Fn struct field must be rejected");
+    assert!(
+        combined.contains("Fn struct fields"),
+        "diag missing: {combined}"
+    );
+}
+#[test]
+fn class_in_aggregate_rejected() {
+    // S2/N2：class 值不进聚合容器（v1 无字段级 ARC——裸指针拷贝 + 源
+    // binding 出口 release = UAF）→ 三路稳定拒收：struct 字段 / tuple
+    // 元素 / array 元素
+    if !clang_available() {
+        return;
+    }
+    let cases: [(&str, &str); 3] = [
+        (
+            "struct_field",
+            "struct S(val c: C)\nclass C(val x: int)\nfun main(): int {\n    val c = C(7)\n    val s = S(c)\n    return 0\n}\n",
+        ),
+        (
+            "tuple_elem",
+            "fun main(): int {\n    val c = C(7)\n    val t = (c, 1)\n    return 0\n}\nclass C(val x: int)\n",
+        ),
+        (
+            "array_elem",
+            "fun main(): int {\n    val c = C(7)\n    val a = [c]\n    return 0\n}\nclass C(val x: int)\n",
+        ),
+    ];
+    for (name, src) in cases {
+        let dir = std::env::temp_dir().join(format!("starry_n2_{}_{}", std::process::id(), name));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.starry"));
+        std::fs::write(&path, src).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_starryc"))
+            .args(["build", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            !out.status.success(),
+            "{name}: class in aggregate must be rejected"
+        );
+        assert!(
+            combined.contains("not supported in v1"),
+            "{name}: diag missing: {combined}"
+        );
+    }
+}
+#[test]
+fn fn_var_reassign_arc_e2e() {
+    // P2-3b-2 收尾：Fn var 重赋值 = release 旧 box + retain/转移新值
+    //（tag 分派）；class 捕获的 meta 释放照常平衡（deinit 一次）
+    let Some(out) = build_and_run(
+        "fn_reassign",
+        "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun main(): int {\n    val k = 10\n    var f: () -> int = { () -> k }\n    print(f())\n    val c = C(7)\n    f = { () -> c.x }\n    print(f())\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "10\n7\n7\n");
+}
+#[test]
+fn nested_lambda_literal_and_curried_call_e2e() {
+    // P2-3b-3（矩阵 #6 完整形式）：lambda 字面嵌套（`-> { (b: int) -> … }`）
+    // 解析（body 位 `{` 消歧）+ 柯里化调用 `mk(1)(2)`（调用结果的 Fn 值
+    // 间接调用链）；捕获外层参数 a 与全局层级 outer 逐层正确
+    let Some(out) = build_and_run(
+        "nested_lambda_curry",
+        "fun main(): int {\n    val mk = { (a: int) -> { (b: int) -> a + b } }\n    print(mk(1)(2))\n    val nested: (int) -> (int) -> int = { (a: int) -> { (b: int) -> a * b + 1 } }\n    print(nested(2)(3))\n    val inner = mk(10)\n    print(inner(5))\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "3\n7\n15\n");
+}
+#[test]
+fn i128_capture_e2e() {
+    // S2/P2-3b-3（i128 捕获）：2 槽 WideCell 标量经多槽 env 装载/回存，
+    // i128 全精度算术在捕获后保持（big + 1 精确进位到高位）
+    let Some(out) = build_and_run(
+        "i128_capture",
+        "fun main(): int {\n    val big: i128 = 123456789012345678\n    val f = { () -> big + 1 }\n    print(f())\n    val g = { () -> big * 2 }\n    print(g())\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "123456789012345679\n246913578024691356\n");
+}
+#[test]
+fn nullable_scalar_global_rejected() {
+    // S2/N2 审计（nullable-abi-audit.md §3.1）：顶层标量可空全局——
+    // 全局存储 scalar_ty = "i64" 单槽，可空 2 槽（flag+payload）丢 payload
+    // → 稳定拒收（与 aggregate top-level global 同门）
+    if !clang_available() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("starry_nullglobal_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("nullglobal.starry");
+    std::fs::write(
+        &path,
+        "val x: int? = 5\nfun main(): int {\n    return 0\n}\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_starryc"))
+        .args(["build", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !out.status.success(),
+        "top-level nullable scalar global must be rejected"
+    );
+    assert!(
+        combined.contains("not lowered") || combined.contains("aggregate top-level"),
+        "diag missing: {combined}"
+    );
+}
+
+#[test]
+fn pointer_to_nullable_deref_rejected() {
+    // S2/N2 审计（nullable-abi-audit.md §3.2）：解引指向可空的指针——
+    // LoadPtr dst 按 Cell(i64) = flag 视图（payload 槽缺失）→ 稳定拒收
+    if !clang_available() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("starry_ptrderef_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("ptrderef.starry");
+    std::fs::write(
+        &path,
+        "fun main(): int {\n    val p: *const int? = null\n    val x = *p\n    return 0\n}\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_starryc"))
+        .args(["build", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !out.status.success(),
+        "pointer-to-nullable deref must be rejected"
+    );
+    assert!(
+        combined.contains("not supported in v1"),
+        "diag missing: {combined}"
+    );
+}

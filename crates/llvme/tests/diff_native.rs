@@ -141,6 +141,14 @@ const CASES: &[&str] = &[
     "enum Opt { None, Some(int) }\nfun main() {\n    val o = Opt.Some(11)\n    if o is Opt.Some(v) {\n        print(v)\n    }\n    if val Opt.Some(w) = o {\n        print(w + 1)\n    }\n    val ps: [(int, int); 2] = [(1, 2), (3, 4)]\n    for (x, y) in ps { print(x + y) }\n}",
     // 复合赋值 + 聚合实参快照（var 实参在调用内不改写外部）
     "struct P { x: int }\nfun bump(p: P) : int {\n    return p.x + 1\n}\nfun main() {\n    var s = 1\n    s += 4\n    s *= 3\n    print(s)\n    val p = P(5)\n    print(bump(p))\n    print(p.x)\n}",
+    // S2/P2-3b：闭包——标量捕获 box + 裸 fn 混用（tag 分派两侧对拍）
+    "fun twice(f: (int) -> int, x: int): int {\n    return f(f(x))\n}\nfun apply(f: (int) -> int, x: int): int {\n    return f(x) + f(x + 1)\n}\nfun main(): int {\n    val k = 10\n    print(twice({ (n: int) -> n + k }, 1))\n    val m = 100\n    print(apply({ (n: int) -> n + k + m }, 1))\n    print(twice({ it * 3 }, 2))\n    print(twice({ (n: int) -> n * 3 }, 2))\n    return 0\n}",
+    // 闭包——绑定位置 lambda（注解 / 参数标注推断）+ 零参捕获
+    "fun main(): int {\n    val k = 10\n    val f: (int) -> int = { (n: int) -> n + k }\n    print(f(5))\n    val g = { (n: int) -> n * 2 }\n    print(g(21))\n    val h: () -> int = { () -> k + 1 }\n    print(h())\n    return 0\n}",
+    // 闭包——捕获外层 fn 形参并逃逸返回（矩阵 #6）+ 捕获外层局部
+    "fun mkadd(a: int): (int) -> int {\n    return { (b: int) -> a + b }\n}\nfun main(): int {\n    val inner = mkadd(1)\n    print(inner(2))\n    val outer = 100\n    val wrap = { (x: int) -> x + outer }\n    print(wrap(5))\n    return 0\n}",
+    // 闭包——快照语义（矩阵 #8）：捕获后外层修改不影响已捕获值
+    "fun apply(f: (int) -> int, x: int): int {\n    return f(x) + f(x + 1)\n}\nfun main(): int {\n    var x = 1\n    print(apply({ (n: int) -> n + x }, 5))\n    x = 100\n    print(apply({ (n: int) -> n + x }, 5))\n    return 0\n}",
 ];
 
 /// M1.5（D2/D4 conformance）：trap 程序两侧必须一致——interp Trap 且 native
