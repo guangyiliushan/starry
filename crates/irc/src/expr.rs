@@ -1443,13 +1443,10 @@ pub(crate) fn coerce(ctx: &mut Ctx, op: Operand, from: TyId, to: TyId) -> Operan
     if let TyKind::Nullable(inner) = ctx.sem.tys.kind(to).clone()
         && !matches!(ctx.sem.tys.kind(from), TyKind::Nullable(_))
     {
-        // M4 slice 4b (Plan C): on class materialization the old +1
-        // temp transfers ownership; the new base is the +1 carrier
-        // (consumers take it, otherwise it releases at statement end)
+        // M4 slice 4b (Plan C): transfer an old +1 temp; a borrowed class
+        // must retain its payload so every release stays paired.
         let classish = classish_ty(ctx, inner);
-        if classish {
-            let _ = ctx.take_stmt_temp(&op);
-        }
+        let transferred = classish && ctx.take_stmt_temp(&op);
         let base = ctx.temp();
         ctx.emit(Instr::Store {
             base,
@@ -1476,6 +1473,9 @@ pub(crate) fn coerce(ctx: &mut Ctx, op: Operand, from: TyId, to: TyId) -> Operan
             });
         }
         if classish {
+            if !transferred {
+                ctx.emit_class_retain(Place::Temp(base), to);
+            }
             ctx.note_stmt_temp(base, to);
         }
         return Operand::Temp(base);
