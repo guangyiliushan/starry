@@ -971,9 +971,19 @@ fn enum_arc_payload_unsafe(st: &SemState, ty: TyId) -> bool {
     walk(st, ty, &mut std::collections::HashSet::new())
 }
 
-/// Struct/tuple/array copies now use type-directed field ARC. Enum payload
-/// copies still need tag-aware traversal, so only that surface stays gated.
+/// Tuple/array ownership transfer still has unsafe return/break/repeat
+/// escape paths; keep ARC-bearing elements stably rejected until those CFG
+/// paths transfer ownership correctly.
 fn agg_element_unsafe(st: &SemState, ty: TyId) -> bool {
+    if crate::declare::is_class_ty(st, ty) || matches!(st.tys.kind(ty), TyKind::Fn(..)) {
+        return true;
+    }
+    if matches!(
+        st.tys.kind(ty),
+        TyKind::Nullable(inner) if crate::declare::is_class_ty(st, *inner)
+    ) {
+        return true;
+    }
     enum_arc_payload_unsafe(st, ty)
 }
 

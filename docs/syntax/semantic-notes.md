@@ -442,7 +442,7 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   稳定拒收（主构造头字段 + body 字段两路，矩阵 #5 拒绝面）；4 个
   闭包用例入选 diff_native（interp 注册表 vs native tag 位逐行对拍，
   含绑定位置推断与快照语义）。
-- **字段级 ARC（2026-11-18 已落地 tuple/array 直接元素）**：tuple/array 字面量与 array repeat 的 class、可空 class、Fn 元素经 `emit_copy_value`/`emit_drop_value` 递归 retain/release；owned +1 值 transfer，borrowed 值 retain；scope/return/break 使用统一 drop 栈。struct ARC 字段与 enum ARC payload 仍稳定拒收：前者需要完整字段 ownership ledger，后者需要 tag-aware traversal（`agg_element_unsafe` 只拦截含 ARC payload 的 enum）。e2e 覆盖 tuple/array class deinit 平衡。
+- **字段级 ARC traversal（2026-11-18 仍稳定拒收 ARC-bearing aggregate slots）**：`emit_copy_value`/`emit_drop_value` 已建立 type-directed 递归 retain/release，但 return/break/repeat 的 ownership transfer 尚未完整；为避免 UAF，tuple/array 直接元素的 class、可空 class、Fn、ARC enum payload 继续由 `agg_element_unsafe` 稳定拒收。后续必须补齐 CFG escape ownership transfer 和 array-repeat per-element lowering 后再开启。
 - **Fn var 重赋值（已落地，2026-11-11）**：lower_assignment 的
   classish 门扩展到 Fn——release 旧 box / retain 或转移新值（tag 分派，
   裸 fn no-op）；e2e `fn_var_reassign_arc_e2e`（deinit 平衡）。

@@ -34,7 +34,7 @@ Rules:
   and dependency edges in memory.
 - Dependency traversal is deterministic and dependency-first. Ordered containers
   make source-tree read order irrelevant.
-- Source files are collected per package in graph postorder and then sorted by
+  Source roots are traversed without following symlinks. Source files are collected per package in graph postorder and then sorted by
   path. v1 still lowers those files into one merged source set, but every merged
   unit records its owning `PackageId`, and that ownership is checked against the
   package's canonical root.

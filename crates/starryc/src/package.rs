@@ -558,9 +558,10 @@ impl GraphBuilder {
         manifest: Option<Manifest>,
     ) -> Result<PackageId, PackageGraphError> {
         if self.depth >= 128 {
-            let mut path = self.path.clone();
-            path.push(expected_name.to_string());
-            return Err(PackageGraphError::DependencyCycle { path });
+            return Err(PackageGraphError::Io {
+                path: root.to_path_buf(),
+                message: format!("dependency graph exceeds maximum depth 128 at `{expected_name}`",),
+            });
         }
         let canonical = canonical_root(root)?;
         if self.loading.contains(expected_name) {
@@ -591,12 +592,6 @@ impl GraphBuilder {
         };
         let manifest_deps = manifest.dependencies;
         let manifest = manifest.package;
-        eprintln!(
-            "load expected={} parsed={:?} id_len={}",
-            expected_name,
-            manifest.name,
-            self.packages.len()
-        );
         if manifest.name != expected_name {
             return Err(PackageGraphError::DependencyNameMismatch {
                 dependency: expected_name.to_string(),
@@ -628,6 +623,12 @@ impl GraphBuilder {
         self.depth += 1;
         let mut dependencies = Vec::new();
         for spec in &manifest_deps {
+            if Path::new(&spec.path).is_absolute() {
+                return Err(PackageGraphError::Io {
+                    path: canonical,
+                    message: format!("dependency path must be relative: {}", spec.path),
+                });
+            }
             let target = canonical.join(&spec.path);
             self.load(&target, &spec.key, Some(&spec.version), None)?;
             dependencies.push(spec.clone());

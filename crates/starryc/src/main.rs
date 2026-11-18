@@ -462,7 +462,17 @@ fn collect_starry(
 ) -> Result<(), String> {
     let entries =
         std::fs::read_dir(dir).map_err(|e| format!("无法读取源目录 {}: {e}", dir.display()))?;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("无法读取源目录 {}: {e}", dir.display()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("无法读取 {} 的文件类型: {e}", entry.path().display()))?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "symlinked package source entry is not allowed: {}",
+                entry.path().display()
+            ));
+        }
         let p = entry.path();
         if p.is_dir() {
             collect_starry(&p, src_root, out, owner)?;

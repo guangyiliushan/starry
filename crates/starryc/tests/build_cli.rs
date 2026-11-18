@@ -1218,25 +1218,43 @@ fn fn_struct_field_rejected() {
     );
 }
 #[test]
-fn class_aggregate_arc_e2e() {
-    // Tuple/array element copies now retain/release class leaves.
-    let cases: [(&str, &str, &str); 2] = [
+fn class_aggregate_arc_is_stably_rejected() {
+    // Return/break/repeat ownership transfer is not complete yet; tuple/array
+    // ARC-bearing elements remain rejected instead of shipping UAF paths.
+    let cases: [(&str, &str); 2] = [
         (
             "tuple_elem",
-            "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun main(): int {\n    val c = C(7)\n    val t = (c, 1)\n    print(t[0].x)\n    return 0\n}\n",
-            "7\n7\n",
+            "class C(val x: int)\nfun main(): int {\n    val c = C(7)\n    val t = (c, 1)\n    return 0\n}\n",
         ),
         (
             "array_elem",
-            "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun main(): int {\n    val c = C(7)\n    val a = [c]\n    print(a[0].x)\n    return 0\n}\n",
-            "7\n7\n",
+            "class C(val x: int)\nfun main(): int {\n    val c = C(7)\n    val a = [c]\n    return 0\n}\n",
         ),
     ];
-    for (name, src, expected) in cases {
-        let Some(out) = build_and_run(name, src) else {
-            return;
-        };
-        assert_eq!(out, expected, "{name}");
+    for (name, src) in cases {
+        let dir =
+            std::env::temp_dir().join(format!("starry_arc_gate_{}_{}", std::process::id(), name));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.starry"));
+        std::fs::write(&path, src).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_starryc"))
+            .args(["build", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            !out.status.success(),
+            "{name}: ARC aggregate must be rejected"
+        );
+        assert!(
+            combined.contains("not supported in v1"),
+            "{name}: diag missing: {combined}"
+        );
     }
 }
 #[test]
