@@ -64,6 +64,9 @@ pub(crate) struct LoopCtx {
     pub break_b: BlockId,
     pub cont_b: BlockId,
     pub defer_depth: usize,
+    /// class_drops stack depth at loop entry; break/continue releases only
+    /// locals registered above this depth.
+    pub drop_depth: usize,
     /// loop 表达式的共享结果槽（带值 break 写入；语句循环为 None）
     pub value_slot: Option<TempId>,
     pub value_ty: TyId,
@@ -112,7 +115,7 @@ pub(crate) struct Ctx<'r, 'a> {
     defers: Vec<Vec<crate::syntax_reexport::Block>>,
     /// M4 slice 1：class 局部绑定的隐式 drop 队列（与 defers 栈同深同生命周期）。
     /// 块出口 / return / break 与 defer 同纪律逆序 release。
-    class_drops: Vec<Vec<(Place, TyId, bool)>>,
+    pub(crate) class_drops: Vec<Vec<(Place, TyId, bool)>>,
     /// M4 slice 4b (Plan C): +1 class temporaries within a statement
     /// (ctor/call returns/weak upgrade/?? and if class joins).
     /// Bindings/returns/assignments take (transfer); the rest release
@@ -848,7 +851,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
         self.emit_defers(&pending.iter().rev().cloned().collect::<Vec<_>>());
         let drops = self.class_drops.pop().unwrap_or_default();
         for (place, ty, weak) in drops.iter().rev() {
-            self.emit_class_release(*place, *ty, *weak);
+            self.emit_drop_value(*place, *ty, *weak);
         }
         self.env.pop();
         tail
@@ -886,6 +889,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 }
                 self.drain_stmt_temps();
                 self.emit_defers_above(0);
+                self.emit_class_drops_above(0);
                 self.terminate(Term::Ret {
                     value: op,
                     ty: self.fun.ret,
@@ -985,7 +989,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
         // M4 slice 4b (Plan C): +1-origin inits (call/??/if/null) and
         // registered +1 temps (weak upgrade) transfer to the binding
         // (take => skip the retain arms); borrowed inits retain below.
-        let taken = if class_binding {
+        let taken = if class_binding || crate::layout::is_aggregate(self, to) {
             self.take_stmt_temp(&op)
         } else {
             false
@@ -995,20 +999,49 @@ impl<'r, 'a> Ctx<'r, 'a> {
         let is_null_init = matches!(&init.kind, ast::syntax::expr::ExprKind::Null);
         if b.immutable {
             if crate::layout::is_aggregate(self, to) {
-                // 聚合：不可变 → 别名构造基址（无重赋值，零拷贝安全）
-                if let Operand::Temp(t) = op {
-                    if nullable_class {
-                        if !is_ctor && !is_null_init {
-                            self.emit_class_retain(Place::Temp(t), to);
-                        }
+                if weak_binding {
+                    if let Operand::Temp(t) = op {
+                        self.env_top().insert(*name, (Place::Temp(t), to));
                         self.class_drops
                             .last_mut()
                             .expect("class drop stack in sync with defers")
-                            .push((Place::Temp(t), to, false));
+                            .push((Place::Temp(t), to, true));
                     }
+                    return;
+                }
+                if !expr::contains_arc(self, to)
+                    && let Operand::Temp(t) = op
+                {
                     self.env_top().insert(*name, (Place::Temp(t), to));
                     return;
                 }
+                if taken && let Operand::Temp(t) = op {
+                    self.env_top().insert(*name, (Place::Temp(t), to));
+                    self.class_drops
+                        .last_mut()
+                        .expect("class drop stack in sync with defers")
+                        .push((Place::Temp(t), to, false));
+                    return;
+                }
+                let copied = expr::emit_copy_value(
+                    self,
+                    op,
+                    to,
+                    expr::CopyOwnership::Borrowed,
+                    b.pattern.span,
+                );
+                let Operand::Temp(t) = copied else {
+                    self.diag(b.pattern.span, "aggregate copy did not materialize a base");
+                    return;
+                };
+                self.env_top().insert(*name, (Place::Temp(t), to));
+                if expr::contains_arc(self, to) {
+                    self.class_drops
+                        .last_mut()
+                        .expect("class drop stack in sync with defers")
+                        .push((Place::Temp(t), to, false));
+                }
+                return;
             }
             let t = self.temp();
             if crate::layout::is_aggregate(self, to) {
@@ -1040,6 +1073,31 @@ impl<'r, 'a> Ctx<'r, 'a> {
             }
         } else {
             let slot = self.temp();
+            if crate::layout::is_aggregate(self, to)
+                && expr::contains_arc(self, to)
+                && !weak_binding
+            {
+                if taken {
+                    expr::copy_slots(self, (slot, 0), (op.clone(), 0), to, to, b.pattern.span);
+                } else {
+                    let staged = expr::emit_copy_value(
+                        self,
+                        op.clone(),
+                        to,
+                        expr::CopyOwnership::Borrowed,
+                        b.pattern.span,
+                    );
+                    expr::copy_slots(self, (slot, 0), (staged, 0), to, to, b.pattern.span);
+                }
+                self.env_top().insert(*name, (Place::Slot(slot), to));
+                if expr::contains_arc(self, to) {
+                    self.class_drops
+                        .last_mut()
+                        .expect("class drop stack in sync with defers")
+                        .push((Place::Slot(slot), to, false));
+                }
+                return;
+            }
             if crate::layout::is_aggregate(self, to) {
                 expr::copy_slots(self, (slot, 0), (op.clone(), 0), to, to, b.pattern.span);
             } else {
@@ -1114,6 +1172,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             // retain 新值按 tag 位分派；裸 fn no-op）
             let fn_asg = matches!(self.sem.tys.kind(to), TyKind::Fn(..));
             let classish = crate::layout::is_class(self, to) || nullable_class || fn_asg;
+            #[allow(unused_variables)]
             let self_assign = match (&target.kind, &value.kind) {
                 (
                     ast::syntax::expr::ExprKind::Ident(tn),
@@ -1121,33 +1180,85 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 ) => tn == vn,
                 _ => false,
             };
-            if classish && !self_assign {
-                let slot_only = matches!(&target.kind, ast::syntax::expr::ExprKind::Ident(name)
-                    if matches!(self.lookup(*name), Some((Place::Slot(_), _))));
-                if slot_only {
-                    let place = match &target.kind {
-                        ast::syntax::expr::ExprKind::Ident(name) => match self.lookup(*name) {
-                            Some((pl, _)) => pl,
-                            None => {
-                                self.diag(target.span, "赋值目标不在环境（sem 契约破缺）");
-                                return;
-                            }
-                        },
-                        _ => unreachable!("slot_only 已限定 Ident"),
+            let aggregate_arc = crate::layout::is_aggregate(self, to)
+                && expr::contains_arc(self, to)
+                && !self.weak_target(target);
+            if (classish || aggregate_arc)
+                && matches!(&target.kind, ast::syntax::expr::ExprKind::Ident(name)
+                    if matches!(self.lookup(*name), Some((Place::Slot(_), _))))
+            {
+                let place = match &target.kind {
+                    ast::syntax::expr::ExprKind::Ident(name) => match self.lookup(*name) {
+                        Some((pl, _)) => pl,
+                        None => {
+                            self.diag(target.span, "赋值目标不在环境（sem 契约破缺）");
+                            return;
+                        }
+                    },
+                    _ => unreachable!("slot target narrowed above"),
+                };
+                let ownership = if self.take_stmt_temp(&v) || expr::plus1_origin(self, value) {
+                    expr::CopyOwnership::Owned
+                } else {
+                    expr::CopyOwnership::Borrowed
+                };
+                if aggregate_arc {
+                    let staged = match expr::emit_copy_value(self, v, to, ownership, target.span) {
+                        Operand::Temp(t) => t,
+                        _ => {
+                            self.diag(
+                                target.span,
+                                "aggregate staged value did not materialize a base",
+                            );
+                            return;
+                        }
                     };
-                    // 旧值 release（null 载荷为 runtime no-op）
-                    self.emit_class_release(place, to, false);
-                    let rhs_plus1 = crate::expr::plus1_origin(self, value);
-                    if rhs_plus1 {
-                        // M4 slice 4b (Plan C): +1 temp transfers into the var
-                        let _ = self.take_stmt_temp(&v);
-                    }
-                    expr::assign_to(self, target, v, target.span);
-                    if !rhs_plus1 {
-                        self.emit_class_retain(place, to);
-                    }
+                    let old = expr::read_place(self, place, to, target.span);
+                    let old_base = match old {
+                        Operand::Temp(t) => t,
+                        _ => {
+                            self.diag(
+                                target.span,
+                                "aggregate old value did not materialize a base",
+                            );
+                            return;
+                        }
+                    };
+                    expr::copy_slots(
+                        self,
+                        (
+                            match place {
+                                Place::Slot(s) => s,
+                                _ => unreachable!("slot narrowed above"),
+                            },
+                            0,
+                        ),
+                        (Operand::Temp(staged), 0),
+                        to,
+                        to,
+                        target.span,
+                    );
+                    self.emit_drop_value(Place::Temp(old_base), to, false);
                     return;
                 }
+                if ownership == expr::CopyOwnership::Borrowed {
+                    self.retain_arc_operand_public(v.clone(), to);
+                }
+                let old = if nullable_class {
+                    let agg = expr::read_place(self, place, to, target.span);
+                    let Operand::Temp(base) = agg else {
+                        self.diag(target.span, "nullable old value did not materialize a base");
+                        return;
+                    };
+                    self.class_ptr_operand(Place::Temp(base), to)
+                } else {
+                    Some((expr::read_place(self, place, to, target.span), to))
+                };
+                expr::assign_to(self, target, v, target.span);
+                if let Some((old, ty)) = old {
+                    self.emit_operand_release(old, ty, false);
+                }
+                return;
             }
             expr::assign_to(self, target, v, target.span);
             return;
@@ -1170,6 +1281,12 @@ impl<'r, 'a> Ctx<'r, 'a> {
             ty: to,
         });
         expr::assign_to(self, target, Operand::Temp(r), target.span);
+    }
+
+    /// Weak reassignment is rejected in sem; aggregate ARC assignment
+    /// therefore only reaches strong storage.
+    fn weak_target(&self, _target: &ast::syntax::expr::ExprWrap) -> bool {
+        false
     }
 
     /// 赋值目标的值类型（Ident 走环境绑定类型；成员/索引走 expr_ty）
@@ -1204,6 +1321,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             break_b: merge_b,
             cont_b: cond_b,
             defer_depth: self.defers.len(),
+            drop_depth: self.class_drops.len(),
             value_slot: None,
             value_ty: self.sem.tys.unit,
         });
@@ -1228,6 +1346,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             break_b: merge_b,
             cont_b: body_b,
             defer_depth: self.defers.len(),
+            drop_depth: self.class_drops.len(),
             value_slot: None,
             value_ty: self.sem.tys.unit,
         });
@@ -1261,12 +1380,13 @@ impl<'r, 'a> Ctx<'r, 'a> {
                         expr::FlowTarget::Continue => l.cont_b,
                     },
                     l.defer_depth,
+                    l.drop_depth,
                     l.value_slot,
                     l.value_ty,
                 )
             });
         match target {
-            Some((b, depth, value_slot, value_ty)) => {
+            Some((b, depth, drop_depth, value_slot, value_ty)) => {
                 // break 值与 return 值同纪律：先求值并写入循环结果槽，再跑 defer。
                 if let Some(v) = value {
                     let op = expr::lower_expr(self, v);
@@ -1285,6 +1405,14 @@ impl<'r, 'a> Ctx<'r, 'a> {
                     }
                 }
                 // 循环出口：只发射循环内注册的 defer（内→外），外层归各自出口
+                let mut depth_now = self.class_drops.len();
+                while depth_now > drop_depth {
+                    depth_now -= 1;
+                    let drops = std::mem::take(&mut self.class_drops[depth_now]);
+                    for (place, ty, weak) in drops.iter().rev() {
+                        self.emit_drop_value(*place, *ty, *weak);
+                    }
+                }
                 self.emit_defers_above(depth);
                 self.terminate(Term::Jmp(b));
             }
@@ -1310,6 +1438,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             break_b: merge_b,
             cont_b: body_b,
             defer_depth: self.defers.len(),
+            drop_depth: self.class_drops.len(),
             value_slot: Some(result_slot),
             value_ty: result_ty,
         });
@@ -1417,6 +1546,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             // continue → step（先自增再判条件；直跳 cond 会跳过自增死循环）
             cont_b: step_b,
             defer_depth: self.defers.len(),
+            drop_depth: self.class_drops.len(),
             value_slot: None,
             value_ty: self.sem.tys.unit,
         });
@@ -1565,6 +1695,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             break_b: merge_b,
             cont_b: step_b,
             defer_depth: self.defers.len(),
+            drop_depth: self.class_drops.len(),
             value_slot: None,
             value_ty: self.sem.tys.unit,
         });
@@ -1691,6 +1822,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             break_b: merge_b,
             cont_b: step_b,
             defer_depth: self.defers.len(),
+            drop_depth: self.class_drops.len(),
             value_slot: None,
             value_ty: self.sem.tys.unit,
         });
@@ -1766,7 +1898,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
         for q in (depth..self.class_drops.len()).rev() {
             let drops: Vec<(Place, TyId, bool)> = self.class_drops[q].drain(..).rev().collect();
             for (place, ty, weak) in drops {
-                self.emit_class_release(place, ty, weak);
+                self.emit_drop_value(place, ty, weak);
             }
         }
     }
@@ -1822,7 +1954,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
     pub(crate) fn drain_stmt_temps(&mut self) {
         let pending: Vec<(TempId, TyId)> = self.stmt_temps.drain(..).collect();
         for (t, ty) in pending {
-            self.emit_class_release(Place::Temp(t), ty, false);
+            self.emit_drop_value(Place::Temp(t), ty, false);
         }
     }
 
@@ -1844,6 +1976,69 @@ impl<'r, 'a> Ctx<'r, 'a> {
         }
     }
 
+    /// Type-directed scope drop. Aggregates recurse in reverse layout order;
+    /// fixed arrays therefore release elements in reverse construction order.
+    pub(crate) fn emit_class_drops_above(&mut self, depth: usize) {
+        for scope in (depth..self.class_drops.len()).rev() {
+            let drops = std::mem::take(&mut self.class_drops[scope]);
+            for (place, ty, weak) in drops.iter().rev() {
+                self.emit_drop_value(*place, *ty, *weak);
+            }
+        }
+    }
+
+    pub(crate) fn emit_drop_value(&mut self, place: Place, ty: TyId, weak: bool) {
+        let base = match place {
+            Place::Temp(t) | Place::Slot(t) => t,
+            Place::Global(_) => return,
+        };
+        self.emit_drop_slots(base, 0, ty, weak);
+    }
+
+    fn emit_drop_slots(&mut self, base: TempId, off: usize, ty: TyId, weak: bool) {
+        match self.sem.tys.kind(ty) {
+            TyKind::Nullable(inner) => {
+                let payload = *inner;
+                let op = crate::expr::load_slot(self, base, off + 1, payload);
+                self.emit_operand_release(op, payload, weak);
+            }
+            TyKind::Named(def, _) if matches!(self.sem.defs.get(*def).kind, DefKind::Struct) => {
+                let fields = self.sem.defs.get(*def).sig.fields.clone();
+                for (index, (_, fty)) in fields.iter().enumerate().rev() {
+                    let foff = off + crate::layout::field_slot(self, *def, index);
+                    self.emit_drop_slots(base, foff, *fty, false);
+                }
+            }
+            TyKind::Tuple(elems) => {
+                let elems = elems.clone();
+                let mut offs = Vec::with_capacity(elems.len());
+                let mut cursor = off;
+                for ety in &elems {
+                    offs.push((cursor, *ety));
+                    cursor += crate::layout::scalar_slots(self, *ety);
+                }
+                for (foff, fty) in offs.into_iter().rev() {
+                    self.emit_drop_slots(base, foff, fty, false);
+                }
+            }
+            TyKind::Array(elem, len) => {
+                let elem = *elem;
+                let es = crate::layout::scalar_slots(self, elem).max(1);
+                for i in (0..*len as usize).rev() {
+                    self.emit_drop_slots(base, off + i * es, elem, false);
+                }
+            }
+            _ => {
+                if crate::layout::is_class(self, ty)
+                    || matches!(self.sem.tys.kind(ty), TyKind::Fn(..))
+                {
+                    let op = crate::expr::load_slot(self, base, off, ty);
+                    self.emit_operand_release(op, ty, weak);
+                }
+            }
+        }
+    }
+
     /// M4 slice 4a: retain class 值；nullable class 经 class_ptr_operand 取 payload
     pub(crate) fn emit_class_retain(&mut self, place: Place, ty: TyId) {
         let Some((op, pty)) = self.class_ptr_operand(place, ty) else {
@@ -1857,13 +2052,17 @@ impl<'r, 'a> Ctx<'r, 'a> {
         });
     }
 
-    fn emit_class_release(&mut self, place: Place, ty: TyId, weak: bool) {
-        let Some((op, pty)) = self.class_ptr_operand(place, ty) else {
-            return;
-        };
-        // Param ty must be the payload (class) ty: the payload temp is a
-        // scalar ptr; passing outer ?P (agg) releases the cell address
-        self.emit(Instr::Param { a: op, ty: pty });
+    pub(crate) fn retain_arc_operand_public(&mut self, op: Operand, ty: TyId) {
+        self.emit(Instr::Param { a: op, ty });
+        self.emit(Instr::Call {
+            dst: None,
+            callee: Callee::Runtime(crate::tac::RuntimeFn::Retain),
+            ty: self.sem.tys.unit,
+        });
+    }
+
+    pub(crate) fn emit_operand_release(&mut self, op: Operand, ty: TyId, weak: bool) {
+        self.emit(Instr::Param { a: op, ty });
         let rt = if weak {
             crate::tac::RuntimeFn::WeakDrop
         } else {

@@ -933,18 +933,48 @@ fn require_bool(ty: TyId, span: Span, st: &mut SemState) {
     }
 }
 
-/// S2/N2：聚合容器（tuple/array 字面量）中的非拥有安全元素判定——
-/// class / 可空 class / Fn 的拷贝无字段级 ARC（裸指针拷贝 + 源 binding
-/// 出口 release = UAF）→ v1 稳定拒收。
+/// Enum payload layout is tag-switched but not yet ARC-safe; reject only
+/// enum types whose active payload may contain class/Fn storage.
+fn enum_arc_payload_unsafe(st: &SemState, ty: TyId) -> bool {
+    fn walk(st: &SemState, ty: TyId, seen: &mut std::collections::HashSet<DefId>) -> bool {
+        match st.tys.kind(ty) {
+            TyKind::Named(def, _) => match st.defs.get(*def).kind {
+                DefKind::Enum => {
+                    if !seen.insert(*def) {
+                        return false;
+                    }
+                    st.defs
+                        .get(*def)
+                        .sig
+                        .variants
+                        .iter()
+                        .any(|(_, params)| params.iter().any(|(_, t)| walk(st, *t, seen)))
+                }
+                DefKind::Struct => {
+                    if !seen.insert(*def) {
+                        return false;
+                    }
+                    st.defs
+                        .get(*def)
+                        .sig
+                        .fields
+                        .iter()
+                        .any(|(_, t)| walk(st, *t, seen))
+                }
+                _ => false,
+            },
+            TyKind::Array(elem, _) | TyKind::Nullable(elem) => walk(st, *elem, seen),
+            TyKind::Tuple(elems) => elems.iter().any(|e| walk(st, *e, seen)),
+            _ => false,
+        }
+    }
+    walk(st, ty, &mut std::collections::HashSet::new())
+}
+
+/// Struct/tuple/array copies now use type-directed field ARC. Enum payload
+/// copies still need tag-aware traversal, so only that surface stays gated.
 fn agg_element_unsafe(st: &SemState, ty: TyId) -> bool {
-    if crate::declare::is_class_ty(st, ty) {
-        return true;
-    }
-    match st.tys.kind(ty) {
-        TyKind::Fn(..) => true,
-        TyKind::Nullable(inner) => crate::declare::is_class_ty(st, *inner),
-        _ => false,
-    }
+    enum_arc_payload_unsafe(st, ty)
 }
 
 /// Raw pointer loads/stores are unchecked; references remain safe operations.

@@ -1199,8 +1199,6 @@ fn self_capture_method_lambda_e2e() {
 
 #[test]
 fn fn_struct_field_rejected() {
-    // P2-3b-3（矩阵 #5 拒绝面，修正 3）：Fn 字段 v1 稳定拒收（聚合拷贝
-    // 无字段级 ARC）——主构造头字段与 body 字段两条声明路径
     if !clang_available() {
         return;
     }
@@ -1224,55 +1222,30 @@ fn fn_struct_field_rejected() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(!out.status.success(), "Fn struct field must be rejected");
     assert!(
-        combined.contains("Fn struct fields"),
+        combined.contains("not supported"),
         "diag missing: {combined}"
     );
 }
 #[test]
-fn class_in_aggregate_rejected() {
-    // S2/N2：class 值不进聚合容器（v1 无字段级 ARC——裸指针拷贝 + 源
-    // binding 出口 release = UAF）→ 三路稳定拒收：struct 字段 / tuple
-    // 元素 / array 元素
-    if !clang_available() {
-        return;
-    }
-    let cases: [(&str, &str); 3] = [
-        (
-            "struct_field",
-            "struct S(val c: C)\nclass C(val x: int)\nfun main(): int {\n    val c = C(7)\n    val s = S(c)\n    return 0\n}\n",
-        ),
+fn class_aggregate_arc_e2e() {
+    // Tuple/array element copies now retain/release class leaves.
+    let cases: [(&str, &str, &str); 2] = [
         (
             "tuple_elem",
-            "fun main(): int {\n    val c = C(7)\n    val t = (c, 1)\n    return 0\n}\nclass C(val x: int)\n",
+            "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun main(): int {\n    val c = C(7)\n    val t = (c, 1)\n    print(t[0].x)\n    return 0\n}\n",
+            "7\n7\n",
         ),
         (
             "array_elem",
-            "fun main(): int {\n    val c = C(7)\n    val a = [c]\n    return 0\n}\nclass C(val x: int)\n",
+            "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun main(): int {\n    val c = C(7)\n    val a = [c]\n    print(a[0].x)\n    return 0\n}\n",
+            "7\n7\n",
         ),
     ];
-    for (name, src) in cases {
-        let dir = std::env::temp_dir().join(format!("starry_n2_{}_{}", std::process::id(), name));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("{name}.starry"));
-        std::fs::write(&path, src).unwrap();
-        let out = Command::new(env!("CARGO_BIN_EXE_starryc"))
-            .args(["build", path.to_str().unwrap()])
-            .output()
-            .unwrap();
-        let combined = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            !out.status.success(),
-            "{name}: class in aggregate must be rejected"
-        );
-        assert!(
-            combined.contains("not supported in v1"),
-            "{name}: diag missing: {combined}"
-        );
+    for (name, src, expected) in cases {
+        let Some(out) = build_and_run(name, src) else {
+            return;
+        };
+        assert_eq!(out, expected, "{name}");
     }
 }
 #[test]

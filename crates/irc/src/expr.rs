@@ -517,6 +517,148 @@ pub(crate) fn value_abi_unsafe<V: crate::layout::LayoutView>(ctx: &V, ty: TyId) 
     }
 }
 
+/// typed-copy ownership provenance: Borrowed clones every ARC leaf; Owned
+/// consumes an already-strong value and transfers its leaves unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopyOwnership {
+    Borrowed,
+    Owned,
+}
+
+pub(crate) fn contains_arc<V: crate::layout::LayoutView>(ctx: &V, ty: TyId) -> bool {
+    if crate::layout::is_class(ctx, ty) || matches!(ctx.tys().kind(ty), TyKind::Fn(..)) {
+        return true;
+    }
+    match ctx.tys().kind(ty) {
+        TyKind::Array(elem, _) | TyKind::Nullable(elem) => contains_arc(ctx, *elem),
+        TyKind::Tuple(elems) => elems.iter().any(|e| contains_arc(ctx, *e)),
+        TyKind::Named(def, _) if matches!(ctx.defs().get(*def).kind, DefKind::Struct) => ctx
+            .defs()
+            .get(*def)
+            .sig
+            .fields
+            .iter()
+            .any(|(_, t)| contains_arc(ctx, *t)),
+        _ => false,
+    }
+}
+
+fn retain_arc_operand(ctx: &mut Ctx, op: Operand, ty: TyId) {
+    ctx.emit(Instr::Param { a: op, ty });
+    ctx.emit(Instr::Call {
+        dst: None,
+        callee: Callee::Runtime(RuntimeFn::Retain),
+        ty: ctx.sem.tys.unit,
+    });
+}
+
+fn copy_arc_slots(
+    ctx: &mut Ctx,
+    dst: (TempId, usize),
+    src: (TempId, usize),
+    ty: TyId,
+    ownership: CopyOwnership,
+    span: Span,
+) {
+    let (dst_base, dst_off) = dst;
+    let (src_base, src_off) = src;
+    if let TyKind::Nullable(inner) = ctx.sem.tys.kind(ty) {
+        let flag = load_slot(ctx, src_base, src_off, ctx.i8_ty);
+        ctx.emit(Instr::Store {
+            base: dst_base,
+            idx: Operand::Const(Const::Int(dst_off as i128)),
+            src: flag,
+            ty: ctx.i8_ty,
+        });
+        let payload_ty = *inner;
+        let payload = load_slot(ctx, src_base, src_off + 1, payload_ty);
+        if ownership == CopyOwnership::Borrowed {
+            retain_arc_operand(ctx, payload.clone(), payload_ty);
+        }
+        ctx.emit(Instr::Store {
+            base: dst_base,
+            idx: Operand::Const(Const::Int((dst_off + 1) as i128)),
+            src: payload,
+            ty: payload_ty,
+        });
+        return;
+    }
+    let v = load_slot(ctx, src_base, src_off, ty);
+    if ownership == CopyOwnership::Borrowed
+        && (crate::layout::is_class(ctx, ty) || matches!(ctx.sem.tys.kind(ty), TyKind::Fn(..)))
+    {
+        retain_arc_operand(ctx, v.clone(), ty);
+    }
+    copy_slots(ctx, (dst_base, dst_off), (v, 0), ty, ty, span);
+}
+
+pub(crate) fn emit_copy_value(
+    ctx: &mut Ctx,
+    src: Operand,
+    ty: TyId,
+    ownership: CopyOwnership,
+    span: Span,
+) -> Operand {
+    if !crate::layout::is_aggregate(ctx, ty) {
+        if ownership == CopyOwnership::Borrowed
+            && (crate::layout::is_class(ctx, ty) || matches!(ctx.sem.tys.kind(ty), TyKind::Fn(..)))
+        {
+            retain_arc_operand(ctx, src.clone(), ty);
+        }
+        return src;
+    }
+    let src_base = as_base(ctx, src, span);
+    let dst = ctx.temp();
+    if let TyKind::Nullable(inner) = ctx.sem.tys.kind(ty) {
+        let payload_ty = *inner;
+        let flag = load_slot(ctx, src_base, 0, ctx.i8_ty);
+        let payload = load_slot(ctx, src_base, 1, payload_ty);
+        if ownership == CopyOwnership::Borrowed {
+            retain_arc_operand(ctx, payload.clone(), payload_ty);
+        }
+        ctx.emit(Instr::Store {
+            base: dst,
+            idx: Operand::Const(Const::Int(0)),
+            src: flag,
+            ty: ctx.i8_ty,
+        });
+        ctx.emit(Instr::Store {
+            base: dst,
+            idx: Operand::Const(Const::Int(1)),
+            src: payload,
+            ty: payload_ty,
+        });
+        return Operand::Temp(dst);
+    }
+    match ctx.sem.tys.kind(ty) {
+        TyKind::Named(def, _) if matches!(ctx.sem.defs.get(*def).kind, DefKind::Struct) => {
+            let fields = ctx.sem.defs.get(*def).sig.fields.clone();
+            for (index, (_, fty)) in fields.iter().enumerate() {
+                let off = crate::layout::field_slot(ctx, *def, index);
+                copy_arc_slots(ctx, (dst, off), (src_base, off), *fty, ownership, span);
+            }
+        }
+        TyKind::Tuple(elems) => {
+            let elems = elems.clone();
+            let mut off = 0;
+            for ety in elems {
+                copy_arc_slots(ctx, (dst, off), (src_base, off), ety, ownership, span);
+                off += crate::layout::scalar_slots(ctx, ety);
+            }
+        }
+        TyKind::Array(elem, len) => {
+            let elem = *elem;
+            let es = crate::layout::scalar_slots(ctx, elem);
+            for i in 0..*len as usize {
+                let off = i * es;
+                copy_arc_slots(ctx, (dst, off), (src_base, off), elem, ownership, span);
+            }
+        }
+        _ => copy_slots(ctx, (dst, 0), (Operand::Temp(src_base), 0), ty, ty, span),
+    }
+    Operand::Temp(dst)
+}
+
 /// 聚合值进入逐槽写入前必须持有基址；常量 null 物化为全零槽。
 fn nullable_base(ctx: &mut Ctx, value: Operand, ty: TyId, span: Span) -> TempId {
     match value {
@@ -1109,7 +1251,7 @@ fn not_bool(ctx: &mut Ctx, v: Operand) -> Operand {
     Operand::Temp(t)
 }
 
-fn load_slot(ctx: &mut Ctx, base: TempId, off: usize, ty: TyId) -> Operand {
+pub(crate) fn load_slot(ctx: &mut Ctx, base: TempId, off: usize, ty: TyId) -> Operand {
     let t = ctx.temp();
     ctx.emit(Instr::Load {
         dst: t,
@@ -2207,8 +2349,21 @@ fn primary_ctor_call(
         if let Some(fidx) = fields.iter().position(|(s, _)| *s == pname) {
             let fty = fields[fidx].1;
             let off = crate::layout::field_slot(ctx, def, fidx);
-            copy_slots(ctx, (base, off), (v, 0), pty, fty, e.span);
+            if contains_arc(ctx, fty) {
+                let ownership = if ctx.take_stmt_temp(&v) {
+                    CopyOwnership::Owned
+                } else {
+                    CopyOwnership::Borrowed
+                };
+                let copied = emit_copy_value(ctx, v, pty, ownership, e.span);
+                copy_slots(ctx, (base, off), (copied, 0), pty, fty, e.span);
+            } else {
+                copy_slots(ctx, (base, off), (v, 0), pty, fty, e.span);
+            }
         }
+    }
+    if contains_arc(ctx, ctx.sem.defs.get(def).sig.ty) {
+        ctx.note_stmt_temp(base, ctx.sem.defs.get(def).sig.ty);
     }
     Operand::Temp(base)
 }
@@ -2258,15 +2413,35 @@ fn struct_ctor(
     for (idx, v) in slots.into_iter().enumerate() {
         if let Some(v) = v {
             let off = crate::layout::field_slot(ctx, def, idx);
-            copy_slots(
-                ctx,
-                (base, off),
-                (v, 0),
-                fields[idx].1,
-                fields[idx].1,
-                e.span,
-            );
+            if contains_arc(ctx, fields[idx].1) {
+                let ownership = if ctx.take_stmt_temp(&v) {
+                    CopyOwnership::Owned
+                } else {
+                    CopyOwnership::Borrowed
+                };
+                let copied = emit_copy_value(ctx, v, fields[idx].1, ownership, e.span);
+                copy_slots(
+                    ctx,
+                    (base, off),
+                    (copied, 0),
+                    fields[idx].1,
+                    fields[idx].1,
+                    e.span,
+                );
+            } else {
+                copy_slots(
+                    ctx,
+                    (base, off),
+                    (v, 0),
+                    fields[idx].1,
+                    fields[idx].1,
+                    e.span,
+                );
+            }
         }
+    }
+    if contains_arc(ctx, ctx.sem.defs.get(def).sig.ty) {
+        ctx.note_stmt_temp(base, ctx.sem.defs.get(def).sig.ty);
     }
     Operand::Temp(base)
 }
@@ -2500,8 +2675,17 @@ fn array_literal(ctx: &mut Ctx, e: &ExprWrap, elems: &[ExprWrap]) -> Operand {
     for el in elems {
         let v = lower_expr(ctx, el);
         let v = coerce(ctx, v, ctx.expr_ty(el), elem);
-        copy_slots(ctx, (base, off), (v, 0), elem, elem, e.span);
+        let ownership = if ctx.take_stmt_temp(&v) {
+            CopyOwnership::Owned
+        } else {
+            CopyOwnership::Borrowed
+        };
+        let copied = emit_copy_value(ctx, v, elem, ownership, e.span);
+        copy_slots(ctx, (base, off), (copied, 0), elem, elem, e.span);
         off += es;
+    }
+    if contains_arc(ctx, ty) {
+        ctx.note_stmt_temp(base, ty);
     }
     Operand::Temp(base)
 }
@@ -2522,8 +2706,17 @@ fn tuple_literal(ctx: &mut Ctx, e: &ExprWrap, elems: &[ExprWrap]) -> Operand {
         let ety = elem_tys.get(i).copied().unwrap_or(ty);
         let v = lower_expr(ctx, el);
         let v = coerce(ctx, v, ctx.expr_ty(el), ety);
-        copy_slots(ctx, (base, off), (v, 0), ety, ety, e.span);
+        let ownership = if ctx.take_stmt_temp(&v) {
+            CopyOwnership::Owned
+        } else {
+            CopyOwnership::Borrowed
+        };
+        let copied = emit_copy_value(ctx, v, ety, ownership, e.span);
+        copy_slots(ctx, (base, off), (copied, 0), ety, ety, e.span);
         off += crate::layout::scalar_slots(ctx, ety);
+    }
+    if contains_arc(ctx, ty) {
+        ctx.note_stmt_temp(base, ty);
     }
     Operand::Temp(base)
 }
@@ -2585,6 +2778,9 @@ fn array_repeat(ctx: &mut Ctx, e: &ExprWrap, value: &ExprWrap, count: u32) -> Op
     });
 
     ctx.switch_to(body_b);
+    if contains_arc(ctx, elem) {
+        retain_arc_operand(ctx, v.clone(), elem);
+    }
     let i = ctx.temp();
     ctx.emit(Instr::Load {
         dst: i,
@@ -2648,6 +2844,9 @@ fn array_repeat(ctx: &mut Ctx, e: &ExprWrap, value: &ExprWrap, count: u32) -> Op
     ctx.terminate(Term::Jmp(cond_b));
 
     ctx.switch_to(done_b);
+    if contains_arc(ctx, ty) {
+        ctx.note_stmt_temp(base, ty);
+    }
     Operand::Temp(base)
 }
 
@@ -2823,6 +3022,11 @@ pub(crate) fn make_pattern_bindings_mutable(ctx: &mut Ctx, pat: &ast::syntax::pa
         let Some((Place::Temp(t), ty)) = ctx.lookup(name) else {
             continue;
         };
+        // ARC bindings already own their copied leaves at the Temp storage;
+        // migrating them would require moving the registered drop too.
+        if contains_arc(ctx, ty) {
+            continue;
+        }
         let slot = ctx.temp();
         copy_slots(ctx, (slot, 0), (Operand::Temp(t), 0), ty, ty, pat.span);
         ctx.env_top().insert(name, (Place::Slot(slot), ty));
@@ -2930,8 +3134,15 @@ pub(crate) fn lower_pattern(
                 .and_then(|t| ctx.sem.ty_of_node.get(t.id).copied())
                 .unwrap_or(subject_ty);
             let v = coerce(ctx, subject, subject_ty, bty);
-            let t = as_base(ctx, v, pat.span);
+            let copied = emit_copy_value(ctx, v, bty, CopyOwnership::Borrowed, pat.span);
+            let t = as_base(ctx, copied, pat.span);
             ctx.env_top().insert(*name, (Place::Temp(t), bty));
+            if contains_arc(ctx, bty) {
+                ctx.class_drops
+                    .last_mut()
+                    .expect("class drop stack in sync with pattern scope")
+                    .push((Place::Temp(t), bty, false));
+            }
             Operand::Const(Const::Bool(true))
         }
         PatKind::Wildcard => Operand::Const(Const::Bool(true)),
@@ -4060,8 +4271,17 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
                         ty,
                     });
                 }
-                Place::Temp(_) => {
-                    ctx.diag(span, "对不可变绑定赋值穿透 sem 门禁（SemAssignToVal 漏报）");
+                Place::Temp(t) => {
+                    if crate::layout::is_aggregate(ctx, ty) {
+                        copy_slots(ctx, (t, 0), (v, 0), ty, ty, span);
+                    } else {
+                        ctx.emit(Instr::Store {
+                            base: t,
+                            idx: Operand::Const(Const::Int(0)),
+                            src: v,
+                            ty,
+                        });
+                    }
                 }
             }
         }
