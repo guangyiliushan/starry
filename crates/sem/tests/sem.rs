@@ -1234,6 +1234,45 @@ fn extern_calls_require_unsafe_context() {
     assert_clean("extern \"c\" fun c_log(p: *const int) : int\nfun f() : int {\n    return 0\n}");
 }
 
+#[test]
+fn raw_pointer_deref_requires_unsafe_context() {
+    // Reference dereference remains safe.
+    assert_clean("fun f() : int {\n    var x = 1\n    val p = &x\n    return *p\n}");
+
+    let read = "fun f(p: *const int) : int {\n    return *p\n}";
+    let parsed = parser::parse_source(read).unwrap();
+    let out = analyze(parsed);
+    assert_eq!(
+        out.diagnostics.iter().map(|d| d.code).collect::<Vec<_>>(),
+        vec![DiagCode::SemUnsafeRequired]
+    );
+    use ast::token::Span;
+    let start = read.find("*p").unwrap() as u32;
+    assert_eq!(
+        out.diagnostics[0].span,
+        Span {
+            start,
+            end: start + 2,
+        }
+    );
+    assert_eq!(codes(read), vec![DiagCode::SemUnsafeRequired]);
+
+    let store = "fun f(p: *mut int) {\n    *p = 1\n}";
+    assert_eq!(codes(store), vec![DiagCode::SemUnsafeRequired]);
+
+    let compound = "fun f(p: *mut int) {\n    *p += 1\n}";
+    assert_eq!(codes(compound), vec![DiagCode::SemUnsafeRequired]);
+
+    assert_clean("fun f(p: *mut int) : int {\n    return unsafe { *p = 1\n        *p }\n}");
+
+    // Pointer creation/casts stay safe; only the dereference is gated.
+    assert_clean("fun f() : *mut int {\n    var x = 1\n    return (&mut x) as *mut int\n}");
+
+    // A closure body does not inherit the unsafe context of its creation site.
+    let closure = "fun f(p: *const int) : int {\n    val g: () -> int = unsafe { { () -> *p } }\n    return g()\n}";
+    assert_eq!(codes(closure), vec![DiagCode::SemUnsafeRequired]);
+}
+
 // ---- M7：泛型单态化 ----
 
 #[test]

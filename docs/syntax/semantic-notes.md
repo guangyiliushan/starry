@@ -232,6 +232,8 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
 - **指针（D-007 / M2）**：`*const T`/`*mut T` 类型+FFI 传参+`&x`/`*p`
   表达式已落地（v1 保守借用见下节）。bare `*T` 现诊断（ExpectedToken）。
   剩余 T2 checked pointer 后置 M10（Q7 裁定）。
+- **Raw pointer unsafe gate**：`*const T` / `*mut T` 的解引读取、写入、复合读写都在同一
+  `unsafe_depth` 门下检查；`&T` / `&mut T` 与裸指针创建/转换保持安全。
 - **可空（D-007 / M2）**：前缀 `?T` + 原子后缀糖 `T?` 已落地（同一
   `Nullable` AST）；复合后缀 `[T; N]?`/`(T, U)?` 拒绝并提示前缀形态。
 - **引用（D-007 / M2）**：`&T`/`&mut T`/`?&T` 类型 + `&x`/`*p` 表达式已
@@ -403,6 +405,13 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   臂）：外部符号才有 external 标记，普通函数调用零开销（一次 bool+usize
   比较）。
 - `unsafe { }` 是块表达式，值 = 块尾式；FFI 调用的结果照常参与定型。
+- Raw pointer dereference：operand type 是 `TyKind::Pointer` 时，读取、写入
+  赋值与复合赋值都要求 `unsafe_depth > 0`；诊断码 `SemUnsafeRequired`，
+  message 为「raw pointer dereference requires an unsafe block」。检查共用
+  `require_unsafe_if_raw_deref`，并按 (span, code) 幂等，避免赋值目标先按
+  表达式定型再进入赋值臂时重复报告。
+- Closure 是函数边界：进入 lambda body 前保存并把 `unsafe_depth` 归零，
+  body 检查后恢复；创建位置在 unsafe 中不给 body 授权。
 
 ## 闭包捕获（S2/P2-3，2026-11-11；spec = closure-capture-spec.md §6c/修正 7）
 
@@ -478,5 +487,5 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
 ## 诊断码
 
 全部 `Sem*` 前缀，定义在 `crates/ast/src/syntax/node.rs::DiagCode`，
-26 个（SemUndefinedName … SemUnknownMember、SemTypeArgMismatch、SemConstOverflow、SemDivisionByZero、SemDivisionOverflow）；另有 `Irc*` 2 个属 irc
+27 个（SemUndefinedName … SemUnknownMember、SemTypeArgMismatch、SemConstOverflow、SemDivisionByZero、SemDivisionOverflow、SemUnsafeRequired）；另有 `Irc*` 2 个属 irc
 阶段（码表同址，见 opt-notes）。解析器码不受影响。

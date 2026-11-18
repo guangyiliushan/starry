@@ -167,6 +167,8 @@ pub enum DiagCode {
     SemUninitializedBinding,
     /// v1 暂不支持的构造
     SemUnsupportedConstruct,
+    /// Raw pointer dereference lacks lexical unsafe permission
+    SemUnsafeRequired,
     /// 宏展开是独立前置 pass，v1 未实现
     SemMacroExpansion,
     /// 参数缺少类型标注

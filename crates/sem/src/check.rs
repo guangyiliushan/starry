@@ -714,8 +714,9 @@ fn assign_target_ty(target: &ExprWrap, target_ty: TyId, st: &mut SemState) -> Ty
             None => st.tys.error,
         },
         ExprKind::Deref { expr } => {
-            // M2 经解引赋值：要求可变形（*mut / &mut），否则按不可写拒绝
             let pty = st.expr_ty.get(expr.id).copied().unwrap_or(st.tys.error);
+            require_unsafe_if_raw_deref(st, pty, target.span);
+            // M2 经解引赋值：要求可变形（*mut / &mut），否则按不可写拒绝
             match st.tys.kind(pty).clone() {
                 TyKind::Ref { mutable, .. } | TyKind::Pointer { mutable, .. } if !mutable => {
                     st.diags.emit(Diagnostic::error(
@@ -943,6 +944,26 @@ fn agg_element_unsafe(st: &SemState, ty: TyId) -> bool {
         TyKind::Fn(..) => true,
         TyKind::Nullable(inner) => crate::declare::is_class_ty(st, *inner),
         _ => false,
+    }
+}
+
+/// Raw pointer loads/stores are unchecked; references remain safe operations.
+fn require_unsafe_if_raw_deref(st: &mut SemState, ty: TyId, span: Span) {
+    if st.unsafe_depth == 0 && matches!(st.tys.kind(ty), TyKind::Pointer { .. }) {
+        // Assignment targets are typed as expressions first; the shared
+        // assignment gate must be idempotent for that same dereference.
+        if st
+            .diags
+            .find_unique(span, DiagCode::SemUnsafeRequired)
+            .is_some()
+        {
+            return;
+        }
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemUnsafeRequired,
+            span,
+            "raw pointer dereference requires an unsafe block",
+        ));
     }
 }
 
@@ -1337,7 +1358,11 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
         ExprKind::Deref { expr } => {
             let pty = type_expr(expr, st, true);
             match st.tys.kind(pty).clone() {
-                TyKind::Pointer { inner, .. } | TyKind::Ref { inner, .. } => inner,
+                TyKind::Pointer { inner, .. } => {
+                    require_unsafe_if_raw_deref(st, pty, e.span);
+                    inner
+                }
+                TyKind::Ref { inner, .. } => inner,
                 TyKind::Error => st.tys.error,
                 _ => {
                     mismatch(st, expr.span);
@@ -1784,9 +1809,14 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             // M8: resolve lambda body identifiers in lambda scope
             // S2/P2-3：捕获窗口覆盖 resolve + type（赋值拒收在 type 期）
             st.lambda_cap_stack.push((e.id.0, scope, Vec::new()));
+            // A closure is a new function boundary; lexical unsafe permission
+            // does not leak from its creation site into its body.
+            let outer_unsafe_depth = st.unsafe_depth;
+            st.unsafe_depth = 0;
             crate::resolve::resolve_block(body, st, scope);
             let body_ty = type_block(body, st, true);
             let (_, _, caps) = st.lambda_cap_stack.pop().expect("capture stack");
+            st.unsafe_depth = outer_unsafe_depth;
             st.lambda_caps.insert(e.id.0, caps);
             st.funs.pop();
             let ret_ty = if infer_ret {
