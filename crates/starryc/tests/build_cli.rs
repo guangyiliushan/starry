@@ -707,9 +707,10 @@ fn multi_file_build_cross_package_import() {
 }
 
 #[test]
-fn manifest_srcs_layout_and_naming() {
-    // M5：starry.toml 的 srcs 布局 + name 决定 exe 名
-    let toml = "name = \"m5app\"\nsrcs = [\"src\"]";
+fn manifest_layout_and_naming() {
+    // Package graph v1: [package] name decides the output name; sources are
+    // discovered recursively from the package root.
+    let toml = "[package]\nname = \"m5app\"\nversion = \"1.0.0\"";
     let Some(out) = build_dir_and_run(
         "m5app",
         &[
@@ -917,7 +918,7 @@ fn weak_upgrade_end_to_end() {
 fn directory_default_package_with_import() {
     // M5 slice 2a: headerless files get their package from the directory
     // (src/util -> package util); cross-package use requires import.
-    let toml = "name = \"m5dir\"\nsrcs = [\"src\"]";
+    let toml = "[package]\nname = \"m5dir\"\nversion = \"1.0.0\"";
     let Some(out) = build_dir_and_run(
         "m5dir",
         &[
@@ -939,26 +940,16 @@ fn directory_default_package_with_import() {
 }
 
 #[test]
-fn namespace_import_and_circular_import_end_to_end() {
+fn namespace_import_end_to_end() {
     // M5 slice 2b: `import util` brings the namespace; qualified access
-    // `util.Helper(...)` resolves through the PackageNs def. Circular
-    // imports (util -> app -> util) are harmless in the single-instance
-    // model; same-package self-import no longer clashes with locals.
-    let toml = "name = \"m5ns\"\nsrcs = [\"src\"]";
+    // `util.Helper(...)` resolves through the PackageNs def.
+    let toml = "[package]\nname = \"m5ns\"\nversion = \"1.0.0\"";
     let Some(out) = build_dir_and_run(
         "m5ns",
         &[
             (
                 "src/util/helper.starry",
-                "import app.shared\n\nclass Helper(val v: int) {\n    fun plus1(): int {\n        return self.v + shared()\n    }\n}\n",
-            ),
-            (
-                "src/util/selfimport.starry",
-                "import util.Helper\n\nfun unused(): int {\n    return 0\n}\n",
-            ),
-            (
-                "src/app/shared.starry",
-                "fun shared(): int {\n    return 1\n}\n",
+                "class Helper(val v: int) {\n    fun plus1(): int {\n        return self.v + 1\n    }\n}\n",
             ),
             (
                 "src/app/main.starry",

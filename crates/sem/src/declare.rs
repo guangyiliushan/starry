@@ -10,7 +10,7 @@ use ast::syntax::node::{DiagCode, Diagnostic, SourceFile, Span};
 use ast::syntax::ty::{TypeKind, TypeWrap};
 
 use crate::SemState;
-use crate::def::{Def, DefId, DefKind, DefSig, ScopeId};
+use crate::def::{Def, DefId, DefKind, DefSig, ScopeId, Vis};
 use crate::ty::{FloatKind, IntKind, TyArena, TyId, TyKind};
 
 const BUILTINS: &[&str] = &[
@@ -97,6 +97,22 @@ fn register_import(scope: ScopeId, decl: &DeclNode, st: &mut SemState) {
         let mut target = lookup_local_no_import(st, root, segments[0]);
         for seg in &segments[1..] {
             target = target.and_then(|d| member_lookup(st, d, *seg));
+        }
+        if target.is_none()
+            && st
+                .defs
+                .iter()
+                .any(|def| def.name == name && def.sig.vis == Vis::Private)
+        {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                decl.span,
+                format!(
+                    "`{}` is not visible here (private to another file)",
+                    st.interner.resolve(name)
+                ),
+            ));
+            return;
         }
         if let Some(t) = target
             && !vis_allows(st, t, scope)

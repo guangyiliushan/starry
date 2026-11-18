@@ -193,6 +193,10 @@ impl DefArena {
     pub fn is_empty(&self) -> bool {
         self.defs.is_empty()
     }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, Def> {
+        self.defs.iter()
+    }
 }
 
 #[derive(Debug)]

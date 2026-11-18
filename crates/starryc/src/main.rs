@@ -17,12 +17,16 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use ast::syntax::decl::{DeclKind, ImportKind};
 use lex::TokenKind;
 use lex::display::write_escaped_str;
 use lex::lexer::Lexer;
 use lex::nfa::NFA;
 use lex::regex::Translator;
 use lex::regex::parse::parse;
+
+mod package;
+use package::{PackageGraph, PackageId, load_graph, parse_manifest};
 
 fn main() -> ExitCode {
     // args_os + into_string：非 UTF-8 参数优雅报错而非 panic
@@ -442,84 +446,46 @@ fn cmd_build_args(args: &[String], release: bool) -> ExitCode {
         _ => usage(),
     }
 }
-
-// ==================== M5 模块系统（切片 1：manifest + 多文件合并） ====================
+// ==================== Package graph v1 ====================
 //
-// v1 模型：**合并根作用域**——srcs 下所有 .starry 剥掉 package 头后按
-// 确定性序（路径排序）拼成一个虚拟源，一次 parse/sem/irc 全链。import
-// 在合并根作用域内解析（跨文件天然可见）；import 循环在单实例模型下
-// 自然消解（注册表/增量/循环检测后置，见 implementation-plan M5）。
-// 诊断经偏移表归属回原文件（package 头剥除以空白填充，行列不漂移）。
+// Package roots are resolved through manifests first. Only then are their
+// source files collected in graph postorder; each merged unit remembers the
+// owning PackageId. This keeps ownership explicit even though v1 still lowers
+// packages into one merged source set.
 
-/// starry.toml 的 v1 最小集（std-only 手写行解析；未知键忽略前向兼容）
-#[derive(Debug, Default)]
-struct Manifest {
-    name: Option<String>,
-    srcs: Vec<String>,
-}
-
-fn parse_manifest(path: &Path) -> Result<Manifest, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("无法读取 manifest {}: {e}", path.display()))?;
-    let mut m = Manifest::default();
-    for (i, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            return Err(format!("{}:{}: 期望 key = value", path.display(), i + 1));
-        };
-        let k = k.trim();
-        let v = v.trim();
-        match k {
-            "name" => m.name = Some(unquote(v)?),
-            "srcs" => m.srcs = parse_str_list(v)?,
-            _ => {} // 未知键：前向兼容忽略
-        }
-    }
-    Ok(m)
-}
-
-fn unquote(v: &str) -> Result<String, String> {
-    v.strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .map(|s| s.to_string())
-        .ok_or_else(|| format!("manifest 值须为双引号字符串: {v}"))
-}
-
-fn parse_str_list(v: &str) -> Result<Vec<String>, String> {
-    let inner = v
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .ok_or_else(|| format!("manifest 列表须为 [\"a\", \"b\"] 形: {v}"))?;
-    inner.split(',').map(|s| unquote(s.trim())).collect()
-}
-
-/// 递归收集 dir 下全部 .starry（调用方排序去重，保证确定性）
+/// Recursively collect .starry sources (caller orders/dedups by canonical path).
 fn collect_starry(
     dir: &Path,
     src_root: &Path,
-    out: &mut Vec<(PathBuf, PathBuf)>,
+    out: &mut Vec<(PathBuf, PathBuf, PackageId)>,
+    owner: PackageId,
 ) -> Result<(), String> {
     let entries =
         std::fs::read_dir(dir).map_err(|e| format!("无法读取源目录 {}: {e}", dir.display()))?;
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
-            collect_starry(&p, src_root, out)?;
+            collect_starry(&p, src_root, out, owner)?;
         } else if p.extension().and_then(|e| e.to_str()) == Some("starry") {
-            out.push((p, src_root.to_path_buf()));
+            out.push((p, src_root.to_path_buf(), owner));
         }
     }
     Ok(())
 }
 
-/// 合并源集：每个文件一段，记录 (路径, 起始偏移, 原文, 注入前缀长)
-/// 供诊断归属（M5 slice 2a：目录默认包前缀注入会平移段内 span）
+/// 合并源集：每个文件一段，记录路径、起始偏移、原文、注入前缀长与所属包，
+/// 供诊断归属和跨包解析（M5 slice 2a：目录默认包前缀注入会平移段内 span）。
+struct SourceUnit {
+    path: PathBuf,
+    base: u32,
+    text: String,
+    delta: u32,
+    owner: PackageId,
+}
+
 struct SourceSet {
     merged: String,
-    files: Vec<(PathBuf, u32, String, u32)>,
+    files: Vec<SourceUnit>,
 }
 
 fn dir_package(f: &Path, src_root: &Path) -> Option<String> {
@@ -543,10 +509,10 @@ fn has_package_header(text: &str) -> bool {
     text[lead..].starts_with("package ")
 }
 
-fn merge_sources(files: &[(PathBuf, PathBuf)]) -> Result<SourceSet, String> {
+fn merge_sources(files: &[(PathBuf, PathBuf, PackageId)]) -> Result<SourceSet, String> {
     let mut merged = String::new();
     let mut table = Vec::new();
-    for (f, src_root) in files {
+    for (f, src_root, owner) in files {
         let text =
             std::fs::read_to_string(f).map_err(|e| format!("无法读取 {}: {e}", f.display()))?;
         let (body, delta) = if has_package_header(&text) {
@@ -560,7 +526,13 @@ fn merge_sources(files: &[(PathBuf, PathBuf)]) -> Result<SourceSet, String> {
                 None => (text.clone(), 0),
             }
         };
-        table.push((f.clone(), merged.len() as u32, text, delta));
+        table.push(SourceUnit {
+            path: f.clone(),
+            base: merged.len() as u32,
+            text,
+            delta,
+            owner: *owner,
+        });
         merged.push_str(&body);
         merged.push('\n');
     }
@@ -569,6 +541,7 @@ fn merge_sources(files: &[(PathBuf, PathBuf)]) -> Result<SourceSet, String> {
         files: table,
     })
 }
+
 /// 诊断渲染：按 span 偏移定位原文件，打 `file:line:col`
 fn print_set_diags(set: &SourceSet, diags: &[ast::syntax::node::Diagnostic]) {
     for d in diags {
@@ -576,24 +549,108 @@ fn print_set_diags(set: &SourceSet, diags: &[ast::syntax::node::Diagnostic]) {
         let idx = set
             .files
             .iter()
-            .rposition(|(_, base, _, _)| (*base as usize) <= pos)
+            .rposition(|unit| (unit.base as usize) <= pos)
             .unwrap_or(0);
-        let (path, base, text, delta) = &set.files[idx];
-        let (line, col) = line_col(text, pos - *base as usize - *delta as usize);
+        let unit = &set.files[idx];
+        let (line, col) = line_col(&unit.text, pos - unit.base as usize - unit.delta as usize);
         eprintln!(
             "{}:{line}:{col}: {:?}: {}",
-            path.display(),
+            unit.path.display(),
             d.code,
             d.message
         );
     }
 }
 
+/// Enforce the v1 direct-import rule over manifest package owners. Dotted
+/// source package segments inside one package root remain package-local, while
+/// imports into another PackageId must name a direct dependency.
+fn check_direct_imports(set: &SourceSet, graph: &PackageGraph) -> Result<(), String> {
+    let dotted = |path: &ast::syntax::node::Path, interner: &ast::interner::Interner| {
+        path.segments
+            .iter()
+            .map(|segment| interner.resolve(segment.name))
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    let mut owners = std::collections::BTreeMap::new();
+    for unit in &set.files {
+        let parsed = parser::parse_source(&unit.text).map_err(|e| e.to_string())?;
+        if let Some(package) = &parsed.ast.package {
+            owners.insert(dotted(package, &parsed.interner), unit.owner);
+        }
+    }
+    for unit in &set.files {
+        let parsed = parser::parse_source(&unit.text).map_err(|e| e.to_string())?;
+        let current = match &parsed.ast.package {
+            Some(package) => dotted(package, &parsed.interner),
+            None => {
+                let root = graph.package(unit.owner).root.clone();
+                dir_package(&unit.path, &root).unwrap_or_default()
+            }
+        };
+        for item in &parsed.ast.items {
+            let DeclKind::Import(import) = &item.kind else {
+                continue;
+            };
+            let ImportKind::Qualified { path, .. } = &import.kind else {
+                continue;
+            };
+            let segments: Vec<&str> = path
+                .segments
+                .iter()
+                .map(|segment| parsed.interner.resolve(segment.name))
+                .collect();
+            let Some(target) = (1..=segments.len())
+                .rev()
+                .map(|end| segments[..end].join("."))
+                .find(|candidate| owners.contains_key(candidate))
+            else {
+                continue;
+            };
+            let Some(&owner) = owners.get(&target) else {
+                unreachable!("candidate was selected from owners")
+            };
+            if owner == unit.owner {
+                continue;
+            }
+            let current_package = graph.package(unit.owner);
+            let allowed = current_package
+                .dependencies
+                .iter()
+                .any(|dependency| graph.package_id(&dependency.key) == Some(owner));
+            if !allowed {
+                return Err(format!(
+                    "package `{current}` imports package `{target}` without a direct dependency"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Verify each merged unit still belongs to the package root that loaded it.
+/// This turns graph ownership into a checked invariant instead of documentation.
+fn check_source_ownership(set: &SourceSet, graph: &PackageGraph) -> Result<(), String> {
+    for unit in &set.files {
+        let package = graph.package(unit.owner);
+        if !unit.path.starts_with(&package.root) {
+            return Err(format!(
+                "{} belongs to package `{}` but is outside its canonical root {}",
+                unit.path.display(),
+                package.manifest.name,
+                package.root.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 enum BuildInput {
     Single(PathBuf),
     Multi {
         root: PathBuf,
-        manifest: Manifest,
+        graph: PackageGraph,
         set: SourceSet,
     },
 }
@@ -601,41 +658,48 @@ enum BuildInput {
 fn resolve_build_input(path: &str) -> Result<BuildInput, String> {
     let p = Path::new(path);
     if p.is_dir() || p.extension().and_then(|e| e.to_str()) == Some("toml") {
-        let (root, manifest) = if p.is_dir() {
-            let mp = p.join("starry.toml");
-            let m = if mp.is_file() {
-                parse_manifest(&mp)?
+        let root = if p.is_dir() {
+            p.to_path_buf()
+        } else {
+            p.parent().unwrap_or(Path::new(".")).to_path_buf()
+        };
+        let manifest = if p.is_dir() {
+            let manifest_path = root.join("starry.toml");
+            manifest_path
+                .is_file()
+                .then(|| parse_manifest(&manifest_path).map_err(|e| e.to_string()))
+                .transpose()?
+        } else {
+            Some(parse_manifest(p).map_err(|e| e.to_string())?)
+        };
+        let graph = load_graph(&root, manifest).map_err(|e| e.to_string())?;
+        let mut files: Vec<(PathBuf, PathBuf, PackageId)> = Vec::new();
+        for id in graph.order(graph.root()) {
+            let package = graph.package(id);
+            let src_root = if package.root.join("src").is_dir() {
+                package.root.join("src")
             } else {
-                Manifest::default()
+                package.root.clone()
             };
-            (p.to_path_buf(), m)
-        } else {
-            (
-                p.parent().unwrap_or(Path::new(".")).to_path_buf(),
-                parse_manifest(p)?,
-            )
-        };
-        let srcs = if manifest.srcs.is_empty() {
-            vec![".".to_string()]
-        } else {
-            manifest.srcs.clone()
-        };
-        let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
-        for s in &srcs {
-            let sr = root.join(s);
-            collect_starry(&sr, &sr, &mut files)?;
+            collect_starry(&src_root, &src_root, &mut files, id)?;
+            let package = graph.package(id);
+            collect_starry(&package.root, &package.root, &mut files, id)?;
         }
-        files.sort();
-        files.dedup();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        files.dedup_by(|a, b| a.0 == b.0);
         if files.is_empty() {
-            return Err(format!("{}: 没有找到 .starry 源文件", root.display()));
+            let root = graph.package(graph.root());
+            return Err(package::PackageGraphError::NoSources {
+                package: root.manifest.name.clone(),
+                root: root.root.clone(),
+            }
+            .to_string());
         }
         let set = merge_sources(&files)?;
-        Ok(BuildInput::Multi {
-            root,
-            manifest,
-            set,
-        })
+        check_source_ownership(&set, &graph)?;
+        check_direct_imports(&set, &graph)?;
+        package::check_import_cycles(&set.merged).map_err(|e| e.to_string())?;
+        Ok(BuildInput::Multi { root, graph, set })
     } else {
         Ok(BuildInput::Single(p.to_path_buf()))
     }
@@ -673,12 +737,8 @@ fn cmd_build(path: &str, output: Option<&str>, link_args: &[String], release: bo
                 source.with_extension("")
             }
         }
-        BuildInput::Multi { root, manifest, .. } => {
-            let name = manifest.name.clone().unwrap_or_else(|| {
-                root.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "starry-app".to_string())
-            });
+        BuildInput::Multi { root, graph, .. } => {
+            let name = graph.package(graph.root()).manifest.name.clone();
             if cfg!(windows) {
                 root.join(format!("{name}.exe"))
             } else {
