@@ -36,7 +36,7 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | 元组 | ✅ | ✅ | ✅ | ✅ | — | 常量下标 |
 | 区间（`..`/`..=`） | ✅ | ✅ | ✅ | ✅ | — | 物化值携开闭标记槽 |
 | nullable（`?`/`??`/`!!`/`?.`） | ✅ | ✅ | ✅ | ✅ | — | 值→Nullable 显式构造（2026-11 修复） |
-| 顶层标量全局 | ✅ | ✅ | ✅ | ✅ | — | 依赖序初始化；聚合全局 ❌（稳定诊断） |
+| 顶层纯值全局 | ✅ | ✅ | ✅ | ✅ | — | 依赖序初始化；`[n x i64]` 槽存储；class/Fn/i128 组合稳定拒收 |
 | 结构相等（==/!=） | ✅ | ✅ | ✅ | ✅ | — | 字符串走 `starry_str_eq` 内容比较 |
 
 ## 控制流与模式（Feature Group 2）
@@ -74,17 +74,27 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | 特性 | 拒收点 | 备注 |
 |---|---|---|
 | class 继承 / 二级构造（init） | sem | R4：v1 默认 final、无二级构造，稳定拒收 |
+
+## 近期 ABI 落地状态
+
+| 特性 | parser | sem | irc | llvme | runtime | 备注 |
+|---|---|---|---|---|---|---|
 | lambda 可空 class 捕获 | ✅ | ✅ | ✅ | ✅ | ✅ | 2 槽 env（flag+payload）+ flag 分支 retain/release + 间接调用 Agg 返回槽拷贝 |
 | lambda i128 捕获 | ✅ | ✅ | ✅ | ✅ | — | 2 槽 WideCell 标量经多槽 env（槽位游标按 scalar_slots 累计）；聚合捕获归后续 |
-| 顶层标量可空全局 | ❌ | ❌ | ❌ | ❌ | — | nullable-abi-audit.md §3.1：全局 1 槽缺 payload（类型语法可用、irc M-later 拒收已覆盖） |
-| 指向可空的类型解引用（`*p` / `*p = v`） | ✅ | ✅ | ❌ | ❌ | — | D-007 类型语法契约保留；dst Cell(i64) = flag 视图（payload 缺失）——解引用位稳定诊断归后续（audit §3.2） |
+| 顶层标量可空全局 | ✅ | ✅ | ✅ | ✅ | — | nullable-abi-audit.md §3.3：`[2 x i64]` flag+payload；`i128?`/可空 class 仍拒收 |
+| 指向可空的类型解引用（`*p` / `*p = v`） | ✅ | ✅ | ✅ | ✅ | — | D-007 类型语法契约保留；pointee 逐槽读写；class/i128 payload 稳定拒收（audit §3.3） |
 | lambda-in-lambda 字面嵌套 + 柯里化调用 | ✅ | ✅ | ✅ | ✅ | — | parser body 位 `{` 消歧（深度感知 `->` 前瞻）+ 柯里化 Fn 值链；捕获外层参数逐层正确（e2e 3/7/15） |
+
+## 稳定拒收登记
+
+| 特性 | 拒收点 | 备注 |
+|---|---|---|
 | lambda 存 struct 字段（矩阵 #5） | sem | 修正 3：Fn 字段稳定拒收（主构造头字段 + body 字段两路已接，declare 侧） |
 | class/可空 class/Fn 进聚合容器（struct 字段/tuple/array） | sem | N2 裁定：v1 稳定拒收（聚合拷贝无字段级 ARC）；字段级 ARC + 结构化 drop glue 归后续切片 |
 | aspect / provide | sem | 跳过清单 |
 | variance（类型形参型变标注） | sem | **声明点不变（invariant）**：v1 无子类型关系，variance 未实现；parser 保留 `in`/`out` 词法、sem 稳定拒收（S4：待 `open` 继承或 `dyn` + ≥2 惯用样例被挡才设计） |
 | spawn/async/await、宏展开、grow | sem | 跳过清单 |
-| 聚合顶层全局 | irc | `IrcUnsupportedLowering` |
+| 聚合顶层全局 | ✅（纯值）/ irc（class/Fn/i128） | 纯值 `[n x i64]`；unsafe 组合 `IrcUnsupportedLowering` |
 | extern 程序 interp 验证 | interp | `UnknownFun` trap（已知局限） |
 | T2 checked pointer | — | 后置 M10（Q7） |
 | M10 并发（Mutex/actor、Send/Sync） | — | 模型选择待用户裁定 |

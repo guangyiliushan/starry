@@ -455,18 +455,17 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   parse_lambda body 位 `{` 前瞻消歧（配对 `}` 前深度 1 的 `->` =
   嵌套 lambda，否则块；parse_lambda 期望 cursor 停在 `{`——调用侧
   不得预消费）。两个 lambda 扫描器 RBrace 深度下溢 saturating 防护。
-- **指向可空的类型（`*const ?int` / `*const int?` / `?&int`）**：
-  D-007 契约保留（类型语法 + typing 验收 assert_clean 不变）；解引用/
-  存储 dst 按 Cell(i64) 分类 = flag 视图（payload 槽缺失）——登记为
-  已知限制（nullable-abi-audit.md §3.2），解引用位稳定诊断归后续。
-- **Nullable ABI 审计（2026-11-12，nullable-abi-audit.md）**：可空
-  class = 块指针 ABI 全闭环；登记两个未覆盖面——顶层标量可空全局
-  （全局存储 1 槽缺 payload）与指向可空的指针（LoadPtr dst Cell 缺
-  payload 槽）；scalar_ty 建议加显式 Nullable 臂（防新调用点误用）。
-- **剩余限制（登记）**：i128/聚合捕获仍拒收（聚合位 ARC 缺失，与 N2 同源）；i128 捕获已落地
-  （2 槽 WideCell 经多槽 env，槽位游标按 scalar_slots 累计；classify
-  LoadPtr dst 宽槽标记；e2e i128 全精度保持）；
-  Fn var 重赋值的可空 class 变体待验证；ASan 面待接。
+- **指向可空的类型（2026-11-18 已支持纯值 payload）**：D-007 契约保留；
+  `*p` / `*p = v` 按 `Nullable(T)` 的 `scalar_slots` 逐槽访问，slot > 0
+  经 `OffsetPtr` 偏移。class / 可空 class / i128 payload 由
+  `value_abi_unsafe` 稳定拒收（需字段级 ARC 或 wide-slot ABI）。
+- **纯值顶层全局（2026-11-18 已落地）**：全局存储按 `[n x i64]` 展开；
+  `LoadGlobal` / `StoreGlobal` 携带 slot。`int?` 全局是 flag+payload；
+  纯值聚合初始化函数逐槽写全局并 `ret void`。class/Fn/i128 组合由
+  `value_abi_unsafe` 稳定拒收。
+- **剩余限制（登记）**：i128 聚合捕获仍拒收（需 lo/hi split 聚合 ABI）；
+  Fn var 重赋值的可空 class 变体已有手动 ARC probe 平衡，但 targeted
+  native e2e 与 ASan harness 仍待接；超大栈帧 1MB 边界 regression 待补。
 - **绑定位置 lambda（已落地，2026-11-11）**：`val f: Fn注解 = {…}` 把
   注解 Fn 型作期望压栈（与 check_call_args 实参压栈同纪律）；无注解
   绑定的显式参数全带类型标注时从标注构造参数表、返回型由 body 推断

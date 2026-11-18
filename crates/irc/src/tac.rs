@@ -150,15 +150,17 @@ pub enum Instr {
         src: Operand,
         ty: TyId,
     },
-    /// 顶层全局标量读取：`dst = @global`（跨函数持久存储）
+    /// 顶层全局槽读取：`dst = @global[slot]`（标量 slot=0）
     LoadGlobal {
         dst: TempId,
         global: DefId,
+        slot: u32,
         ty: TyId,
     },
-    /// 顶层全局标量写入：`@global = src`
+    /// 顶层全局槽写入：`@global[slot] = src`
     StoreGlobal {
         global: DefId,
+        slot: u32,
         src: Operand,
         ty: TyId,
     },
@@ -253,7 +255,7 @@ pub struct FunBody {
     pub entry: BlockId,
 }
 
-/// 顶层全局声明（v1：标量存储；init 为合成初始化函数体，main 前调用）
+/// 顶层全局声明（v1：纯值多槽存储；init 为合成初始化函数体，main 前调用）
 #[derive(Debug)]
 pub struct GlobalBody {
     pub def: DefId,
@@ -468,24 +470,36 @@ impl TacOutput {
                 op_text(src, interner, out);
                 let _ = write!(out, " : {}", ty_display(tys, defs, interner, *ty));
             }
-            Instr::LoadGlobal { dst, global, ty } => {
+            Instr::LoadGlobal {
+                dst,
+                global,
+                slot,
+                ty,
+            } => {
                 let _ = write!(
                     out,
-                    "%t{} = load_global {}.{} : {}",
+                    "%t{} = load_global {}.{}[{}] : {}",
                     dst.0,
                     interner.resolve(defs.get(*global).name),
                     global.0,
+                    slot,
                     ty_display(tys, defs, interner, *ty)
                 );
             }
-            Instr::StoreGlobal { global, src, ty } => {
+            Instr::StoreGlobal {
+                global,
+                slot,
+                src,
+                ty,
+            } => {
                 out.push_str("store_global ");
                 op_text(src, interner, out);
                 let _ = write!(
                     out,
-                    " -> {}.{} : {}",
+                    " -> {}.{}[{}] : {}",
                     interner.resolve(defs.get(*global).name),
                     global.0,
+                    slot,
                     ty_display(tys, defs, interner, *ty)
                 );
             }

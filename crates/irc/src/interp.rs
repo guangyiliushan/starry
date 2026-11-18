@@ -352,15 +352,46 @@ fn run_fun_capturing(
         closures: Vec::new(),
     };
     // 全局初始化：按源序执行合成 init 函数，后续函数经 globals 表读写。
+    // 纯值聚合按 TAC 实际引用的 slot 宽度建模；init 直接写槽，ret void。
     for global in &tac.globals {
-        let value = match &global.init {
-            Some(init) => machine
-                .exec_nested(init, &[], 0)?
-                .map(|(v, _)| v)
-                .unwrap_or(0),
-            None => 0,
+        let mut values = match &global.init {
+            Some(init) if init.ret == global.ty => {
+                let v = machine
+                    .exec_nested(init, &[], 0)?
+                    .map(|(v, _)| v)
+                    .unwrap_or(0);
+                vec![v]
+            }
+            Some(init) => {
+                machine.exec_nested(init, &[], 0)?;
+                Vec::new()
+            }
+            None => Vec::new(),
         };
-        machine.globals.push((global.def, value));
+        let mut slots = 1usize;
+        for fun in tac
+            .funs
+            .iter()
+            .chain(tac.globals.iter().filter_map(|g| g.init.as_ref()))
+        {
+            for block in &fun.blocks {
+                for instr in &block.instrs {
+                    match instr {
+                        Instr::LoadGlobal {
+                            global: def, slot, ..
+                        }
+                        | Instr::StoreGlobal {
+                            global: def, slot, ..
+                        } if def == &global.def => {
+                            slots = slots.max(*slot as usize + 1);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        values.resize(slots.max(1), 0);
+        machine.globals.push((global.def, values));
     }
     // 槽存储：temp → u64 单元（惰性增长）
     let n = fun
@@ -416,7 +447,7 @@ struct Machine<'a> {
     strings: Vec<String>,
     /// Const::Str → 侧表 id（预 intern；op() 只读，查表不 intern）
     str_ids: std::collections::HashMap<Symbol, u128>,
-    globals: Vec<(DefId, u128)>,
+    globals: Vec<(DefId, Vec<u128>)>,
     /// print 输出收集（差分 harness；每条 = 一行，与 runtime write_line 对齐）
     printed: Vec<String>,
     /// S2/P2-3b：闭包 box 注册表（AllocClass{Fn} 创建；StorePtr 填充）
@@ -761,20 +792,34 @@ impl<'a> Machine<'a> {
                 slot[i] = v;
                 Ok(())
             }
-            Instr::LoadGlobal { dst, global, ty } => {
+            Instr::LoadGlobal {
+                dst,
+                global,
+                slot,
+                ty,
+            } => {
                 let v = self
                     .globals
                     .iter()
                     .find(|(def, _)| def == global)
-                    .map(|(_, v)| *v)
+                    .and_then(|(_, values)| values.get(*slot as usize).copied())
                     .unwrap_or(0);
                 Self::put(cells, *dst, self.norm(v, *ty));
                 Ok(())
             }
-            Instr::StoreGlobal { global, src, ty } => {
+            Instr::StoreGlobal {
+                global,
+                slot,
+                src,
+                ty,
+            } => {
                 let v = self.norm(self.op(cells, src), *ty);
                 if let Some(entry) = self.globals.iter_mut().find(|(def, _)| def == global) {
-                    entry.1 = v;
+                    let i = *slot as usize;
+                    if entry.1.len() <= i {
+                        entry.1.resize(i + 1, 0);
+                    }
+                    entry.1[i] = v;
                 }
                 Ok(())
             }

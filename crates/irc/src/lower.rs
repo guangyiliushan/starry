@@ -162,20 +162,20 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
             continue;
         };
         let ty = sem.defs.get(def).sig.ty;
-        if crate::layout::is_aggregate(sem, ty) {
-            out.diags.push(Diagnostic::error(
-                DiagCode::IrcUnsupportedLowering,
-                binding.pattern.span,
-                "aggregate top-level globals are not lowered in this milestone (M-later)",
-            ));
-            skipped.insert(*name);
-            continue;
-        }
         // M4 review fix: class/?P globals have no release site (the
         // Global arm of emit_class_release is a silent no-op) — reject
         // loudly instead of leaking the object and skipping deinit.
         let global_class = crate::layout::is_class(sem, ty)
             || matches!(sem.tys.kind(ty), TyKind::Nullable(inner) if crate::layout::is_class(sem, *inner));
+        if expr::value_abi_unsafe(sem, ty) && !global_class {
+            out.diags.push(Diagnostic::error(
+                DiagCode::IrcUnsupportedLowering,
+                binding.pattern.span,
+                "this top-level value needs class ARC or i128 slot ABI (not lowered in this slice)",
+            ));
+            skipped.insert(*name);
+            continue;
+        }
         if global_class {
             out.diags.push(Diagnostic::error(
                 DiagCode::IrcUnsupportedLowering,
@@ -201,15 +201,25 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
             continue;
         };
         let init = if let Some(init) = &binding.init {
+            // 纯值聚合全局的 init 直接把槽写入全局存储；合成函数 ret void，
+            // 避免 LLVM 聚合返回指针悬垂，也让 interp 与 native 同一路径。
+            let aggregate = crate::layout::is_aggregate(sem, ty);
+            let unit_ty = sem.tys.unit;
             let mut ctx = Ctx::new(sem, source, i8_ty, &globals, &skipped);
             let entry = ctx.reserve_block();
             ctx.switch_to(entry);
             ctx.fun.entry = entry;
             ctx.fun.def = def;
-            ctx.fun.ret = ty;
+            ctx.fun.ret = if aggregate { unit_ty } else { ty };
             ctx.env.push(HashMap::new());
             let value = expr::lower_expr_as(&mut ctx, init, ty);
-            if ctx.is_unit(ty) {
+            if aggregate {
+                expr::store_global_value(&mut ctx, def, value, ty, binding.pattern.span);
+                ctx.terminate(Term::Ret {
+                    value: None,
+                    ty: unit_ty,
+                });
+            } else if ctx.is_unit(ty) {
                 ctx.terminate(Term::Ret { value: None, ty });
             } else {
                 ctx.terminate(Term::Ret {
@@ -218,12 +228,13 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
                 });
             }
             out.diags.append(&mut ctx.diags);
+            let init_ret = if aggregate { unit_ty } else { ty };
             let init_fun = std::mem::replace(
                 &mut ctx.fun,
                 FunBody {
                     def,
                     params: Vec::new(),
-                    ret: ty,
+                    ret: init_ret,
                     blocks: Vec::new(),
                     entry: BlockId(0),
                 },

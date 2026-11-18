@@ -428,14 +428,36 @@ pub(crate) fn read_place(ctx: &mut Ctx, place: Place, ty: TyId, span: Span) -> O
                 return Operand::Const(Const::Unit);
             }
             if crate::layout::is_aggregate(ctx, ty) {
-                ctx.diag(span, "聚合全局读取的 lowering 在 M-later");
-                return Operand::Const(Const::Unit);
+                let n = crate::layout::scalar_slots(ctx, ty);
+                let base = ctx.temp();
+                ctx.emit(Instr::Slot {
+                    dst: base,
+                    count: n.max(1) as u32,
+                });
+                for slot in 0..n {
+                    let sty = crate::layout::slot_ty(ctx, ty, slot);
+                    let v = ctx.temp();
+                    ctx.emit(Instr::LoadGlobal {
+                        dst: v,
+                        global,
+                        slot: slot as u32,
+                        ty: sty,
+                    });
+                    ctx.emit(Instr::Store {
+                        base,
+                        idx: Operand::Const(Const::Int(slot as i128)),
+                        src: Operand::Temp(v),
+                        ty: sty,
+                    });
+                }
+                return Operand::Temp(base);
             }
             let sty = crate::layout::slot_ty(ctx, ty, 0);
             let dst = ctx.temp();
             ctx.emit(Instr::LoadGlobal {
                 dst,
                 global,
+                slot: 0,
                 ty: sty,
             });
             Operand::Temp(dst)
@@ -459,6 +481,89 @@ pub(crate) fn read_place(ctx: &mut Ctx, place: Place, ty: TyId, span: Span) -> O
                 Operand::Temp(base)
             }
         }
+    }
+}
+
+/// 判定一个值 ABI 当前是否可按 i64 槽模型完整拷贝。class/Fn 需要
+/// 字段级 ARC；i128 聚合 payload 仍待 lo/hi split；其余纯值可逐槽。
+pub(crate) fn value_abi_unsafe<V: crate::layout::LayoutView>(ctx: &V, ty: TyId) -> bool {
+    if crate::layout::is_class(ctx, ty) || matches!(ctx.tys().kind(ty), TyKind::Fn(..)) {
+        return true;
+    }
+    match ctx.tys().kind(ty) {
+        TyKind::Int(IntKind::I128) => true,
+        TyKind::Array(elem, _) | TyKind::Nullable(elem) | TyKind::Range(elem) => {
+            value_abi_unsafe(ctx, *elem)
+        }
+        TyKind::Tuple(elems) => elems.iter().any(|e| value_abi_unsafe(ctx, *e)),
+        TyKind::Named(def, _) => match ctx.defs().get(*def).kind {
+            DefKind::Struct => ctx
+                .defs()
+                .get(*def)
+                .sig
+                .fields
+                .iter()
+                .any(|(_, t)| value_abi_unsafe(ctx, *t)),
+            DefKind::Enum => ctx
+                .defs()
+                .get(*def)
+                .sig
+                .variants
+                .iter()
+                .any(|(_, params)| params.iter().any(|(_, t)| value_abi_unsafe(ctx, *t))),
+            _ => true,
+        },
+        _ => false,
+    }
+}
+
+/// 聚合值进入逐槽写入前必须持有基址；常量 null 物化为全零槽。
+fn nullable_base(ctx: &mut Ctx, value: Operand, ty: TyId, span: Span) -> TempId {
+    match value {
+        Operand::Temp(t) => t,
+        Operand::Const(Const::Null) => {
+            let base = ctx.temp();
+            ctx.emit(Instr::Slot {
+                dst: base,
+                count: crate::layout::scalar_slots(ctx, ty).max(1) as u32,
+            });
+            base
+        }
+        _ => {
+            ctx.diag(span, "聚合写入值为常量（sem 契约破缺）");
+            ctx.temp()
+        }
+    }
+}
+
+/// 把一个已 lower 的值写入顶层全局的槽视图。标量保持旧单槽指令；
+/// 纯值聚合按 scalar_slots 展开。调用方先经 value_abi_unsafe 门禁。
+pub(crate) fn store_global_value(
+    ctx: &mut Ctx,
+    global: DefId,
+    value: Operand,
+    ty: TyId,
+    span: Span,
+) {
+    if !crate::layout::is_aggregate(ctx, ty) {
+        ctx.emit(Instr::StoreGlobal {
+            global,
+            slot: 0,
+            src: value,
+            ty,
+        });
+        return;
+    }
+    let base = nullable_base(ctx, value, ty, span);
+    for slot in 0..crate::layout::scalar_slots(ctx, ty) {
+        let sty = crate::layout::slot_ty(ctx, ty, slot);
+        let src = load_slot(ctx, base, slot, sty);
+        ctx.emit(Instr::StoreGlobal {
+            global,
+            slot: slot as u32,
+            src,
+            ty: sty,
+        });
     }
 }
 
@@ -1342,14 +1447,55 @@ fn deref_read(ctx: &mut Ctx, e: &ExprWrap, target: &ExprWrap) -> Operand {
         ctx.diag(e.span, "解引结果类型破缺（sem 契约破缺）");
         return Operand::Const(Const::Unit);
     };
-    // S2/N2 审计（nullable-abi-audit.md §3.2）：解引指向可空的指针——
-    // dst 按 Cell(i64) 分类 = flag 视图（payload 槽缺失，Some 值错）
-    if matches!(ctx.sem.tys.kind(inner), TyKind::Nullable(..)) {
-        ctx.diag(
-            e.span,
-            "dereferencing a pointer to a nullable type is not supported in v1 (single-slot load drops the payload)",
-        );
-        return Operand::Const(Const::Unit);
+    if let TyKind::Nullable(nullable) = ctx.sem.tys.kind(inner).clone() {
+        if value_abi_unsafe(ctx, nullable) {
+            ctx.diag(
+                e.span,
+                "pointer to this nullable value needs class ARC or i128 slot ABI (not supported in this slice)",
+            );
+            return Operand::Const(Const::Unit);
+        }
+        let ptr = match op {
+            Operand::Temp(t) => t,
+            Operand::Const(_) => {
+                ctx.diag(target.span, "解引目标为常量（sem 契约破缺）");
+                return Operand::Const(Const::Unit);
+            }
+        };
+        let n = crate::layout::scalar_slots(ctx, inner);
+        let base = ctx.temp();
+        ctx.emit(Instr::Slot {
+            dst: base,
+            count: n.max(1) as u32,
+        });
+        for slot in 0..n {
+            let sty = crate::layout::slot_ty(ctx, inner, slot);
+            let ptr_slot = if slot == 0 {
+                ptr
+            } else {
+                let addr = ctx.temp();
+                ctx.emit(Instr::OffsetPtr {
+                    dst: addr,
+                    base: ptr,
+                    bytes: (8 * slot) as i64,
+                    ty: ctx.sem.tys.unit,
+                });
+                addr
+            };
+            let v = ctx.temp();
+            ctx.emit(Instr::LoadPtr {
+                dst: v,
+                ptr: ptr_slot,
+                ty: sty,
+            });
+            ctx.emit(Instr::Store {
+                base,
+                idx: Operand::Const(Const::Int(slot as i128)),
+                src: Operand::Temp(v),
+                ty: sty,
+            });
+        }
+        return Operand::Temp(base);
     }
     let ptr = match op {
         Operand::Temp(t) => t,
@@ -3899,11 +4045,20 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
                     }
                 }
                 Place::Global(global) => {
-                    if crate::layout::is_aggregate(ctx, ty) || ctx.is_unit(ty) {
-                        ctx.diag(span, "聚合/unit 全局赋值的 lowering 在 M-later");
+                    if ctx.is_unit(ty) {
+                        ctx.diag(span, "unit 全局赋值的 lowering 在 M-later");
                         return;
                     }
-                    ctx.emit(Instr::StoreGlobal { global, src: v, ty });
+                    if crate::layout::is_aggregate(ctx, ty) {
+                        store_global_value(ctx, global, v, ty, span);
+                        return;
+                    }
+                    ctx.emit(Instr::StoreGlobal {
+                        global,
+                        slot: 0,
+                        src: v,
+                        ty,
+                    });
                 }
                 Place::Temp(_) => {
                     ctx.diag(span, "对不可变绑定赋值穿透 sem 门禁（SemAssignToVal 漏报）");
@@ -3925,10 +4080,33 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
                 .get(target.id)
                 .copied()
                 .unwrap_or(ctx.sem.tys.unit);
-            // S2/N2 审计（nullable-abi-audit.md §3.2）：写入指向可空的
-            // 指针——StorePtr 按 Cell(i64) 只写 flag 槽（payload 缺失）
-            if matches!(ctx.sem.tys.kind(ty), TyKind::Nullable(..)) {
-                ctx.diag(span, "write through a pointer to a nullable type is not supported in v1 (single-slot store drops the payload)");
+            if let TyKind::Nullable(nullable) = ctx.sem.tys.kind(ty).clone() {
+                if value_abi_unsafe(ctx, nullable) {
+                    ctx.diag(span, "write through this nullable pointer needs class ARC or i128 slot ABI (not supported in this slice)");
+                    return;
+                }
+                let base = nullable_base(ctx, v, ty, span);
+                for slot in 0..crate::layout::scalar_slots(ctx, ty) {
+                    let sty = crate::layout::slot_ty(ctx, ty, slot);
+                    let src = load_slot(ctx, base, slot, sty);
+                    let ptr_slot = if slot == 0 {
+                        ptr
+                    } else {
+                        let addr = ctx.temp();
+                        ctx.emit(Instr::OffsetPtr {
+                            dst: addr,
+                            base: ptr,
+                            bytes: (8 * slot) as i64,
+                            ty: ctx.sem.tys.unit,
+                        });
+                        addr
+                    };
+                    ctx.emit(Instr::StorePtr {
+                        ptr: ptr_slot,
+                        src,
+                        ty: sty,
+                    });
+                }
                 return;
             }
             ctx.emit(Instr::StorePtr { ptr, src: v, ty });

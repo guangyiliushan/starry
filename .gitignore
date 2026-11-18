@@ -92,3 +92,6 @@ coverage/
 # Debug
 debug/
 *.pdb
+
+# Local experiment drafts
+/drafts/

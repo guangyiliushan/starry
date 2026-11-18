@@ -638,17 +638,13 @@ fn annotated_array_literal_stores_at_target_element_width() {
     assert!(!text.contains(": i32"), "{text}");
 }
 #[test]
-fn aggregate_top_level_global_use_reports_stable_unsupported() {
-    // 审查 P0-3：未 lower 的顶层聚合全局，使用点是稳定码 unsupported 诊断，
-    // 不是「契约破缺」内部断言，也不级联
-    let (_, codes) = dump("val G: [int; 2] = [7, 8]\nfun main() {\n    print(G[0])\n}");
-    assert_eq!(
-        codes,
-        vec![
-            DiagCode::IrcUnsupportedLowering,
-            DiagCode::IrcUnsupportedLowering
-        ]
-    );
+fn pure_value_aggregate_global_lower_to_slots() {
+    // 纯值聚合全局统一走 [n x i64] 槽存储；class/Fn/i128 组合仍由
+    // value_abi_unsafe 稳定拒收。
+    let (text, codes) = dump("val G: [int; 2] = [7, 8]\nfun main(): int {\n    return G[1]\n}");
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(text.contains("load_global G."), "{text}");
+    assert!(text.contains("[1]"), "{text}");
 }
 #[test]
 fn borrow_and_deref_lower_to_pointer_instrs() {
@@ -678,5 +674,58 @@ fn class_top_level_global_is_rejected() {
     assert!(
         codes.contains(&DiagCode::IrcUnsupportedLowering),
         "class global must be rejected, got {codes:?}"
+    );
+}
+#[test]
+fn nullable_scalar_global_lower_to_slots() {
+    // nullable-abi-audit §3.3：global 不是单槽 i64；读取物化 flag+payload。
+    let (text, codes) = dump("val x: int? = 5\nfun main(): int {\n    return x ?? 0\n}");
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(text.contains("load_global x."), "{text}");
+    assert!(text.contains("[1]"), "{text}");
+}
+
+#[test]
+fn pointer_to_nullable_lower_to_slots() {
+    // nullable-abi-audit §3.3：pointee 读和写都不允许丢 payload。
+    let (text, codes) = dump(
+        "fun f(): int {\n    var x: int? = 5\n    val p = &x\n    val q = &mut x\n    *q = 7\n    val r = *p\n    return r ?? 0\n}",
+    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(
+        text.contains("storeptr") && text.contains("loadptr"),
+        "{text}"
+    );
+}
+#[test]
+fn unsafe_global_and_nullable_pointer_combinations_reject_stably() {
+    let cases = [
+        (
+            "val x: i128? = 1\nfun main(): int { return 0 }",
+            "i128 slot ABI",
+        ),
+        (
+            "class C(val x: int) {}\nfun f(): int {\n    val x: C? = C(1)\n    val p = &x\n    val y = *p\n    return y!!.x\n}",
+            "class ARC or i128 slot ABI",
+        ),
+    ];
+    for (source, needle) in cases {
+        let parsed = parser::parse_source(source).expect("machine parse");
+        let mut sem_out = sem::analyze(parsed);
+        let tac = irc::lower(&mut sem_out, source);
+        assert!(
+            tac.diags.iter().any(|d| {
+                d.code == DiagCode::IrcUnsupportedLowering && d.message.contains(needle)
+            }),
+            "diagnostic `{needle}` missing: {:?}",
+            tac.diags
+        );
+    }
+
+    // Fn 顶层值在 sem 层已有稳定拒收；不落到 IRC 的 i64 槽模型。
+    let (_, fn_codes) = dump("fun add(): int = 1\nval f = add\nfun main(): int { return 0 }");
+    assert!(
+        fn_codes.contains(&DiagCode::SemUnsupportedConstruct),
+        "Fn global must reject at sem: {fn_codes:?}"
     );
 }

@@ -1292,72 +1292,23 @@ fn i128_capture_e2e() {
     assert_eq!(out, "123456789012345679\n246913578024691356\n");
 }
 #[test]
-fn nullable_scalar_global_rejected() {
-    // S2/N2 审计（nullable-abi-audit.md §3.1）：顶层标量可空全局——
-    // 全局存储 scalar_ty = "i64" 单槽，可空 2 槽（flag+payload）丢 payload
-    // → 稳定拒收（与 aggregate top-level global 同门）
-    if !clang_available() {
+fn nullable_scalar_global_end_to_end() {
+    let Some(out) = build_and_run(
+        "nullable_global",
+        "val x: int? = 5\nval n: int? = null\nfun main() {\n    print(x ?? 0)\n    print(n ?? 9)\n}\n",
+    ) else {
         return;
-    }
-    let dir = std::env::temp_dir().join(format!("starry_nullglobal_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("nullglobal.starry");
-    std::fs::write(
-        &path,
-        "val x: int? = 5\nfun main(): int {\n    return 0\n}\n",
-    )
-    .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_starryc"))
-        .args(["build", path.to_str().unwrap()])
-        .output()
-        .unwrap();
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(
-        !out.status.success(),
-        "top-level nullable scalar global must be rejected"
-    );
-    assert!(
-        combined.contains("not lowered") || combined.contains("aggregate top-level"),
-        "diag missing: {combined}"
-    );
+    };
+    assert_eq!(out, "5\n9\n");
 }
 
 #[test]
-fn pointer_to_nullable_deref_rejected() {
-    // S2/N2 审计（nullable-abi-audit.md §3.2）：解引指向可空的指针——
-    // LoadPtr dst 按 Cell(i64) = flag 视图（payload 槽缺失）→ 稳定拒收
-    if !clang_available() {
+fn pointer_to_nullable_end_to_end() {
+    let Some(out) = build_and_run(
+        "pointer_nullable",
+        "fun main() {\n    var x: int? = 5\n    val p = &x\n    print((*p) ?? 0)\n    val q = &mut x\n    *q = 7\n    print(x ?? 0)\n    *q = null\n    print(x ?? 9)\n}\n",
+    ) else {
         return;
-    }
-    let dir = std::env::temp_dir().join(format!("starry_ptrderef_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("ptrderef.starry");
-    std::fs::write(
-        &path,
-        "fun main(): int {\n    val p: *const int? = null\n    val x = *p\n    return 0\n}\n",
-    )
-    .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_starryc"))
-        .args(["build", path.to_str().unwrap()])
-        .output()
-        .unwrap();
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(
-        !out.status.success(),
-        "pointer-to-nullable deref must be rejected"
-    );
-    assert!(
-        combined.contains("not supported in v1"),
-        "diag missing: {combined}"
-    );
+    };
+    assert_eq!(out, "5\n7\n9\n");
 }

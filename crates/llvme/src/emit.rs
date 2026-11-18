@@ -54,6 +54,10 @@ pub fn emit_module(
         defs,
         interner,
     };
+    for global in &tac.globals {
+        g.global_slots
+            .insert(global.def, scalar_slots(&lc, global.ty).max(1) as u32);
+    }
     let mut body = String::new();
     let mut defined = Vec::new();
     for fun in &tac.funs {
@@ -65,14 +69,23 @@ pub fn emit_module(
     let mut globals = String::new();
     for global in &tac.globals {
         let name = fun_name(&lc, global.def);
+        let is_agg = class_of(lc.tys, lc.defs, global.ty) == TyClass::Agg;
         let storage_ty = if scalar_ty(lc.tys, lc.defs, global.ty) == "i8*" {
-            "i8*"
+            "i8*".to_string()
+        } else if is_agg {
+            format!("[{} x i64]", scalar_slots(&lc, global.ty).max(1))
         } else if contains_i128(&lc, global.ty) {
-            "i128"
+            "i128".to_string()
         } else {
-            "i64"
+            "i64".to_string()
         };
-        let zero = if storage_ty == "i8*" { "null" } else { "0" };
+        let zero = if is_agg {
+            "zeroinitializer"
+        } else if storage_ty == "i8*" {
+            "null"
+        } else {
+            "0"
+        };
         let _ = writeln!(globals, "{} = global {} {}", name, storage_ty, zero);
     }
     // 全局初始化函数：必须在字符串常量 flush 之前发射——init 表达式里
@@ -144,6 +157,8 @@ struct Global {
     env_release_n: u32,
     /// M1 (D2): starry_overflow_panic was referenced (emit noreturn attrs)
     used_ovf_panic: bool,
+    /// 纯值聚合 global 的槽宽（LoadGlobal slot 的 GEP 尺寸）
+    global_slots: BTreeMap<DefId, u32>,
     /// M1 (D2): @.str ids actually referenced (unused fun-name strings are
     /// not emitted, keeping .ll goldens stable)
     used_strs: std::collections::BTreeSet<usize>,
@@ -1210,28 +1225,52 @@ fn emit_instr(
                 let _ = writeln!(e.out, "  store {} {}, ptr {}", lty, v, addr);
             }
         }
-        Instr::LoadGlobal { dst, global, ty } => {
+        Instr::LoadGlobal {
+            dst,
+            global,
+            slot,
+            ty,
+        } => {
             let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
-            let v = e.fresh();
-            let _ = writeln!(
-                e.out,
-                "  {} = load {}, ptr {}",
-                v,
-                lty,
+            let addr = if *slot == 0 {
                 fun_name(e.lc, *global)
-            );
+            } else {
+                let n = e.g.global_slots.get(global).copied().unwrap_or(1);
+                let p = e.fresh();
+                let ity = scalar_ty(e.lc.tys, e.lc.defs, e.lc.tys.default_int);
+                let _ = writeln!(
+                    e.out,
+                    "  {p} = getelementptr [{n} x i64], ptr {}, i64 0, {ity} {slot}",
+                    fun_name(e.lc, *global)
+                );
+                p
+            };
+            let v = e.fresh();
+            let _ = writeln!(e.out, "  {v} = load {lty}, ptr {addr}");
             e.store_val(*dst, *ty, v);
         }
-        Instr::StoreGlobal { global, src, ty } => {
+        Instr::StoreGlobal {
+            global,
+            slot,
+            src,
+            ty,
+        } => {
             let v = e.op_val(src, *ty);
             let lty = scalar_ty(e.lc.tys, e.lc.defs, *ty);
-            let _ = writeln!(
-                e.out,
-                "  store {} {}, ptr {}",
-                lty,
-                v,
+            let addr = if *slot == 0 {
                 fun_name(e.lc, *global)
-            );
+            } else {
+                let n = e.g.global_slots.get(global).copied().unwrap_or(1);
+                let p = e.fresh();
+                let ity = scalar_ty(e.lc.tys, e.lc.defs, e.lc.tys.default_int);
+                let _ = writeln!(
+                    e.out,
+                    "  {p} = getelementptr [{n} x i64], ptr {}, i64 0, {ity} {slot}",
+                    fun_name(e.lc, *global)
+                );
+                p
+            };
+            let _ = writeln!(e.out, "  store {lty} {v}, ptr {addr}");
         }
         Instr::Slot { .. } => {
             // 纯声明：alloca 已在入口按分类发出
@@ -1751,7 +1790,11 @@ fn emit_main_wrapper(lc: &Lc, tac: &TacOutput, body: &mut String) {
         let _ = writeln!(body, "define i32 @main() {{");
         let mut next_global_temp = 0usize;
         for global in &tac.globals {
-            if global.init.is_some() {
+            if global.init.is_some() && class_of(lc.tys, lc.defs, global.ty) == TyClass::Agg {
+                // 纯值聚合 init 已直接写入多槽全局；这里只触发初始化。
+                let init = format!("@__starry_init_global.{}", global.def.0);
+                let _ = writeln!(body, "  call void {init}()");
+            } else if global.init.is_some() {
                 let gty = if scalar_ty(lc.tys, lc.defs, global.ty) == "i8*" {
                     "i8*".to_string()
                 } else if contains_i128(lc, global.ty) {
