@@ -14,7 +14,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-const RUNTIME_C: &str = include_str!("../../../runtime/starry_runtime.c");
+const RUNTIME_HEADER: &str = include_str!("../../../runtime/starry_runtime.h");
+const RUNTIME_COMMON_C: &str = include_str!("../../../runtime/common.c");
+const RUNTIME_WIN32_C: &str = include_str!("../../../runtime/win32.c");
+const RUNTIME_POSIX_C: &str = include_str!("../../../runtime/posix.c");
 
 fn llvm_tool_path(name: &str) -> Option<PathBuf> {
     if Command::new(name)
@@ -63,19 +66,37 @@ fn both_outputs(case: usize, source: &str) -> Option<(Vec<String>, Vec<String>)>
     // 路径 B：native build + run
     let clang = llvm_tool_path("clang")?;
     let text = llvme::emit(&tac, &sem_out.tys, &sem_out.defs, &mut sem_out.interner);
-    let dir = std::env::temp_dir().join(format!("starry_diff_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("starry_diff_{}_{}", std::process::id(), case));
     std::fs::create_dir_all(&dir).unwrap();
     let ll = dir.join("diff.ll");
-    let c = dir.join("runtime.c");
+    let common = dir.join("runtime_common.c");
+    let platform = dir.join(if cfg!(windows) {
+        "runtime_win32.c"
+    } else {
+        "runtime_posix.c"
+    });
     let exe: PathBuf = if cfg!(windows) {
         dir.join("diff.exe")
     } else {
         dir.join("diff")
     };
     std::fs::write(&ll, &text).unwrap();
-    std::fs::write(&c, RUNTIME_C).unwrap();
+    std::fs::write(
+        &common,
+        RUNTIME_COMMON_C.replacen("#include \"starry_runtime.h\"", RUNTIME_HEADER, 1),
+    )
+    .unwrap();
+    std::fs::write(
+        &platform,
+        if cfg!(windows) {
+            RUNTIME_WIN32_C
+        } else {
+            RUNTIME_POSIX_C
+        },
+    )
+    .unwrap();
     let mut cmd = Command::new(&clang);
-    cmd.arg(&ll).arg(&c);
+    cmd.arg(&ll).arg(&common).arg(&platform);
     if cfg!(windows) {
         cmd.arg("-nostdlib").arg("-lkernel32");
     }
@@ -204,16 +225,34 @@ fn interp_and_native_agree_on_traps() {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let ll = dir.join("t.ll");
-        let c = dir.join("runtime.c");
+        let common = dir.join("runtime_common.c");
+        let platform = dir.join(if cfg!(windows) {
+            "runtime_win32.c"
+        } else {
+            "runtime_posix.c"
+        });
         let exe: PathBuf = if cfg!(windows) {
             dir.join("t.exe")
         } else {
             dir.join("t")
         };
         std::fs::write(&ll, &text).unwrap();
-        std::fs::write(&c, RUNTIME_C).unwrap();
+        std::fs::write(
+            &common,
+            RUNTIME_COMMON_C.replacen("#include \"starry_runtime.h\"", RUNTIME_HEADER, 1),
+        )
+        .unwrap();
+        std::fs::write(
+            &platform,
+            if cfg!(windows) {
+                RUNTIME_WIN32_C
+            } else {
+                RUNTIME_POSIX_C
+            },
+        )
+        .unwrap();
         let mut cmd = Command::new(&clang);
-        cmd.arg(&ll).arg(&c);
+        cmd.arg(&ll).arg(&common).arg(&platform);
         if cfg!(windows) {
             cmd.arg("-nostdlib").arg("-lkernel32");
         }

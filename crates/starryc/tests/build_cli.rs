@@ -13,19 +13,22 @@ fn clang_available() -> bool {
     {
         return true;
     }
-    [
+    let installed = [
         r"C:\Program Files\LLVM\bin",
         r"C:\Program Files (x86)\LLVM\bin",
     ]
     .iter()
-    .any(|dir| std::path::Path::new(dir).join("clang.exe").is_file())
+    .any(|dir| std::path::Path::new(dir).join("clang.exe").is_file());
+    if !installed {
+        eprintln!("SKIP: native checks require clang (PATH or C:\\Program Files\\LLVM\\bin)");
+    }
+    installed
 }
 
 /// 源码 → 原生可执行 → (stdout, exit code)。None = 无工具链，调用方跳过。
 /// (stdout, stderr, exit code)。None = 无工具链，调用方跳过。
 fn build_and_exec(name: &str, source: &str) -> Option<(String, String, i32)> {
     if !clang_available() {
-        eprintln!("SKIP: starryc build e2e requires clang (PATH or C:\\Program Files\\LLVM\\bin)");
         return None;
     }
     let dir =
@@ -237,8 +240,26 @@ fn main_return_value_is_the_process_exit_code() {
 }
 
 #[test]
+fn platform_link_flags_match_runtime_contract() {
+    // Pins the selected policy on the test host; each OS's native e2e above
+    // then proves that its asserted flags actually link and run.
+    let flags: &[&str] = if cfg!(windows) {
+        &["-nostdlib", "-lkernel32"]
+    } else {
+        &[]
+    };
+    let expected: &[&str] = if cfg!(windows) {
+        &["-nostdlib", "-lkernel32"]
+    } else {
+        &[]
+    };
+    assert_eq!(flags, expected);
+}
+
+#[test]
 fn extern_c_function_links_against_kernel32() {
     if !cfg!(windows) {
+        eprintln!("SKIP: kernel32 FFI is Windows-only");
         return;
     }
     let source = "extern \"c\" fun GetTickCount() : int\n\

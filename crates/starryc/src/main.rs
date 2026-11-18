@@ -401,9 +401,12 @@ fn verify_ir(text: &str) -> Result<(), String> {
     }
 }
 
-/// starryc build：.ll + 内嵌 C runtime → clang → 可执行文件。
+/// starryc build：.ll + 内嵌 split runtime → clang → 可执行文件。
 /// runtime 不是 Cargo 依赖；源码在编译 starryc 时经 include_str! 固定。
-const RUNTIME_C: &str = include_str!("../../../runtime/starry_runtime.c");
+const RUNTIME_HEADER: &str = include_str!("../../../runtime/starry_runtime.h");
+const RUNTIME_COMMON_C: &str = include_str!("../../../runtime/common.c");
+const RUNTIME_WIN32_C: &str = include_str!("../../../runtime/win32.c");
+const RUNTIME_POSIX_C: &str = include_str!("../../../runtime/posix.c");
 
 fn llvm_tool_path(name: &str) -> PathBuf {
     if std::process::Command::new(name)
@@ -686,24 +689,48 @@ fn cmd_build(path: &str, output: Option<&str>, link_args: &[String], release: bo
     let pid = std::process::id();
     let dir = std::env::temp_dir();
     let ll_path = dir.join(format!("starry_build_{pid}.ll"));
-    let c_path = dir.join(format!("starry_runtime_{pid}.c"));
+    // Repository common.c includes the header; the embedded snapshot is
+    // self-contained so concurrent builds cannot race on a temp include.
+    let common_path = dir.join(format!("starry_runtime_common_{pid}.c"));
+    let platform_path = dir.join(format!(
+        "starry_runtime_{}_{}.c",
+        if cfg!(windows) { "win32" } else { "posix" },
+        pid
+    ));
     if let Err(e) = std::fs::write(&ll_path, text.as_bytes())
-        .and_then(|_| std::fs::write(&c_path, RUNTIME_C.as_bytes()))
+        .and_then(|_| {
+            std::fs::write(
+                &common_path,
+                RUNTIME_COMMON_C
+                    .replacen("#include \"starry_runtime.h\"", RUNTIME_HEADER, 1)
+                    .as_bytes(),
+            )
+        })
+        .and_then(|_| {
+            std::fs::write(
+                &platform_path,
+                if cfg!(windows) {
+                    RUNTIME_WIN32_C.as_bytes()
+                } else {
+                    RUNTIME_POSIX_C.as_bytes()
+                },
+            )
+        })
     {
         eprintln!("starryc: 无法写临时构建文件: {e}");
         return ExitCode::FAILURE;
     }
     let clang_path = llvm_tool_path("clang");
     let mut clang = std::process::Command::new(&clang_path);
-    clang.arg(&ll_path).arg(&c_path);
+    clang.arg(&ll_path).arg(&common_path).arg(&platform_path);
     if cfg!(windows) {
-        // The bundled runtime is freestanding and provides mainCRTStartup.
+        // Windows stays freestanding: the runtime provides mainCRTStartup.
         clang.arg("-nostdlib").arg("-lkernel32");
         // P1-A0-0：默认 1MB 栈预留 < 大聚合数组帧——8MB 保证安全
         clang.arg("-Wl,/STACK:8388608");
-        if release {
-            clang.arg("-O2");
-        }
+    }
+    if release {
+        clang.arg("-O2");
     }
     // `--` 透传的链接参数（extern "c" FFI：额外目标文件 / -l / -L）
     for arg in link_args {
@@ -711,7 +738,8 @@ fn cmd_build(path: &str, output: Option<&str>, link_args: &[String], release: bo
     }
     let status = clang.arg("-o").arg(&exe).status();
     let _ = std::fs::remove_file(&ll_path);
-    let _ = std::fs::remove_file(&c_path);
+    let _ = std::fs::remove_file(&common_path);
+    let _ = std::fs::remove_file(&platform_path);
     match status {
         Ok(status) if status.success() => {
             println!("{}", exe.display());
@@ -722,7 +750,7 @@ fn cmd_build(path: &str, output: Option<&str>, link_args: &[String], release: bo
             ExitCode::FAILURE
         }
         Err(e) => {
-            eprintln!("starryc: 无法启动 clang（已查 PATH 与 C:\\Program Files\\LLVM\\bin）: {e}");
+            eprintln!("starryc: 无法启动 clang（已查 PATH 与常见 LLVM 安装位）: {e}");
             ExitCode::FAILURE
         }
     }

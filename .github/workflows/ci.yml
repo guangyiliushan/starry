@@ -31,6 +31,17 @@ jobs:
           sudo apt-get install -y clang-18 llvm-18
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/llvm-as llvm-as /usr/bin/llvm-as-18 100
+      - name: Verify native toolchain (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "C:\Program Files\LLVM\bin\clang.exe" --version
+          & "C:\Program Files\LLVM\bin\llvm-as.exe" --version
+      - name: Verify native toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          clang --version
+          llvm-as --version
       - name: cargo build
         run: cargo build --workspace --locked
       - name: cargo fmt --check

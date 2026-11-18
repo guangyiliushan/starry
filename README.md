@@ -23,7 +23,10 @@ before printing (invalid IR exits `1`). If `llvm-as` or `clang` is available,
 the integration tests use it as an external validator; neither tool is a crate
 Toolchain baseline: LLVM 15+ (opaque pointers; the IR verifier runs `llvm-as`
 first, falling back to `clang -x ir -c`). Tests that need the toolchain print an
-explicit `SKIP:` when it is absent — never silent.
+explicit `SKIP:` when it is absent — never silent. Native builds use the
+freestanding Windows runtime (`mainCRTStartup` + kernel32) or the normal libc
+startup on Linux; both use the same stable Starry runtime symbols and trap exit
+code 134.
 dependency.
 
 ## CLI
@@ -67,7 +70,9 @@ crates/
   starryc/   command-line compiler driver
   syntaxgen/ generated syntax vocabulary checks
 runtime/
-  starry_runtime.c  # freestanding C runtime used only by starryc build
+  common.c          # shared Starry runtime logic and stable symbols
+  win32.c           # Windows freestanding: Heap*, WriteFile, ExitProcess
+  posix.c           # Linux libc: malloc/free, write, _exit
 ```
 
 Grammar and phase contracts live in `docs/syntax/`: `starry.ebnf`,

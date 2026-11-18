@@ -1,76 +1,9 @@
-// Minimal Starry runtime. Self-contained on Windows: no C headers and no CRT;
-// starryc build links this file with clang -nostdlib -lkernel32.
-typedef unsigned long DWORD;
-typedef unsigned long long SIZE_T;
-typedef void *HANDLE;
+#include "starry_runtime.h"
 
-__declspec(dllimport) HANDLE GetProcessHeap(void);
-__declspec(dllimport) void *HeapAlloc(HANDLE, DWORD, SIZE_T);
-__declspec(dllimport) int HeapFree(HANDLE, DWORD, void *);
-__declspec(dllimport) HANDLE GetStdHandle(DWORD);
-__declspec(dllimport) int WriteFile(HANDLE, const void *, DWORD, DWORD *, void *);
-__declspec(dllimport) void ExitProcess(unsigned int);
-
-#ifdef _WIN32
-static void xfree(void *p) { HeapFree(GetProcessHeap(), 0, p); }
-#else
-static void xfree(void *p) { free(p); }
-#endif
-// M10: freestanding memcpy — -O2 优化会在 fmt_i64/utf8_from_cp 等处
-// 生成 memcpy 调用（-nostdlib 无 CRT），必须自行提供。
-void *memset(void *dst, int val, unsigned long long n) {
-    unsigned char *d = (unsigned char *)dst;
-    for (unsigned long long i = 0; i < n; i++) d[i] = (unsigned char)val;
-    return dst;
+static void fatal_alloc(void) {
+    rt_write_stderr("starry runtime: allocation failed\n", 35);
+    rt_fatal_exit(134u);
 }
-unsigned long long strlen(const char *s) {
-    unsigned long long n = 0;
-    while (s[n]) n++;
-    return n;
-}
-/* P1-A0-0：MSVC x64 __chkstk 真实逐页探测（N1 修复——1.2MB 栈帧
- * naked ret 导致 ACCESS_VIOLATION）。ABI：RAX = 帧大小（字节），
- * 从 RSP-RAX 到 RSP 逐 4KB 页触碰（触发 guard page 提交）。
- * 保留 RCX/RAX（push/pop），>1MB 帧仍工作但无诊断（后续可加 stderr 告知）。 */
-__attribute__((naked)) void __chkstk(void) {
-    __asm__ volatile(
-        ".intel_syntax noprefix\n"
-        "push rcx\n"
-        "push rax\n"
-        "cmp rax, 0x1000\n"
-        "jle 1f\n"
-        "mov rcx, rsp\n"
-        "sub rcx, rax\n"
-        "and rcx, -0x1000\n"
-        "1:\n"
-        "cmp rcx, rsp\n"
-        "jae 2f\n"
-        "mov al, byte ptr [rcx]\n"
-        "add rcx, 0x1000\n"
-        "jmp 1b\n"
-        "2:\n"
-        "pop rax\n"
-        "pop rcx\n"
-        "ret\n"
-    );
-}
-
-void *memcpy(void *dst, const void *src, unsigned long long n) {
-    char *d = (char *)dst;
-    const char *s = (const char *)src;
-    for (unsigned long long i = 0; i < n; i++) d[i] = s[i];
-    return dst;
-}
-
-int _fltused;
-int main(void);
-
-void mainCRTStartup(void) {
-    int code = main();
-    ExitProcess((unsigned int)code);
-}
-
-static void *xalloc(SIZE_T n) { return HeapAlloc(GetProcessHeap(), 0, n); }
 
 static SIZE_T cstr_len(const char *s) {
     const char *p = s;
@@ -82,30 +15,24 @@ static void cstr_copy(char *dst, const char *src, SIZE_T n) {
     for (SIZE_T i = 0; i < n; i++) dst[i] = src[i];
 }
 
-static void write_err(const char *s) {
-    HANDLE err = GetStdHandle((DWORD)-12); // STD_ERROR_HANDLE
-    DWORD n;
-    WriteFile(err, s, (DWORD)cstr_len(s), &n, 0);
+static char *from_buf(const char *buf, SIZE_T n) {
+    char *out = rt_alloc(n + 1);
+    cstr_copy(out, buf, n);
+    out[n] = 0;
+    return out;
 }
 
 static void write_str(const char *s) {
-    DWORD written = 0;
-    HANDLE out = GetStdHandle((DWORD)-11); // STD_OUTPUT_HANDLE
-    DWORD n = (DWORD)cstr_len(s);
-    WriteFile(out, s, n, &written, 0);
+    rt_write_stdout(s, cstr_len(s));
+}
+
+static void write_err(const char *s) {
+    rt_write_stderr(s, cstr_len(s));
 }
 
 static void write_line(const char *s) {
     write_str(s);
     write_str("\n");
-}
-
-static char *from_buf(const char *buf, SIZE_T n) {
-    char *out = (char *)xalloc(n + 1);
-    if (!out) return 0;
-    cstr_copy(out, buf, n);
-    out[n] = 0;
-    return out;
 }
 
 static char *fmt_i64(long long v) {
@@ -203,8 +130,7 @@ static char *fmt_double(double v, int precision) {
 
 static char *dup_string(const char *s) {
     SIZE_T n = cstr_len(s);
-    char *out = (char *)xalloc(n + 1);
-    if (!out) return 0;
+    char *out = rt_alloc(n + 1);
     cstr_copy(out, s, n);
     out[n] = 0;
     return out;
@@ -232,8 +158,7 @@ static char *fmt_u128(unsigned long long hi, unsigned long long lo) {
         lo = qlo;
     }
     if (rn == 0) rev[rn++] = '0';
-    char *out = (char *)xalloc((SIZE_T)rn + 1);
-    if (!out) return 0;
+    char *out = rt_alloc((SIZE_T)rn + 1);
     for (int i = 0; i < rn; i++) out[i] = rev[rn - 1 - i];
     out[rn] = 0;
     return out;
@@ -249,8 +174,7 @@ static char *fmt_i128(unsigned long long hi, unsigned long long lo) {
     char *digits = fmt_u128(hi, lo);
     if (!neg) return digits;
     SIZE_T n = cstr_len(digits);
-    char *out = (char *)xalloc(n + 2);
-    if (!out) return digits;
+    char *out = rt_alloc(n + 2);
     out[0] = '-';
     cstr_copy(out + 1, digits, n);
     out[n + 1] = 0;
@@ -297,8 +221,7 @@ int starry_str_eq(const char *a, const char *b) {
 
 char *starry_str_concat(const char *a, const char *b) {
     SIZE_T na = cstr_len(a), nb = cstr_len(b);
-    char *out = (char *)xalloc(na + nb + 1);
-    if (!out) return 0;
+    char *out = rt_alloc(na + nb + 1);
     cstr_copy(out, a, na);
     cstr_copy(out + na, b, nb);
     out[na + nb] = 0;
@@ -320,8 +243,7 @@ void starry_print_f32(float v) { write_line(fmt_double((double)v, 7)); }
 void starry_print_string(const char *s) { write_line(s); }
 
 /* M1（D2/D4 契约）：受检算术 trap 统一入口——llvme 的受检分支调用。
- * noreturn；向 stderr 打印区分后的原因 + 函数名（源位置近似），
- * ExitProcess(134)（trap 约定；无 CRT 用 ExitProcess）。
+ * noreturn；向 stderr 打印区分后的原因 + 函数名（源位置近似）。
  * 不执行 defer/ARC 清理：这是 fatal abort，不是可恢复 panic。
  * code: 1 add ovf / 2 sub ovf / 3 mul ovf / 4 div by zero /
  *       5 div ovf (MIN/-1) / 6 rem by zero / 7 rem ovf */
@@ -337,10 +259,11 @@ void starry_overflow_panic(signed char op, const char *fun) {
     write_err(" in ");
     write_err(fun);
     write_err("\n");
-    ExitProcess(134u);
+    rt_fatal_exit(134u);
 }
+
 /* M4 slice 1：class 对象 + ARC 头（R3 线程本地非原子）。
- * header 布局定案 24B：strong / weak / meta(deinit 派发，slice 2 启用)。
+ * header 布局定案 24B：strong / weak / meta(deinit 派发)。
  * payload 紧跟 header；字段槽全 i64（i128 class 字段 slice 1 拒收）。 */
 typedef struct StarryArcHdr {
     long long strong;
@@ -349,7 +272,8 @@ typedef struct StarryArcHdr {
 } StarryArcHdr;
 
 void *starry_alloc_object(unsigned long long payload_bytes, void (*deinit)(void *)) {
-    StarryArcHdr *h = (StarryArcHdr *)HeapAlloc(GetProcessHeap(), 0, sizeof(StarryArcHdr) + payload_bytes);
+    SIZE_T total = sizeof(StarryArcHdr) + payload_bytes;
+    StarryArcHdr *h = (StarryArcHdr *)rt_alloc(total);
     h->strong = 1;
     h->weak = 0;
     h->meta = (void *)deinit;
@@ -366,17 +290,14 @@ void starry_release(void *p) {
     if (!p) return;
     h = (StarryArcHdr *)p - 1;
     if (--h->strong == 0) {
-        /* M4 slice 2b：meta = deinit 函数指针（构造时塞入）；末引用先
-         * 回调再释放（weak 侧 slice 3：weak>0 时 header 延迟释放） */
+        /* meta = deinit 函数指针；末引用先回调再释放（weak>0 时 header
+         * 延迟释放） */
         if (h->meta) (*(void (*)(void *))h->meta)(p);
-        if (h->weak == 0) xfree(h);
+        if (h->weak == 0) rt_free(h);
     }
 }
 
 /* M4 slice 3：weak var——weak++ / weak--（strong==0 && weak==0 时释放） */
-/* M4 slice 4b (Plan C): weak upgrade——strong>0 时 strong++ 并返回对象；
- * strong==0（已释放）返回 null；不碰 weak 计数。读取语义 = ?P（+1 临时值，
- * 绑定/返回转移，语句末 release；参照 Clang ARC objc_loadWeakRetained）。 */
 void *starry_weak_upgrade(void *p) {
     StarryArcHdr *h;
     if (!p) return 0;
@@ -398,5 +319,5 @@ void starry_weak_drop(void *p) {
     StarryArcHdr *h;
     if (!p) return;
     h = (StarryArcHdr *)p - 1;
-    if (--h->weak == 0 && h->strong == 0) xfree(h);
+    if (--h->weak == 0 && h->strong == 0) rt_free(h);
 }
