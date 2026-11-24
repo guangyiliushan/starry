@@ -91,6 +91,11 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | 特性 | 拒收点 | 备注 |
 |---|---|---|
 | lambda 存 struct 字段（矩阵 #5） | sem | 修正 3：Fn 字段稳定拒收（主构造头字段 + body 字段两路已接，declare 侧） |
+| union 声明 / macro 声明 / comptime / accessor（get/set） | sem | P0 trust：此前静默接受，现声明/表达式点稳定拒收 |
+| protected（顶层 + class 成员） | sem | P0 trust：继承未实现，稳定拒收 |
+| open/abstract/sealed/override/const/static/inline/operator/infix/vararg | sem | P0 trust：无实现路径的 modifier，声明点稳定拒收 |
+| `as` 非数值/非指针转换（如 string→int） | sem | P0 trust：只允许数值↔数值、同型、Ref/Pointer 互转；其余 SemTypeMismatch |
+| impl 头 trait 充当类型实参（`impl T for L<T>`） | sem | P0 trust：lower_ty 拒收（此前静默注册成 spec） |
 | class/可空 class/Fn 存 struct 字段/tuple/array；ARC enum payload | sem | return/break/repeat ownership transfer 未完成，enum payload 需 tag-aware traversal；所有 ARC-bearing aggregate slots 稳定拒收 |
 | aspect / provide | sem | 跳过清单 |
 | variance（类型形参型变标注） | sem | **声明点不变（invariant）**：v1 无子类型关系，variance 未实现；parser 保留 `in`/`out` 词法、sem 稳定拒收（S4：待 `open` 继承或 `dyn` + ≥2 惯用样例被挡才设计） |

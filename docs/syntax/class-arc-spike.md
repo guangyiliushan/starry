@@ -3,8 +3,10 @@
 状态：**已对齐 D-004**（class = 引用类型 + ARC 默认；arena/region 后置可选）。
 本文取代 2026-11 初版 spike——初版的「对象语义三选一」与「倾向 A（按值
 class）」结论作废（D-003/D-004 已确认引用语义，不再开放比选）。
-现状：class 声明仍被 sem 以 `SemUnsupportedConstruct` 稳定拒收（单一诊断、
-注册防级代）。M4 按本 spike 的落地顺序解锁。
+现状（2026-11-24 校准）：class/ARC 已按 M4 Plan C 全链落地（构造/字段/
+方法/deinit/weak var/可空 class）；本 spike §1 拍板项均已实现。
+剩余缺口：ARC 聚合（struct 字段/tuple/array/enum payload）、继承、
+二级构造 init、static、protected（P0 起稳定拒收）。
 
 ## 1. 已拍板（D-003/D-004，无需重开）
 

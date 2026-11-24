@@ -40,7 +40,8 @@
 
 - Fn var × 可空 class 捕获需 targeted native e2e + ASan。
 - ASan harness 未接入。
-- 超大栈帧需 target probe + 1MB 边界 regression。
+- 超大栈帧：`__chkstk` 逐页降序探测 + 8MB 预留已落地；
+  1.1MB/1.2MB 边界 regression 见 build_cli（p0_stack_probe_*）。
 
 ## 5. 逆向引用
 

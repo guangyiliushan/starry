@@ -84,7 +84,11 @@ Grammar and phase contracts live in `docs/syntax/`: `starry.ebnf`,
 The implemented surface covers scalar and aggregate data, control flow,
 patterns, nullable values, string interpolation and concatenation, print I/O,
 `extern "c"` calls, structural equality, defaults, top-level globals initialized
-in dependency order, and the optimization pipeline listed above. See
+in dependency order, class/ARC (constructor, methods, deinit, `weak var`,
+nullable classes), generics (monomorphization), traits with static dispatch,
+closures with value capture, directory/manifest module paths, and the
+optimization pipeline listed above. Intentionally rejected surfaces (stable
+diagnostics) are listed in `docs/syntax/feature-matrix.md`. See
 `semantic-notes.md` and `opt-notes.md` for the intentionally deferred language
 features.
 

@@ -170,14 +170,18 @@ LocalBinding/Param）；`=` 赋值重置；分支/循环取两态**并集**
 
 ## v1 跳过清单（遇即 `SemUnsupportedConstruct`）
 
-泛型（fun 类型形参/调用实例化；签名不 lower，单一
-`SemUnsupportedConstruct` 不级联）、方法调用（成员 callee）、impl、
-actor、provide、union/dyn/Self 类型、spawn 内部、
-宏展开（独立前置 pass，规格待定；调用点报 `SemMacroExpansion`）。
-class 声明（无构造路径/方法调用；声明点报一条即注册，避免级联）、
-grow 语句、concurrent/async 块与 await（lowering 未排期）——均由 sem
-先行诊断，irc 不重复报。rest 模式与含绑定 Or 已在 sem/irc 解冻。
-spawn 内部整体不解析不定型。lambda 内部已在 M8 slice 2 落地（期望 Fn 类型驱动的定型 + body resolve + irc lowering）。
+> 2026-11-24 P0 校准：泛型、方法调用、impl、class/ARC、weak、deinit、
+> 闭包捕获均已落地，从本清单移除；本清单只保留真实拒收面。
+
+actor、provide、aspect（含 before/after/around/proceed）、
+union 声明、dyn/Self（trait 外）类型、spawn/async/await/concurrent、
+宏声明与展开（调用点 `SemMacroExpansion`）、grow 语句、
+accessor（get/set）、二级构造 init、protected、
+无语义 modifier（open/abstract/sealed/override/const/static/inline/
+operator/infix/vararg）、`as` 非数值/非指针转换、
+impl 头 trait 充当类型实参（`impl T for L<T>`）——均由 sem 稳定拒收。
+rest 模式与含绑定 Or 已在 sem/irc 解冻。
+lambda 内部已在 M8 slice 2 落地（期望 Fn 类型驱动的定型 + body resolve + irc lowering）。
 
 `StringInterp` 不在跳过清单：sem 已完整定型（结果 `string`，parts
 逐一定型，`"a${nosuch}b"` 的 `SemUndefinedName` 在 part 定型时暴露）——
