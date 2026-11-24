@@ -83,7 +83,7 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | lambda 可空 class 捕获 | ✅ | ✅ | ✅ | ✅ | ✅ | 2 槽 env（flag+payload）+ flag 分支 retain/release + 间接调用 Agg 返回槽拷贝 |
 | lambda i128 捕获 | ✅ | ✅ | ✅ | ✅ | — | 2 槽 WideCell 标量经多槽 env（槽位游标按 scalar_slots 累计）；聚合捕获归后续 |
 | 顶层标量可空全局 | ✅ | ✅ | ✅ | ✅ | — | nullable-abi-audit.md §3.3：`[2 x i64]` flag+payload；`i128?`/可空 class 仍拒收 |
-| 指向可空的类型解引用（`*p` / `*p = v`） | ✅ | ✅ | ✅ | ✅ | — | D-007 类型语法契约保留；pointee 逐槽读写；class/i128 payload 稳定拒收（audit §3.3） |
+| 指向可空的类型解引用（`*p` / `*p = v`） | ✅ | ✅ | ✅ | ✅ | — | D-007 类型语法契约保留；pointee 逐槽读写。**P0 审计修正（2026-11-24）**：audit §3.3 所称「class payload 拒收」实际未实现——`*const Class` 参数当前被静默放行（待 sem 补拒收或完整实现，见 P0 遗留） |
 | lambda-in-lambda 字面嵌套 + 柯里化调用 | ✅ | ✅ | ✅ | ✅ | — | parser body 位 `{` 消歧（深度感知 `->` 前瞻）+ 柯里化 Fn 值链；捕获外层参数逐层正确（e2e 3/7/15） |
 
 ## 稳定拒收登记
