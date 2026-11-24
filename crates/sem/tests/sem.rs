@@ -1757,3 +1757,66 @@ fn variance_annotations_stable_rejection() {
 fn p0_baseline_clean_value_program() {
     assert_clean("fun main(): int {\n    val x = 1\n    return x\n}");
 }
+
+#[test]
+fn p0_rejects_static_modifier() {
+    assert_has(
+        "static fun f(): int {\n    return 1\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn p0_rejects_inline_modifier() {
+    assert_has(
+        "inline fun f(): int {\n    return 1\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn p0_rejects_const_modifier() {
+    assert_has("const val X: int = 3", DiagCode::SemUnsupportedConstruct);
+}
+
+#[test]
+fn p0_rejects_operator_modifier() {
+    assert_has(
+        "operator fun plus(a: int, b: int): int {\n    return a + b\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn p0_rejects_infix_modifier() {
+    assert_has(
+        "infix fun plus(a: int, b: int): int {\n    return a + b\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn p0_rejects_vararg_modifier() {
+    assert_has(
+        "vararg fun h(xs: int): int {\n    return 0\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn p0_rejects_open_abstract_sealed_override() {
+    assert_has("open class C {\n}", DiagCode::SemUnsupportedConstruct);
+    assert_has("abstract class C {\n}", DiagCode::SemUnsupportedConstruct);
+    assert_has("sealed class C {\n}", DiagCode::SemUnsupportedConstruct);
+    assert_has(
+        "class C {\n    override fun f(): int {\n        return 0\n    }\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn p0_keeps_valid_modifiers_clean() {
+    assert_clean("public fun f(): int {\n    return 1\n}");
+    assert_clean("private fun f(): int {\n    return 1\n}");
+    assert_clean("internal fun f(): int {\n    return 1\n}");
+}

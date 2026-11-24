@@ -468,6 +468,7 @@ fn vis_of(decl: &DeclNode, st: &mut SemState) -> crate::def::Vis {
         },
         _ => &[],
     };
+    reject_unsupported_modifiers(mods, st);
     for m in mods {
         match m.word {
             ModifierWord::Private => return crate::def::Vis::Private,
@@ -485,6 +486,33 @@ fn vis_of(decl: &DeclNode, st: &mut SemState) -> crate::def::Vis {
         }
     }
     crate::def::Vis::Pub
+}
+
+/// P0 compiler trust：无实现路径的修饰词在声明点稳定拒收。
+/// public/private/internal/weak 有语义；protected 由 vis_of/class 成员
+/// 路径单独处理；其余一律拒收，杜绝静默接受。
+fn reject_unsupported_modifiers(mods: &[ast::syntax::modifier::Modifier], st: &mut SemState) {
+    use ast::token::ModifierWord;
+    for m in mods {
+        let msg: &'static str = match m.word {
+            ModifierWord::Open => "open classes are not supported in v1",
+            ModifierWord::Abstract => "abstract classes are not supported in v1",
+            ModifierWord::Sealed => "sealed classes are not supported in v1",
+            ModifierWord::Override => "override is not supported in v1",
+            ModifierWord::Const => "const declarations are not supported in v1",
+            ModifierWord::Static => "static members are not supported in v1",
+            ModifierWord::Inline => "inline functions are not supported in v1",
+            ModifierWord::OperatorWord => "operator declarations are not supported in v1",
+            ModifierWord::Infix => "infix declarations are not supported in v1",
+            ModifierWord::Vararg => "vararg declarations are not supported in v1",
+            _ => continue,
+        };
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemUnsupportedConstruct,
+            m.span,
+            msg,
+        ));
+    }
 }
 
 fn register_builtins(st: &mut SemState) {
@@ -862,6 +890,9 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                     // M4 slice 2b：class body 绑定（字段声明）未排期——
                     // 字段走主构造 val/var 头参数（M3 纪律）
                     ClassMember::Declaration(d) if matches!(&d.kind, DeclKind::Binding(_)) => {
+                        if let DeclKind::Binding(b) = &d.kind {
+                            reject_unsupported_modifiers(&b.modifiers.modifiers, st);
+                        }
                         st.diags.emit(Diagnostic::error(
                             DiagCode::SemUnsupportedConstruct,
                             d.span,
@@ -870,6 +901,7 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                     }
                     ClassMember::Declaration(d) if matches!(&d.kind, DeclKind::Fun(_)) => {
                         if let DeclKind::Fun(f) = &d.kind {
+                            reject_unsupported_modifiers(&f.modifiers.modifiers, st);
                             if f.params.iter().any(|p| p.default.is_some()) {
                                 st.diags.emit(Diagnostic::error(
                                     DiagCode::SemUnsupportedConstruct,
