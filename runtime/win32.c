@@ -68,22 +68,32 @@ unsigned long long strlen(const char *s) {
 }
 
 /* P1-A0-0：MSVC x64 __chkstk 真实逐页探测（N1 修复——1.2MB 栈帧
- * naked ret 导致 ACCESS_VIOLATION）。保留 RCX/RAX，>1MB 帧仍工作。 */
+ * naked ret 导致 ACCESS_VIOLATION）。
+ *
+ * P0 回归修复（stack_probe_1_1mb/1_2mb 抓出）：探测方向必须**向下**——
+ * 只有当前 guard 页被触碰时 OS 才自动增长栈（commit 该页并把 guard 下移
+ * 一页）；旧实现从最深目标页**向上**探测，第一触就落在未提交的 reserve
+ * 页上，直接 ACCESS_VIOLATION（最小 C 复现与本 runtime 无关地复现）。
+ *
+ * 契约：RAX 入/出 = 帧字节数（clang 随后 `sub rsp, rax`）；RCX/R10 为
+ * volatile scratch。降序逐页触碰保证不跳过任何 guard 页。 */
 __attribute__((naked)) void __chkstk(void) {
     __asm__ volatile(
         ".intel_syntax noprefix\n"
         "push rcx\n"
         "push rax\n"
         "cmp rax, 0x1000\n"
-        "jle 1f\n"
+        "jle 2f\n"
         "mov rcx, rsp\n"
         "sub rcx, rax\n"
-        "and rcx, -0x1000\n"
+        "and rcx, -0x1000\n"     /* 最低待保证页（向下取整） */
+        "mov r10, rsp\n"
+        "sub r10, 0x1000\n"      /* 第一触：rsp 下方一页 = 当前 guard */
         "1:\n"
-        "cmp rcx, rsp\n"
-        "jae 2f\n"
-        "mov al, byte ptr [rcx]\n"
-        "add rcx, 0x1000\n"
+        "cmp r10, rcx\n"
+        "jb 2f\n"
+        "mov al, byte ptr [r10]\n"
+        "sub r10, 0x1000\n"
         "jmp 1b\n"
         "2:\n"
         "pop rax\n"

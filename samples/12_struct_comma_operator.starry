@@ -3,7 +3,7 @@ struct Point {
     y: int,
 }
 
-operator fun plus(a: Point, b: Point) : Point = a
+fun plus(a: Point, b: Point) : Point = a
 
 fun main() {
     val p = plus(Point(1, 2), Point(3, 4))

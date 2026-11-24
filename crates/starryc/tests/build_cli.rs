@@ -1315,3 +1315,24 @@ fn pointer_to_nullable_end_to_end() {
     };
     assert_eq!(out, "5\n7\n9\n");
 }
+
+#[test]
+fn p0_stack_probe_1_2mb_frame_runs() {
+    // 回归：~1.2MB 栈帧曾因 __chkstk naked ret 不逐页探测而
+    // ACCESS_VIOLATION（P1-A0-0 修复）；此测试钉住修复不回退
+    let source = "fun main(): int {\n    val a = [0; 150000]\n    return a[149999]\n}\n";
+    let Some((out, _err, code)) = build_and_exec("stack_probe_1_2mb", source) else {
+        return;
+    };
+    assert_eq!(code, 0, "stdout: {out}");
+}
+
+#[test]
+fn p0_stack_probe_1_1mb_frame_runs() {
+    // 1MB 边界内侧：逐页探测的起始分支（<=4096 直接返回）之上
+    let source = "fun main(): int {\n    val a = [0; 137500]\n    return a[137499]\n}\n";
+    let Some((out, _err, code)) = build_and_exec("stack_probe_1_1mb", source) else {
+        return;
+    };
+    assert_eq!(code, 0, "stdout: {out}");
+}
