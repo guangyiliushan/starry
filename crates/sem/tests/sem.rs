@@ -1885,3 +1885,48 @@ fn p0_protected_does_not_break_valid_visibility() {
     assert_clean("private fun f(): int {\n    return 1\n}");
     assert_clean("internal fun f(): int {\n    return 1\n}");
 }
+
+#[test]
+fn p0_as_numeric_casts_are_clean() {
+    assert_clean("fun main(): int {\n    val x = 1 as f64\n    return 1\n}");
+    assert_clean("fun main(): int {\n    val x = 1.5 as int\n    return x\n}");
+    assert_clean("fun main(): int {\n    val x = 1 as? int\n    return 1\n}");
+    // Ref -> Pointer 保持 safe（D-007/M2：只有解引用 gated）
+    assert_clean("fun f() : *mut int {\n    var x = 1\n    return (&mut x) as *mut int\n}");
+}
+
+#[test]
+fn p0_as_rejects_string_to_int() {
+    assert_has(
+        "fun main(): int {\n    val x = \"s\" as int\n    return x\n}",
+        DiagCode::SemTypeMismatch,
+    );
+}
+
+#[test]
+fn p0_as_rejects_int_to_string() {
+    assert_has(
+        "fun main(): int {\n    val x = 1 as string\n    return 0\n}",
+        DiagCode::SemTypeMismatch,
+    );
+}
+
+#[test]
+fn p0_as_rejects_bool_to_int() {
+    assert_has(
+        "fun main(): int {\n    val x = true as int\n    return x\n}",
+        DiagCode::SemTypeMismatch,
+    );
+}
+
+#[test]
+fn p0_as_poison_does_not_cascade() {
+    let got = codes("fun main(): int {\n    val x = (1 as string) as int\n    return x\n}");
+    assert_eq!(
+        got.iter()
+            .filter(|c| **c == DiagCode::SemTypeMismatch)
+            .count(),
+        1,
+        "expected exactly one mismatch, got {got:?}"
+    );
+}

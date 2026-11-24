@@ -1469,8 +1469,25 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             st.tys.bool_
         }
         ExprKind::Cast { expr, ty, kind } => {
-            type_expr(expr, st, true);
+            let from = type_expr(expr, st, true);
             let target = st.ty_of_node.get(ty.id).copied().unwrap_or(st.tys.error);
+            // P0 compiler trust：as 只允许数值↔数值、同型、Ref/Pointer 互转
+            //（D-007/M2：指针创建/转换 safe，解引用才 gated）——其余在 sem
+            // 稳定拒收，杜绝「check clean、LLVM 才炸」。
+            let allowed = st.tys.is_error(from)
+                || st.tys.is_error(target)
+                || from == target
+                || (st.tys.is_numeric(from) && st.tys.is_numeric(target))
+                || matches!(
+                    (st.tys.kind(from), st.tys.kind(target)),
+                    (TyKind::Ref { .. }, TyKind::Pointer { .. })
+                        | (TyKind::Pointer { .. }, TyKind::Ref { .. })
+                        | (TyKind::Pointer { .. }, TyKind::Pointer { .. })
+                );
+            if !allowed {
+                mismatch(st, e.span);
+                return st.tys.error;
+            }
             match kind {
                 CastKind::As | CastKind::AsBang => target,
                 CastKind::AsQuestion => {
