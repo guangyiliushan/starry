@@ -1,5 +1,3 @@
-package demo.traps
-
 class Counter(start: int) {
     var count: int = start
 

@@ -66,10 +66,23 @@ impl Parser {
     }
 
     pub fn parse(&self, source: &str) -> Result<ParseOutput, ParserError> {
+        self.parse_with_segments(source, &[])
+    }
+
+    /// Parse a merged source set. `segments` are `(byte offset, dotted module
+    /// path)` pairs in source order; the parser turns each boundary into a
+    /// compiler-synthesized `PackageSeg` marker. Module paths are compiler
+    /// metadata, never source syntax.
+    pub fn parse_with_segments(
+        &self,
+        source: &str,
+        segments: &[(u32, String)],
+    ) -> Result<ParseOutput, ParserError> {
         let source_len = u32::try_from(source.len())
             .map_err(|_| ParserError::SourceTooLarge { len: source.len() })?;
         let tokens = self.lexer.tokenize(source);
-        let mut session = ParseSession::new(source, tokens, source_len, &self.lexer);
+        let mut session =
+            ParseSession::new(source, tokens, source_len, &self.lexer, segments.to_vec());
         let ast = session.parse_compilation_unit()?;
         Ok(ParseOutput {
             ast,
@@ -85,6 +98,13 @@ pub fn parse_source(source: &str) -> Result<ParseOutput, ParserError> {
     Parser::new()?.parse(source)
 }
 
+pub fn parse_source_with_segments(
+    source: &str,
+    segments: &[(u32, String)],
+) -> Result<ParseOutput, ParserError> {
+    Parser::new()?.parse_with_segments(source, segments)
+}
+
 pub(crate) struct ParseSession<'src> {
     pub(crate) source: &'src str,
     pub(crate) source_len: u32,
@@ -94,10 +114,19 @@ pub(crate) struct ParseSession<'src> {
     pub(crate) diags: DiagCollector,
     pub(crate) depth: usize,
     pub(crate) lexer: &'src Lexer,
+    /// (byte offset, dotted module path) boundaries; compiler metadata.
+    pub(crate) segments: Vec<(u32, String)>,
+    pub(crate) seg_idx: usize,
 }
 
 impl<'src> ParseSession<'src> {
-    fn new(source: &'src str, tokens: Vec<Token>, source_len: u32, lexer: &'src Lexer) -> Self {
+    fn new(
+        source: &'src str,
+        tokens: Vec<Token>,
+        source_len: u32,
+        lexer: &'src Lexer,
+        segments: Vec<(u32, String)>,
+    ) -> Self {
         Self {
             source,
             source_len,
@@ -107,6 +136,8 @@ impl<'src> ParseSession<'src> {
             diags: DiagCollector::new(),
             depth: 0,
             lexer,
+            segments,
+            seg_idx: 0,
         }
     }
 
@@ -129,34 +160,35 @@ impl<'src> ParseSession<'src> {
     fn parse_compilation_unit(&mut self) -> Result<SourceFile, ParserError> {
         let id = self.next_node()?;
         self.cursor.skip_nl();
-        let package = self.parse_named_prefix(ast::token::HardKeyword::Package)?;
         let mut items = Vec::new();
-        // M5 slice 2a：首段 package 亦以段 item 形式入列（sem 按序跟踪）
-        if let Some(p0) = package.clone() {
-            items.push(ast::syntax::decl::DeclNode {
-                id: self.next_node()?,
-                span: ast::token::Span::new(0, 0),
-                kind: ast::syntax::decl::DeclKind::PackageSeg(p0),
-            });
-        }
+        let mut package = None;
         let mut seen_top_level = false;
         while !self.cursor.is_eof() {
             if self.cursor.check(&TokenKind::Nl) {
                 self.cursor.advance();
                 continue;
             }
-            let item = match self.cursor.peek().kind {
-                TokenKind::Keyword(ast::token::HardKeyword::Package) => {
-                    // M5 slice 2a：后续 package 头 = 新包段起点（import 段内规则随段重置）
-                    seen_top_level = false;
-                    let seg = self.parse_named_prefix(ast::token::HardKeyword::Package)?;
-                    let sp = seg.as_ref().map(|_| self.cursor.previous_span());
-                    Ok(ast::syntax::decl::DeclNode {
+            // File boundaries become compiler-synthesized package markers.
+            while self.seg_idx < self.segments.len()
+                && self.cursor.peek().span.start >= self.segments[self.seg_idx].0
+            {
+                let (start, dotted) = self.segments[self.seg_idx].clone();
+                if !dotted.is_empty() {
+                    let span = Span::new(start, start);
+                    let path = self.path_from_dotted(&dotted, span);
+                    if package.is_none() {
+                        package = Some(path.clone());
+                    }
+                    items.push(ast::syntax::decl::DeclNode {
                         id: self.next_node()?,
-                        span: sp.unwrap_or_else(|| self.cursor.previous_span()),
-                        kind: ast::syntax::decl::DeclKind::PackageSeg(seg.unwrap()),
-                    })
+                        span,
+                        kind: ast::syntax::decl::DeclKind::PackageSeg(path),
+                    });
                 }
+                self.seg_idx += 1;
+                seen_top_level = false;
+            }
+            let item = match self.cursor.peek().kind {
                 TokenKind::Keyword(ast::token::HardKeyword::Import) => {
                     let import_span = self.cursor.peek().span;
                     if seen_top_level {
@@ -193,17 +225,17 @@ impl<'src> ParseSession<'src> {
         })
     }
 
-    fn parse_named_prefix(
-        &mut self,
-        keyword: ast::token::HardKeyword,
-    ) -> Result<Option<ast::syntax::node::Path>, ParserError> {
-        if !self.cursor.check(&TokenKind::Keyword(keyword)) {
-            return Ok(None);
-        }
-        self.cursor.advance();
-        let path = crate::expr::parse_path(self)?;
-        self.cursor.skip_nl();
-        Ok(Some(path))
+    /// Build an interned dotted path for a compiler-provided module path.
+    fn path_from_dotted(&mut self, dotted: &str, span: Span) -> ast::syntax::node::Path {
+        let segments = dotted
+            .split('.')
+            .filter(|segment| !segment.is_empty())
+            .map(|name| ast::syntax::node::PathSegment {
+                name: self.interner.intern(name),
+                span,
+            })
+            .collect();
+        ast::syntax::node::Path { segments }
     }
 
     fn finish_top_level(&mut self) {

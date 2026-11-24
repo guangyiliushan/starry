@@ -1,7 +1,7 @@
 use ast::syntax::decl::{DeclKind, ParamModifier};
 use ast::syntax::expr::ExprKind;
 use ast::syntax::ty::TypeKind;
-use parser::{Parser, parse_source};
+use parser::{Parser, parse_source, parse_source_with_segments};
 
 fn canonical_snapshot(source: &str, output: &parser::ParseOutput) -> String {
     let mut snapshot = String::new();
@@ -74,13 +74,20 @@ fn empty_source_has_canonical_root() {
 }
 
 #[test]
-fn package_prefix_parses_into_root_slot() {
-    let output = parse_source("package app.core\nval x = 1").unwrap();
+fn package_is_an_ordinary_identifier() {
+    let output = parse_source("val package = 1").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    assert!(matches!(output.ast.items[0].kind, DeclKind::Binding(_)));
+}
+
+#[test]
+fn compiler_segments_insert_package_markers() {
+    let output = parse_source_with_segments("val x = 1", &[(0, "app.core".to_string())]).unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     let package = output.ast.package.as_ref().unwrap();
     assert_eq!(output.interner.resolve(package.segments[0].name), "app");
     assert_eq!(output.interner.resolve(package.segments[1].name), "core");
-    // M5 slice 2a：首段 package 亦以 PackageSeg item 入列（items[0]）
+    // The synthesized marker is items[0]; the real declaration follows.
     assert_eq!(output.ast.items.len(), 2);
     assert!(matches!(
         output.ast.items[0].kind,
@@ -271,7 +278,6 @@ fn type_nesting_is_bounded_without_stack_overflow() {
 #[test]
 fn aggregate_declarations_parse_without_placeholders() {
     let source = r#"
-        package app.core
         import std.io.*
         import "c" "math.h" as cmath { fun sin(x: f64) : f64; }
 
@@ -302,8 +308,8 @@ fn aggregate_declarations_parse_without_placeholders() {
         eprintln!("{:?} at {:?}", diag, &source[start..end]);
     }
     assert!(output.diagnostics.is_empty(), "{:#?}", output.diagnostics);
-    assert!(output.ast.package.is_some());
-    assert_eq!(output.ast.items.len(), 12);
+    assert!(output.ast.package.is_none());
+    assert_eq!(output.ast.items.len(), 11);
 }
 
 #[test]

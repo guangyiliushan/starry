@@ -3,7 +3,6 @@
 // and must be recognized by parser semantic predicates in their grammar slots.
 lexer grammar StarryLexer;
 
-Package : 'package';
 Import : 'import';
 Extern : 'extern';
 Val : 'val';

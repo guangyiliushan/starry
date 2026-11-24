@@ -1,5 +1,3 @@
-package demo.traps
-
 impl<T> Show for List<T> {
 
 }

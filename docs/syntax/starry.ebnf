@@ -14,17 +14,14 @@
  *   integration tests > starry.ebnf > ANTLR4 reference grammar
  *
  * Namespace decisions (v0.4):
- *   single "package" header; no "module" declaration (package =
- *   namespace + compilation unit, exact-name membership); qualified
+ *   no per-file package header; module paths are compiler metadata
+ *   derived from the manifest package name + file path; qualified
  *   names use "." only; import suffixes are ".*" and "as" IDENT.
  * ================================================================== *)
 
 (* ---------- Compilation unit ---------- *)
 
-CompilationUnit := [ PackageDecl ]
-                   { ImportDecl } { TopLevelDecl } ;
-
-PackageDecl := "package" QualifiedName ;
+CompilationUnit := { ImportDecl } { TopLevelDecl } ;
 
 ImportDecl    := QualifiedImport | NativeImport ;
 QualifiedImport := "import" QualifiedName [ ImportSuffix ] ;

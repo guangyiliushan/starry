@@ -1594,6 +1594,8 @@ fn parse_interpolation_expr(
         diags,
         depth: session.depth + 1,
         lexer: session.lexer,
+        segments: Vec::new(),
+        seg_idx: 0,
     };
     let result = parse_expr(&mut child);
     if !child.cursor.is_eof() {

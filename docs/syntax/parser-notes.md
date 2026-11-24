@@ -52,10 +52,10 @@ never a machine `Err`.
 
 | Decision | Rule |
 |---|---|
-| Module declaration removed | `package` is the only header namespace; a compilation unit = files with the exact same package name. |
+| Module declaration removed | No per-file package header; module paths are compiler metadata derived from the manifest package name + file path; one directory = one module. |
 | Path separator | Qualified names use `.` only; `::` is no longer a token. |
 | Import suffixes | `.*` (wildcard) and `as` IDENT (alias) only. |
-| Visibility | Top-level `private` = package-visible (declaration-level); the semantic phase owns the full ladder. |
+| Visibility | Top-level `private` = file-private; `internal` = package-private; the semantic phase owns the full ladder. |
 | Import transitivity | Imports are non-transitive explicit edges; cycle detection runs on this graph. |
 | String class escapes | In-class `\r` `\n` `\t` now decode as control characters (root-cause fix for the string-literal lexer bug). |
 | Named raw strings | Native import paths and extern languages are decoded from their raw `String` token before interning; invalid escapes emit `InvalidEscape`; expression strings retain raw spans for interpolation. |

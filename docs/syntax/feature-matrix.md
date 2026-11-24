@@ -61,7 +61,7 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | `extern "c"` FFI | ✅ | ✅ | ✅ | ✅ | — | extern 调用须 `unsafe` 块（M6）；`build -- <clang 参数>` 链接；i128 标量 ABI 拒收 |
 | 原生运行时平台 | — | — | — | ✅ | ✅ | Windows freestanding（Heap*/WriteFile/ExitProcess + mainCRTStartup）；Linux libc（malloc/free/write/_exit）；公共符号与 trap exit 134 稳定 |
 | main 返回值=退出码 | ✅ | ✅ | ✅ | ✅ | — | int trunc/sext、bool zext |
-| 模块系统（M5 slice 2a–3） | ✅ | ✅ | ✅ | ✅ | — | package 段 + 目录默认 + 包命名空间 + `import a.b`/`import util` 限定访问 + 可见性（默认 public/internal 包私有/private 文件私有/protected 拒收）；循环/自导入合法 |
+| 模块系统（M5 slice 2a–3） | ✅ | ✅ | ✅ | ✅ | — | manifest 包身份 + 目录推导模块路径（无 package 头）+ 包命名空间 + `import a.b`/`import util` 限定访问 + 可见性（默认 public/internal 包私有/private 文件私有/protected 拒收）；循环/自导入合法 |
 | class/ARC（M4 切片 1–4b，Plan C） | ✅ | ✅ | ✅ | ✅ | ✅ | 构造/字段/方法/deinit/weak var + upgrade 读取（`?P`）/可空 class/形参 +0/返回 +1 统一/重赋值所有权/语句级 +1 临时释放（`stmt_temps`，full-expression 纪律）；type-directed drop traversal 已建，但 ARC 聚合元素/字段仍稳定拒收 |
 | 闭包捕获（P2-3b-1/2） | ✅ | ✅ | ✅ | ✅ | ✅ | 标量/class 捕获 box（tagged）+ runtime tag 分派 + 快照语义 + box ARC（meta 逐 class 捕获 release，deinit 平衡 e2e）+ C 边界拒收；可空/i128/聚合捕获归批次 3（见未实现表） |
 | 泛型单态化（M7） | ✅ | ✅ | ✅ | ✅ | — | fun/struct 单态化；显式/推断实参、类型形参默认值、bounds 兑现（`T: Show` 实例化查 impl 注册表）；泛型 enum/struct 的 trait impl 分派已落地（9d：impl 注册延后到签名 lower 后，避免缓存空壳 spec） |

@@ -4,7 +4,6 @@
 # identifiers lexically and are classified by the parser in grammar slots.
 
 # 37 globally reserved keywords.
-hard package Package global
 hard import Import global
 hard extern Extern global
 hard val Val global

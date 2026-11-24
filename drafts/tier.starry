@@ -1,5 +1,3 @@
-package m10
-
 struct Vec2(val x: f64, val y: f64)
 
 trait Named {

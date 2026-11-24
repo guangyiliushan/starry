@@ -50,8 +50,13 @@ Rules:
   example `dependency cycle: a -> b -> a`.
 - Import cycles and self-imports are rejected, for example
   `import cycle: a -> b -> a` or `import cycle: app -> app`.
-- Existing single-file builds and multiple package segments inside one package
-  root continue to work.
+- Single-file builds without a manifest continue to work.
+- Module paths are compiler metadata, never source syntax: manifest packages
+  prefix the manifest name, then the directory path relative to `src_root`
+  (`math/lib.starry` -> `math`, `math/src/vec/util.starry` -> `math.vec`);
+  manifest-less roots use the bare directory path (`demo/core/util.starry` ->
+  `demo.core`). One directory is one module; directory and package names must
+  be valid dotted identifiers.
 
 ## Non-goals in v1
 

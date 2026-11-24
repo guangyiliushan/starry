@@ -1,5 +1,3 @@
-package demo.basics
-
 import std.text.*
 
 // ========== 结构体与枚举 ==========

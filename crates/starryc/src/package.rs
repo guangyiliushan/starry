@@ -39,6 +39,8 @@ pub struct Package {
     pub root: PathBuf,
     pub manifest: PackageManifest,
     pub dependencies: Vec<DependencySpec>,
+    /// False for the synthetic implicit root package (no starry.toml).
+    pub has_manifest: bool,
 }
 
 #[derive(Debug)]
@@ -569,24 +571,30 @@ impl GraphBuilder {
             cycle.push(expected_name.to_string());
             return Err(PackageGraphError::DependencyCycle { path: cycle });
         }
-        let manifest = match manifest {
-            Some(manifest) => manifest,
+        let (manifest, has_manifest) = match manifest {
+            Some(manifest) => (manifest, true),
             None => {
                 let manifest_path = canonical.join(MANIFEST_NAME);
                 if !manifest_path.is_file() {
                     if self.packages.is_empty() {
-                        Manifest {
-                            package: PackageManifest {
-                                name: expected_name.to_string(),
-                                version: "0".to_string(),
+                        (
+                            Manifest {
+                                package: PackageManifest {
+                                    name: expected_name.to_string(),
+                                    version: "0".to_string(),
+                                },
+                                dependencies: Vec::new(),
                             },
-                            dependencies: Vec::new(),
-                        }
+                            false,
+                        )
                     } else {
                         return Err(PackageGraphError::ManifestRequired { path: canonical });
                     }
                 } else {
-                    parse_manifest(&manifest_path).map_err(PackageGraphError::Manifest)?
+                    (
+                        parse_manifest(&manifest_path).map_err(PackageGraphError::Manifest)?,
+                        true,
+                    )
                 }
             }
         };
@@ -646,6 +654,7 @@ impl GraphBuilder {
             root: canonical,
             manifest,
             dependencies,
+            has_manifest,
         });
         Ok(id)
     }
@@ -680,52 +689,50 @@ pub fn load_graph(
     })
 }
 
-/// Detect source-level package cycles after all package roots are loaded.
-/// Target identity is the longest declared package prefix of the import path,
-/// so both `import util.f` and `import demo.core.f` resolve to their owner.
-pub fn check_import_cycles(source: &str) -> Result<(), PackageGraphError> {
-    let parsed = parser::parse_source(source).map_err(|e| PackageGraphError::Io {
-        path: PathBuf::from("<merged source>"),
-        message: e.to_string(),
-    })?;
+/// One merged source unit plus its compiler-derived module path.
+pub struct ImportUnit<'a> {
+    pub module_path: &'a str,
+    pub source: &'a str,
+}
+
+/// Detect module-level import cycles across merged source units. Target
+/// identity is the longest module-path prefix of the import, so both
+/// `import util.f` and `import demo.core.f` resolve to their owner.
+pub fn check_import_cycles(units: &[ImportUnit<'_>]) -> Result<(), PackageGraphError> {
     let mut packages = BTreeSet::new();
-    for item in &parsed.ast.items {
-        if let DeclKind::PackageSeg(path) = &item.kind {
-            packages.insert(dotted_path(path, &parsed.interner));
-        }
+    for unit in units {
+        packages.insert(unit.module_path.to_string());
     }
-    let mut current = String::new();
     let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for item in &parsed.ast.items {
-        match &item.kind {
-            DeclKind::PackageSeg(path) => {
-                current = dotted_path(path, &parsed.interner);
-            }
-            DeclKind::Import(_import) => {
-                let DeclKind::Import(import) = item.kind.clone() else {
-                    unreachable!("matched import arm")
+    for unit in units {
+        let parsed = parser::parse_source(unit.source).map_err(|e| PackageGraphError::Io {
+            path: PathBuf::from("<merged source>"),
+            message: e.to_string(),
+        })?;
+        let current = unit.module_path;
+        for item in &parsed.ast.items {
+            let DeclKind::Import(import) = &item.kind else {
+                continue;
+            };
+            if let ImportKind::Qualified { path, .. } = &import.kind {
+                let segments: Vec<&str> = path
+                    .segments
+                    .iter()
+                    .map(|segment| parsed.interner.resolve(segment.name))
+                    .collect();
+                let Some(target) = longest_package_prefix(&segments, &packages) else {
+                    continue;
                 };
-                if let ImportKind::Qualified { path, .. } = &import.kind {
-                    let segments: Vec<&str> = path
-                        .segments
-                        .iter()
-                        .map(|segment| parsed.interner.resolve(segment.name))
-                        .collect();
-                    let Some(target) = longest_package_prefix(&segments, &packages) else {
-                        continue;
-                    };
-                    if target == current {
-                        return Err(PackageGraphError::ImportCycle {
-                            path: vec![current.clone(), target],
-                        });
-                    }
-                    edges
-                        .entry(current.clone())
-                        .or_default()
-                        .insert(target.to_string());
+                if target == current {
+                    return Err(PackageGraphError::ImportCycle {
+                        path: vec![current.to_string(), target],
+                    });
                 }
+                edges
+                    .entry(current.to_string())
+                    .or_default()
+                    .insert(target.to_string());
             }
-            _ => {}
         }
     }
     let mut loading = BTreeSet::new();
@@ -770,14 +777,6 @@ fn longest_package_prefix(segments: &[&str], packages: &BTreeSet<String>) -> Opt
         .rev()
         .map(|end| segments[..end].join("."))
         .find(|candidate| packages.contains(candidate))
-}
-
-fn dotted_path(path: &ast::syntax::node::Path, interner: &ast::interner::Interner) -> String {
-    path.segments
-        .iter()
-        .map(|segment| interner.resolve(segment.name))
-        .collect::<Vec<_>>()
-        .join(".")
 }
 
 #[cfg(test)]
@@ -829,26 +828,20 @@ mod tests {
         let core = dir.join("core");
         let math = dir.join("math");
         let app = dir.join("app");
-        package(
-            &core,
-            "core",
-            "1.0.0",
-            "",
-            "package core\nfun one(): int = 1\n",
-        );
+        package(&core, "core", "1.0.0", "", "fun one(): int = 1\n");
         package(
             &math,
             "math",
             "1.2.0",
             "core = { path = \"../core\", version = \"1.0.0\" }",
-            "package math\nfun two(): int = 2\n",
+            "fun two(): int = 2\n",
         );
         package(
             &app,
             "app",
             "2.0.0",
             "math = { path = \"../math\", version = \"1.2.0\" }",
-            "package app\nfun main(): int = 0\n",
+            "fun main(): int = 0\n",
         );
         let graph = load_graph(&app, None).unwrap();
         eprintln!(
@@ -876,14 +869,14 @@ mod tests {
             "a",
             "1.0.0",
             "b = { path = \"../b\", version = \"1.0.0\" }",
-            "package a\n",
+            "",
         );
         package(
             &b,
             "b",
             "1.0.0",
             "a = { path = \"../a\", version = \"1.0.0\" }",
-            "package b\n",
+            "",
         );
         let err = load_graph(&a, None).unwrap_err();
         assert!(err.to_string().contains("a -> b -> a"), "{err}");
@@ -892,8 +885,17 @@ mod tests {
 
     #[test]
     fn import_cycles_include_both_edges() {
-        let err =
-            check_import_cycles("package a\nimport b.f\n\npackage b\nimport a.g\n").unwrap_err();
+        let err = check_import_cycles(&[
+            ImportUnit {
+                module_path: "a",
+                source: "import b.f",
+            },
+            ImportUnit {
+                module_path: "b",
+                source: "import a.g",
+            },
+        ])
+        .unwrap_err();
         assert!(
             err.to_string().contains("import cycle: a -> b -> a"),
             "{err}"

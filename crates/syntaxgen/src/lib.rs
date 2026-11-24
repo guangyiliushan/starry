@@ -9,7 +9,7 @@ pub const KEYWORD_PATH: &str = "crates/ast/src/token/keyword.rs";
 pub const ANTLR_TERMS_PATH: &str = "docs/syntax/generated/StarryLexerTerms.g4";
 pub const MARKDOWN_TABLE_PATH: &str = "docs/syntax/generated/lexicon.md";
 
-pub const HARD_KEYWORD_COUNT: usize = 37;
+pub const HARD_KEYWORD_COUNT: usize = 36;
 pub const MODIFIER_WORD_COUNT: usize = 15;
 pub const SLOT_WORD_COUNT: usize = 31;
 
@@ -540,7 +540,7 @@ mod tests {
         assert!(antlr.contains("// slot: Before = 'before' in aspect_advice"));
 
         let markdown = generate_markdown(&words);
-        assert!(markdown.contains("## Hard keyword (37)"));
+        assert!(markdown.contains("## Hard keyword (36)"));
         assert!(markdown.contains("## Modifier word (15)"));
         assert!(markdown.contains("## Slot word (31)"));
     }

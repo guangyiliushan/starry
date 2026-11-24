@@ -1,5 +1,3 @@
-package demo.traps
-
 fun find(xs: int) : int {
     'outer: loop {
         break 'outer 42

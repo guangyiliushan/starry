@@ -79,11 +79,7 @@ fn one_package(name: &str) -> PathBuf {
     let math = root.join("math");
     let app = root.join("app");
     write(&math, "starry.toml", &manifest("math", "1.2.0", ""));
-    write(
-        &math,
-        "lib.starry",
-        "package math\nfun double(n: int): int = n * 2\n",
-    );
+    write(&math, "lib.starry", "fun double(n: int): int = n * 2\n");
     write(
         &app,
         "starry.toml",
@@ -92,7 +88,7 @@ fn one_package(name: &str) -> PathBuf {
     write(
         &app,
         "main.starry",
-        "package app\nimport math.double\nfun main(): int {\n    return double(21)\n}\n",
+        "import math.double\nfun main(): int {\n    return double(21)\n}\n",
     );
     root
 }
@@ -103,7 +99,7 @@ fn nested_package_in(name: &str) -> PathBuf {
     let math = root.join("math");
     let app = root.join("app");
     write(&core, "starry.toml", &manifest("core", "1.0.0", ""));
-    write(&core, "lib.starry", "package core\nfun one(): int = 1\n");
+    write(&core, "lib.starry", "fun one(): int = 1\n");
     write(
         &math,
         "starry.toml",
@@ -116,7 +112,7 @@ fn nested_package_in(name: &str) -> PathBuf {
     write(
         &math,
         "lib.starry",
-        "package math\nimport core.one\nfun two(): int = one() + 1\n",
+        "import core.one\nfun two(): int = one() + 1\n",
     );
     write(
         &app,
@@ -130,7 +126,7 @@ fn nested_package_in(name: &str) -> PathBuf {
     write(
         &app,
         "main.starry",
-        "package app\nimport core.one\nimport math.two\nfun main(): int {\n    return one() * 10 + two()\n}\n",
+        "import core.one\nimport math.two\nfun main(): int {\n    return one() * 10 + two()\n}\n",
     );
     root
 }
@@ -196,13 +192,13 @@ fn version_mismatch_is_rejected() {
     let math = root.join("math");
     let app = root.join("app");
     write(&math, "starry.toml", &manifest("math", "1.3.0", ""));
-    write(&math, "lib.starry", "package math\nfun f(): int = 1\n");
+    write(&math, "lib.starry", "fun f(): int = 1\n");
     write(
         &app,
         "starry.toml",
         &manifest("app", "1.0.0", &dependency("../math", "1.2.0")),
     );
-    write(&app, "main.starry", "package app\nfun main(): int = 0\n");
+    write(&app, "main.starry", "fun main(): int = 0\n");
     let output = build(&app, None);
     assert!(!output.status.success());
     assert!(
@@ -219,13 +215,13 @@ fn dependency_name_mismatch_is_rejected() {
     let target = root.join("math");
     let app = root.join("app");
     write(&target, "starry.toml", &manifest("other", "1.0.0", ""));
-    write(&target, "lib.starry", "package other\nfun f(): int = 1\n");
+    write(&target, "lib.starry", "fun f(): int = 1\n");
     write(
         &app,
         "starry.toml",
         &manifest("app", "1.0.0", &dependency("../math", "1.0.0")),
     );
-    write(&app, "main.starry", "package app\nfun main(): int = 0\n");
+    write(&app, "main.starry", "fun main(): int = 0\n");
     let output = build(&app, None);
     assert!(!output.status.success());
     assert!(
@@ -246,13 +242,13 @@ fn dependency_cycle_has_a_readable_path() {
         "starry.toml",
         &manifest("a", "1.0.0", "b = { path = \"../b\", version = \"1.0.0\" }"),
     );
-    write(&a, "lib.starry", "package a\n");
+    write(&a, "lib.starry", "");
     write(
         &b,
         "starry.toml",
         &manifest("b", "1.0.0", "a = { path = \"../a\", version = \"1.0.0\" }"),
     );
-    write(&b, "lib.starry", "package b\n");
+    write(&b, "lib.starry", "");
     let output = build(&a, None);
     assert!(!output.status.success());
     assert!(
@@ -266,16 +262,8 @@ fn dependency_cycle_has_a_readable_path() {
 #[test]
 fn import_cycle_is_rejected() {
     let root = temp("import_cycle");
-    write(
-        &root,
-        "a.starry",
-        "package a\nimport b.f\nfun unused(): int = 1\n",
-    );
-    write(
-        &root,
-        "b.starry",
-        "package b\nimport a.g\nfun unused(): int = 2\n",
-    );
+    write(&root, "a/mod.starry", "import b.f\nfun unused(): int = 1\n");
+    write(&root, "b/mod.starry", "import a.g\nfun unused(): int = 2\n");
     let output = build(&root, None);
     assert!(!output.status.success());
     assert!(
@@ -291,8 +279,8 @@ fn self_import_is_rejected() {
     let root = temp("self_import");
     write(
         &root,
-        "main.starry",
-        "package app\nimport app.helper\nfun helper(): int = 1\nfun main(): int = 0\n",
+        "app/main.starry",
+        "import app.helper\nfun helper(): int = 1\nfun main(): int = 0\n",
     );
     let output = build(&root, None);
     assert!(!output.status.success());
@@ -314,7 +302,7 @@ fn duplicate_package_identity_is_rejected() {
     let app = root.join("app");
     for package in [&shared_one, &shared_two] {
         write(package, "starry.toml", &manifest("shared", "1.0.0", ""));
-        write(package, "lib.starry", "package shared\nfun f(): int = 1\n");
+        write(package, "lib.starry", "fun f(): int = 1\n");
     }
     write(
         &left,
@@ -325,7 +313,7 @@ fn duplicate_package_identity_is_rejected() {
             "shared = { path = \"../shared1\", version = \"1.0.0\" }",
         ),
     );
-    write(&left, "lib.starry", "package left\n");
+    write(&left, "lib.starry", "");
     write(
         &right,
         "starry.toml",
@@ -335,7 +323,7 @@ fn duplicate_package_identity_is_rejected() {
             "shared = { path = \"../shared2\", version = \"1.0.0\" }",
         ),
     );
-    write(&right, "lib.starry", "package right\n");
+    write(&right, "lib.starry", "");
     write(
         &app,
         "starry.toml",
@@ -345,7 +333,7 @@ fn duplicate_package_identity_is_rejected() {
             "left = { path = \"../left\", version = \"1.0.0\" }\nright = { path = \"../right\", version = \"1.0.0\" }",
         ),
     );
-    write(&app, "main.starry", "package app\nfun main(): int = 0\n");
+    write(&app, "main.starry", "fun main(): int = 0\n");
     let output = build(&app, None);
     assert!(!output.status.success());
     assert!(
@@ -383,11 +371,7 @@ fn cross_package_internal_and_private_are_rejected() {
         let math = root.join("math");
         let app = root.join("app");
         write(&math, "starry.toml", &manifest("math", "1.0.0", ""));
-        write(
-            &math,
-            "lib.starry",
-            &format!("package math\n{declaration}\n"),
-        );
+        write(&math, "lib.starry", &format!("{declaration}\n"));
         write(
             &app,
             "starry.toml",
@@ -396,7 +380,7 @@ fn cross_package_internal_and_private_are_rejected() {
         write(
             &app,
             "main.starry",
-            "package app\nimport math.secret\nfun main(): int = secret()\n",
+            "import math.secret\nfun main(): int = secret()\n",
         );
         let output = build(&app, None);
         assert!(
@@ -438,7 +422,7 @@ fn malformed_manifest_subset_is_rejected() {
         "starry.toml",
         "[package]\nname = \"app\"\nversion = \"1.0.0\"\n\n[dependencies]\nmath = \"bad\"\n",
     );
-    write(&root, "main.starry", "package app\nfun main(): int = 0\n");
+    write(&root, "main.starry", "fun main(): int = 0\n");
     let output = build(&root, None);
     assert!(!output.status.success());
     let text = combined(&output);
@@ -468,13 +452,13 @@ fn same_package_build_does_not_regress() {
     let root = temp("same_root");
     write(
         &root,
-        "util.starry",
-        "package demo.core\nfun double(n: int): int = n * 2\n",
+        "demo/core/util.starry",
+        "fun double(n: int): int = n * 2\n",
     );
     write(
         &root,
-        "main.starry",
-        "package demo.app\nimport demo.core.double\nfun main(): int {\n    return double(21)\n}\n",
+        "demo/app/main.starry",
+        "import demo.core.double\nfun main(): int {\n    return double(21)\n}\n",
     );
     assert_eq!(native_build(&root, "same_root_out", 42), String::new());
     let _ = std::fs::remove_dir_all(&root);

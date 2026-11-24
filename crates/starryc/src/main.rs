@@ -272,16 +272,17 @@ fn compile_ll(path: &str) -> Result<String, ExitCode> {
         }
     };
     let owned = source;
-    compile_source(&owned, &|diags| print_diags(path, &owned, diags))
+    compile_source(&owned, &[], &|diags| print_diags(path, &owned, diags))
 }
 
-/// M5：编译一段（已合并或单文件的）源码；诊断渲染注入（多文件按偏移表
-/// 归属到具体文件）。
+/// 编译一段（已合并或单文件的）源码；诊断渲染注入（多文件按偏移表
+/// 归属到具体文件）；segments 为编译器模块路径元数据。
 fn compile_source(
     source: &str,
+    segments: &[(u32, String)],
     render: &impl Fn(&[ast::syntax::node::Diagnostic]),
 ) -> Result<String, ExitCode> {
-    let parsed = match parser::parse_source(source) {
+    let parsed = match parser::parse_source_with_segments(source, segments) {
         Ok(parsed) => parsed,
         Err(e) => {
             eprintln!("starryc: 解析失败（机器层）: {e}");
@@ -483,19 +484,21 @@ fn collect_starry(
     Ok(())
 }
 
-/// 合并源集：每个文件一段，记录路径、起始偏移、原文、注入前缀长与所属包，
-/// 供诊断归属和跨包解析（M5 slice 2a：目录默认包前缀注入会平移段内 span）。
+/// 合并源集：每个文件一段，记录路径、起始偏移、原文、所属包与模块路径，
+/// 供诊断归属、跨包解析与编译器段元数据（模块路径不再是源码语法）。
 struct SourceUnit {
     path: PathBuf,
     base: u32,
     text: String,
-    delta: u32,
     owner: PackageId,
+    package_name: String,
+    module_path: String,
 }
 
 struct SourceSet {
     merged: String,
     files: Vec<SourceUnit>,
+    segments: Vec<(u32, String)>,
 }
 
 fn dir_package(f: &Path, src_root: &Path) -> Option<String> {
@@ -514,41 +517,81 @@ fn dir_package(f: &Path, src_root: &Path) -> Option<String> {
     }
 }
 
-fn has_package_header(text: &str) -> bool {
-    let lead = text.len() - text.trim_start_matches([' ', '\t', '\r', '\n']).len();
-    text[lead..].starts_with("package ")
+fn is_ident(segment: &str) -> bool {
+    let mut chars = segment.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn merge_sources(files: &[(PathBuf, PathBuf, PackageId)]) -> Result<SourceSet, String> {
+/// Module path = manifest package name + directory path (manifest packages),
+/// or the bare directory path (manifest-less roots). One directory is one
+/// module; names must be valid dotted identifiers.
+fn derive_module_path(
+    package_name: &str,
+    has_manifest: bool,
+    dir: Option<&str>,
+) -> Result<String, String> {
+    let mut parts: Vec<&str> = Vec::new();
+    if has_manifest {
+        for segment in package_name.split('.') {
+            if !is_ident(segment) {
+                return Err(format!(
+                    "package name `{package_name}` is not a valid dotted identifier"
+                ));
+            }
+            parts.push(segment);
+        }
+    }
+    if let Some(dir) = dir {
+        for segment in dir.split('.') {
+            if segment.is_empty() {
+                continue;
+            }
+            if !is_ident(segment) {
+                return Err(format!(
+                    "directory name `{segment}` is not a valid module identifier"
+                ));
+            }
+            parts.push(segment);
+        }
+    }
+    Ok(parts.join("."))
+}
+
+fn merge_sources(
+    files: &[(PathBuf, PathBuf, PackageId)],
+    graph: &PackageGraph,
+) -> Result<SourceSet, String> {
     let mut merged = String::new();
     let mut table = Vec::new();
+    let mut segments = Vec::new();
     for (f, src_root, owner) in files {
         let text =
             std::fs::read_to_string(f).map_err(|e| format!("无法读取 {}: {e}", f.display()))?;
-        let (body, delta) = if has_package_header(&text) {
-            (text.clone(), 0)
-        } else {
-            match dir_package(f, src_root) {
-                Some(pkg) => {
-                    let prefix = format!("package {pkg}\n");
-                    (format!("{prefix}{text}"), prefix.len() as u32)
-                }
-                None => (text.clone(), 0),
-            }
-        };
+        let package = graph.package(*owner);
+        let dir = dir_package(f, src_root);
+        let module_path =
+            derive_module_path(&package.manifest.name, package.has_manifest, dir.as_deref())?;
+        let base = merged.len() as u32;
+        segments.push((base, module_path.clone()));
+        merged.push_str(&text);
+        merged.push('\n');
         table.push(SourceUnit {
             path: f.clone(),
-            base: merged.len() as u32,
+            base,
             text,
-            delta,
             owner: *owner,
+            package_name: package.manifest.name.clone(),
+            module_path,
         });
-        merged.push_str(&body);
-        merged.push('\n');
     }
     Ok(SourceSet {
         merged,
         files: table,
+        segments,
     })
 }
 
@@ -562,7 +605,7 @@ fn print_set_diags(set: &SourceSet, diags: &[ast::syntax::node::Diagnostic]) {
             .rposition(|unit| (unit.base as usize) <= pos)
             .unwrap_or(0);
         let unit = &set.files[idx];
-        let (line, col) = line_col(&unit.text, pos - unit.base as usize - unit.delta as usize);
+        let (line, col) = line_col(&unit.text, pos - unit.base as usize);
         eprintln!(
             "{}:{line}:{col}: {:?}: {}",
             unit.path.display(),
@@ -572,33 +615,17 @@ fn print_set_diags(set: &SourceSet, diags: &[ast::syntax::node::Diagnostic]) {
     }
 }
 
-/// Enforce the v1 direct-import rule over manifest package owners. Dotted
-/// source package segments inside one package root remain package-local, while
-/// imports into another PackageId must name a direct dependency.
+/// Enforce the v1 direct-import rule over manifest package owners: imports
+/// into another PackageId must name a direct dependency; same-package module
+/// imports stay package-local.
 fn check_direct_imports(set: &SourceSet, graph: &PackageGraph) -> Result<(), String> {
-    let dotted = |path: &ast::syntax::node::Path, interner: &ast::interner::Interner| {
-        path.segments
-            .iter()
-            .map(|segment| interner.resolve(segment.name))
-            .collect::<Vec<_>>()
-            .join(".")
-    };
     let mut owners = std::collections::BTreeMap::new();
     for unit in &set.files {
-        let parsed = parser::parse_source(&unit.text).map_err(|e| e.to_string())?;
-        if let Some(package) = &parsed.ast.package {
-            owners.insert(dotted(package, &parsed.interner), unit.owner);
-        }
+        owners.insert(unit.package_name.clone(), unit.owner);
     }
     for unit in &set.files {
         let parsed = parser::parse_source(&unit.text).map_err(|e| e.to_string())?;
-        let current = match &parsed.ast.package {
-            Some(package) => dotted(package, &parsed.interner),
-            None => {
-                let root = graph.package(unit.owner).root.clone();
-                dir_package(&unit.path, &root).unwrap_or_default()
-            }
-        };
+        let current = unit.package_name.clone();
         for item in &parsed.ast.items {
             let DeclKind::Import(import) = &item.kind else {
                 continue;
@@ -705,10 +732,18 @@ fn resolve_build_input(path: &str) -> Result<BuildInput, String> {
             }
             .to_string());
         }
-        let set = merge_sources(&files)?;
+        let set = merge_sources(&files, &graph)?;
         check_source_ownership(&set, &graph)?;
         check_direct_imports(&set, &graph)?;
-        package::check_import_cycles(&set.merged).map_err(|e| e.to_string())?;
+        let import_units: Vec<package::ImportUnit<'_>> = set
+            .files
+            .iter()
+            .map(|unit| package::ImportUnit {
+                module_path: &unit.module_path,
+                source: &unit.text,
+            })
+            .collect();
+        package::check_import_cycles(&import_units).map_err(|e| e.to_string())?;
         Ok(BuildInput::Multi { root, graph, set })
     } else {
         Ok(BuildInput::Single(p.to_path_buf()))
@@ -728,7 +763,9 @@ fn cmd_build(path: &str, output: Option<&str>, link_args: &[String], release: bo
             Err(code) => return code,
         },
         BuildInput::Multi { set, .. } => {
-            match compile_source(&set.merged, &|diags| print_set_diags(set, diags)) {
+            match compile_source(&set.merged, &set.segments, &|diags| {
+                print_set_diags(set, diags)
+            }) {
                 Ok(text) => text,
                 Err(code) => return code,
             }

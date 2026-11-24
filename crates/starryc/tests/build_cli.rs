@@ -686,17 +686,17 @@ fn build_dir_and_run(name: &str, files: &[(&str, &str)], manifest: Option<&str>)
 
 #[test]
 fn multi_file_build_cross_package_import() {
-    // M5 slice 2a：包段 + 显式 import——跨包调用须 import（merge-root 已废弃）
+    // 跨模块调用须 import；模块路径 = 目录推导（无 package 头）
     let Some(out) = build_dir_and_run(
         "merge",
         &[
             (
-                "util.starry",
-                "package demo.core\n\nfun double(n: int) : int = n * 2\n",
+                "demo/core/util.starry",
+                "fun double(n: int) : int = n * 2\n",
             ),
             (
-                "main.starry",
-                "package demo.app\nimport demo.core.double\n\nfun main() {\n    print(double(21))\n}\n",
+                "demo/app/main.starry",
+                "import demo.core.double\n\nfun main() {\n    print(double(21))\n}\n",
             ),
         ],
         None,
@@ -916,8 +916,8 @@ fn weak_upgrade_end_to_end() {
 
 #[test]
 fn directory_default_package_with_import() {
-    // M5 slice 2a: headerless files get their package from the directory
-    // (src/util -> package util); cross-package use requires import.
+    // M5 slice 2a: headerless files get their module path from the directory
+    // (src/util -> m5dir.util); cross-module use requires import.
     let toml = "[package]\nname = \"m5dir\"\nversion = \"1.0.0\"";
     let Some(out) = build_dir_and_run(
         "m5dir",
@@ -928,7 +928,7 @@ fn directory_default_package_with_import() {
             ),
             (
                 "src/app/main.starry",
-                "import util.Helper\n\nfun main() {\n    val h = Helper(41)\n    print(h.plus1())\n}\n",
+                "import m5dir.util.Helper\n\nfun main() {\n    val h = Helper(41)\n    print(h.plus1())\n}\n",
             ),
             ("starry.toml", toml),
         ],
@@ -941,8 +941,8 @@ fn directory_default_package_with_import() {
 
 #[test]
 fn namespace_import_end_to_end() {
-    // M5 slice 2b: `import util` brings the namespace; qualified access
-    // `util.Helper(...)` resolves through the PackageNs def.
+    // M5 slice 2b: `import m5dir.util` brings the namespace; qualified
+    // access `m5dir.util.Helper(...)` resolves through the PackageNs def.
     let toml = "[package]\nname = \"m5ns\"\nversion = \"1.0.0\"";
     let Some(out) = build_dir_and_run(
         "m5ns",
@@ -953,7 +953,7 @@ fn namespace_import_end_to_end() {
             ),
             (
                 "src/app/main.starry",
-                "import util\n\nfun main() {\n    val h = util.Helper(41)\n    print(h.plus1())\n}\n",
+                "import m5dir.util\n\nfun main() {\n    val h = util.Helper(41)\n    print(h.plus1())\n}\n",
             ),
             ("starry.toml", toml),
         ],

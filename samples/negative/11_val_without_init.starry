@@ -1,5 +1,3 @@
-package demo.traps
-
 val x
 
 fun main() {

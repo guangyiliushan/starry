@@ -40,7 +40,7 @@ starryc irc <file.starry>           # print TAC
 starryc opt <file.starry>           # print optimized TAC
 starryc llvme <file.starry>         # print LLVM IR
 starryc build <file.starry> [out] [-- <clang link args>]  # compile and link a native executable (extern "c" FFI: extra .obj / -l / -L after --)
-starryc build <dir|starry.toml> [out]  # M5 multi-file: manifest (name/srcs) + merged-root build of all .starry under srcs
+starryc build <dir|starry.toml> [out]  # multi-file: manifest = package identity; module path = name + directory
 ```
 
 `check`, `irc`, `opt`, `llvme`, and `build` exit `0` when clean and `1` on source

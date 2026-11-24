@@ -3,7 +3,6 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HardKeyword {
-    Package,
     Import,
     Extern,
     Val,
@@ -46,7 +45,6 @@ impl HardKeyword {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Package => "package",
             Self::Import => "import",
             Self::Extern => "extern",
             Self::Val => "val",
@@ -90,7 +88,6 @@ impl HardKeyword {
 #[must_use]
 pub fn lookup_hard_keyword(word: &str) -> Option<HardKeyword> {
     match word {
-        "package" => Some(HardKeyword::Package),
         "import" => Some(HardKeyword::Import),
         "extern" => Some(HardKeyword::Extern),
         "val" => Some(HardKeyword::Val),
@@ -307,6 +304,6 @@ pub fn lookup_slot_word(word: &str) -> Option<SlotWord> {
     }
 }
 
-pub const HARD_KEYWORD_COUNT: usize = 37;
+pub const HARD_KEYWORD_COUNT: usize = 36;
 pub const MODIFIER_WORD_COUNT: usize = 15;
 pub const SLOT_WORD_COUNT: usize = 31;

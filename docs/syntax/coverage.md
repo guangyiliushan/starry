@@ -61,7 +61,7 @@
 | v0.4 comptime 收窄为 Block | ComptimeExpr := «comptime» Block |
 | v0.4 宏调用 `name!(...)` | ExprKind::MacroCall + TokenTree 流 |
 | v0.4 数组 `[T; N]` / `[v; N]` | TypeKind::Array / ExprKind::ArrayRepeat |
-| v0.4 module 声明移除 | SourceFile 仅 package；`by` 降为 slot word |
+| v0.4 module 声明移除 | SourceFile 无 package 头；模块路径为编译器 segment 元数据；`by` 降为 slot word |
 | v0.4 LoopExpr / LoopStatement 分立 | ExprKind::Loop（表达式，label 字段承块尾归一）/ StmtKind::Loop（带标签语句，块尾时归一为 LoopExpr） |
 | 元组下标常量槽 | ExprKind::Index.const_index（parser 解码整数字面量；动态下标仅数组） |
 

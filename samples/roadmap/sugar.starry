@@ -1,5 +1,3 @@
-package demo.sugar
-
 import std.text.*
 
 // ========== 可空类型与空安全链 ==========
