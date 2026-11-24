@@ -1862,3 +1862,26 @@ fn p0_rejects_accessors() {
 fn p0_bits_as_type_is_undefined() {
     assert_has("val B: bits = 0", DiagCode::SemUndefinedType);
 }
+
+#[test]
+fn p0_rejects_protected_on_top_level() {
+    assert_has(
+        "protected fun f(): int {\n    return 1\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn p0_rejects_protected_on_class_member() {
+    assert_has(
+        "class C {\n    protected fun f(): int {\n        return 0\n    }\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn p0_protected_does_not_break_valid_visibility() {
+    assert_clean("public fun f(): int {\n    return 1\n}");
+    assert_clean("private fun f(): int {\n    return 1\n}");
+    assert_clean("internal fun f(): int {\n    return 1\n}");
+}

@@ -475,10 +475,11 @@ fn vis_of(decl: &DeclNode, st: &mut SemState) -> crate::def::Vis {
             ModifierWord::Internal => return crate::def::Vis::Internal,
             ModifierWord::Public => return crate::def::Vis::Pub,
             ModifierWord::Protected => {
+                // P0 compiler trust：继承未实现，protected 无可定义跨类语义
                 st.diags.emit(Diagnostic::error(
                     DiagCode::SemUnsupportedConstruct,
                     decl.span,
-                    "`protected` is only supported on class members (not top-level declarations)",
+                    "`protected` is not supported until inheritance is implemented",
                 ));
                 return crate::def::Vis::Internal;
             }
@@ -511,6 +512,25 @@ fn reject_unsupported_modifiers(mods: &[ast::syntax::modifier::Modifier], st: &m
             DiagCode::SemUnsupportedConstruct,
             m.span,
             msg,
+        ));
+    }
+}
+
+/// P0 compiler trust：class 成员路径的 protected 拒收（vis_of 只覆盖
+/// 顶层声明；成员走这里，保证两条路径各报一次、不重复）。
+fn reject_protected_member(
+    mods: &[ast::syntax::modifier::Modifier],
+    span: Span,
+    st: &mut SemState,
+) {
+    if mods
+        .iter()
+        .any(|m| m.word == ast::token::ModifierWord::Protected)
+    {
+        st.diags.emit(Diagnostic::error(
+            DiagCode::SemUnsupportedConstruct,
+            span,
+            "`protected` is not supported until inheritance is implemented",
         ));
     }
 }
@@ -892,6 +912,7 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                     ClassMember::Declaration(d) if matches!(&d.kind, DeclKind::Binding(_)) => {
                         if let DeclKind::Binding(b) = &d.kind {
                             reject_unsupported_modifiers(&b.modifiers.modifiers, st);
+                            reject_protected_member(&b.modifiers.modifiers, d.span, st);
                         }
                         st.diags.emit(Diagnostic::error(
                             DiagCode::SemUnsupportedConstruct,
@@ -902,6 +923,7 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                     ClassMember::Declaration(d) if matches!(&d.kind, DeclKind::Fun(_)) => {
                         if let DeclKind::Fun(f) = &d.kind {
                             reject_unsupported_modifiers(&f.modifiers.modifiers, st);
+                            reject_protected_member(&f.modifiers.modifiers, d.span, st);
                             if f.params.iter().any(|p| p.default.is_some()) {
                                 st.diags.emit(Diagnostic::error(
                                     DiagCode::SemUnsupportedConstruct,
