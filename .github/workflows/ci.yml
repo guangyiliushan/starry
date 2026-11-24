@@ -60,3 +60,24 @@ jobs:
         run: cargo run -p syntaxgen -- --check
       - name: git diff --check
         run: git diff --check
+  sanitizer:
+    # P0 Task 8：生成的 Starry 程序在 Linux 上的 ASan/UBSan 门禁
+    #（编译器本体不 sanitize；Windows freestanding 不支持，显式跳过）
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install LLVM (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/llvm-as llvm-as /usr/bin/llvm-as-18 100
+      - name: Verify native toolchain
+        run: |
+          clang --version
+          llvm-as --version
+      - name: ASan/UBSan corpus
+        run: cargo test -p starryc --test sanitizer --target-dir target/codex-check -- --nocapture
