@@ -1750,3 +1750,10 @@ fn variance_annotations_stable_rejection() {
         DiagCode::SemUnsupportedConstruct,
     );
 }
+
+// ---- P0 compiler trust baseline ----
+
+#[test]
+fn p0_baseline_clean_value_program() {
+    assert_clean("fun main(): int {\n    val x = 1\n    return x\n}");
+}
