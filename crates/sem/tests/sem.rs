@@ -1820,3 +1820,45 @@ fn p0_keeps_valid_modifiers_clean() {
     assert_clean("private fun f(): int {\n    return 1\n}");
     assert_clean("internal fun f(): int {\n    return 1\n}");
 }
+
+#[test]
+fn p0_rejects_union_declaration() {
+    assert_has(
+        "union U {\n    a: int\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn p0_rejects_macro_declaration() {
+    assert_has("macro repeat(name) {\n}", DiagCode::SemUnsupportedConstruct);
+}
+
+#[test]
+fn p0_rejects_comptime_expression() {
+    assert_has(
+        "val X: int = comptime {\n    1 + 1\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn p0_rejects_comptime_statement() {
+    assert_has(
+        "fun main() {\n    comptime {\n        val x = 1\n    }\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn p0_rejects_accessors() {
+    assert_has(
+        "class C(val x: int) {\n    get {\n        x\n    }\n    set {\n    }\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn p0_bits_as_type_is_undefined() {
+    assert_has("val B: bits = 0", DiagCode::SemUndefinedType);
+}

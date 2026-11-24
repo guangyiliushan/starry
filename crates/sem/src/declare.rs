@@ -926,6 +926,20 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                             "secondary constructors (init) are not supported in this slice",
                         ));
                     }
+                    // P0 compiler trust：accessor 无属性语义——此前被静默忽略
+                    ClassMember::Accessor(a) => {
+                        let span = a
+                            .getter
+                            .as_ref()
+                            .or(a.setter.as_ref())
+                            .and_then(|b| b.stmts.first().map(|s| s.span))
+                            .unwrap_or(decl.span);
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnsupportedConstruct,
+                            span,
+                            "accessors are not supported in v1",
+                        ));
+                    }
                     _ => {}
                 }
             }
@@ -966,14 +980,14 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
             }
         }
         DeclKind::Union(u) => {
-            if !u.type_params.is_empty() {
-                st.diags.emit(Diagnostic::error(
-                    DiagCode::SemUnsupportedConstruct,
-                    decl.span,
-                    "generic unions are not supported in semantic v1",
-                ));
-            }
-            add_def(st, scope, u.name, decl.span, DefKind::Struct);
+            // P0 compiler trust：union 无构造/字段访问实现——此前声明被
+            // 静默注册（冒充 Struct）、构造点才报错；声明点稳定拒收。
+            let _ = u;
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                decl.span,
+                "union declarations are not supported in v1",
+            ));
         }
         DeclKind::Trait(t) => {
             // M9 9a：trait 声明注册——纯签名集（Q6/Q7/Q8：无 dyn、无默认实现、
@@ -1065,8 +1079,14 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
             ));
         }
         DeclKind::Macro(m) => {
+            // P0 compiler trust：宏展开前置 pass 未实现——此前声明被静默
+            // 接受、调用点才报错；声明点稳定拒收。
             let _ = m;
-            // 宏定义注册：宏体展开是独立前置 pass（规格待定）；v1 展开前调用点报错
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                decl.span,
+                "macro declarations are not supported in v1",
+            ));
         }
         // M9 9d：impl 注册延后到签名 lower 后（run() 末尾 register_impl）——
         // impl 头实例化泛型类型须先有代入前的 sig（variants/params）
@@ -1079,7 +1099,14 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                 "actors are not supported in semantic v1",
             ));
         }
-        DeclKind::Comptime(_) => {}
+        DeclKind::Comptime(_) => {
+            // P0 compiler trust：comptime 无编译期求值实现，声明点稳定拒收
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                decl.span,
+                "comptime declarations are not supported in v1",
+            ));
+        }
         DeclKind::Error(_) | DeclKind::Missing(_) => {}
     }
 }

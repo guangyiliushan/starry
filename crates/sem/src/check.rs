@@ -620,6 +620,9 @@ fn type_stmt(s: &StmtWrap, st: &mut SemState) {
             type_block(body, st, false);
         }
         StmtKind::Comptime { block } => {
+            // P0 compiler trust：comptime 无编译期求值实现——此前按普通块
+            // 在运行时求值（语义谎言）；稳定拒收后仍定型块体防级联。
+            unsupported(st, s.span, "comptime blocks are not supported in v1");
             type_block(block, st, false);
         }
         StmtKind::Grow { expr, bits } => {
@@ -1720,7 +1723,12 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             unsupported(st, e.span, "await is not supported in semantic v1");
             ty
         }
-        ExprKind::Comptime { block } => type_block(block, st, in_value),
+        ExprKind::Comptime { block } => {
+            // P0 compiler trust：同 StmtKind::Comptime——稳定拒收 + 定型防级联
+            unsupported(st, e.span, "comptime blocks are not supported in v1");
+            type_block(block, st, in_value);
+            st.tys.error
+        }
         // M6：unsafe 块建立 extern "c" 调用的许可上下文（language-design：
         // FFI 调用在 unsafe 中）。深度计数覆盖嵌套块。
         ExprKind::Unsafe { block } => {
