@@ -1930,3 +1930,26 @@ fn p0_as_poison_does_not_cascade() {
         "expected exactly one mismatch, got {got:?}"
     );
 }
+
+#[test]
+fn p0_impl_rejects_unbound_type_param() {
+    assert_has(
+        "trait T {\n    fun f(): int\n}\nstruct L<T>(val v: T)\nimpl T for L<T> {\n    fun f(): int {\n        return 0\n    }\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn p0_impl_accepts_bound_type_param() {
+    assert_clean(
+        "trait T {\n    fun f(): int\n}\nstruct L<T>(val v: T)\nimpl<T> T for L<T> {\n    fun f(): int {\n        return 0\n    }\n}",
+    );
+}
+
+#[test]
+fn p0_impl_rejects_trait_as_type_argument() {
+    assert_has(
+        "trait T {\n}\nstruct L<T>(val v: T)\nimpl T for L<T> {\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}

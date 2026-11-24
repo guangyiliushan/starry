@@ -409,6 +409,39 @@ impl TyArena {
             _ => false,
         }
     }
+    /// P0 compiler trust：收集类型里出现的 Param 下标（深度递归，同
+    /// `mentions_param` 的遍历面）。impl 头用它判定类型实参是否被
+    /// `impl<T>` 绑定；未绑定 Param 在声明点稳定拒收。
+    pub fn collect_param_indices(&self, ty: TyId, out: &mut Vec<u32>) {
+        match self.kind(ty) {
+            TyKind::Param(i) => out.push(*i),
+            TyKind::Ref { inner, .. } | TyKind::Pointer { inner, .. } => {
+                self.collect_param_indices(*inner, out)
+            }
+            TyKind::Named(_, args) => {
+                for a in args {
+                    self.collect_param_indices(*a, out);
+                }
+            }
+            TyKind::Nullable(inner) | TyKind::Range(inner) => {
+                self.collect_param_indices(*inner, out)
+            }
+            TyKind::Array(elem, _) => self.collect_param_indices(*elem, out),
+            TyKind::Tuple(elems) => {
+                for e in elems {
+                    self.collect_param_indices(*e, out);
+                }
+            }
+            TyKind::Fn(ps, ret) => {
+                for p in ps {
+                    self.collect_param_indices(*p, out);
+                }
+                self.collect_param_indices(*ret, out);
+            }
+            _ => {}
+        }
+    }
+
     /// 便捷：整型字面量默认类型核查（测试用）
     pub fn is_integral(&self, id: TyId) -> bool {
         self.is_integral_kind(id)

@@ -152,6 +152,33 @@ fn register_impl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemStat
     let trait_ty = lower_ty(st, scope, &i.type_ref);
     let type_ty = lower_ty(st, iscope, &i.trait_ref);
     st.in_impl_header = false;
+    // P0 compiler trust：impl 头类型实参必须是本 impl 绑定的形参或具体
+    // 类型。未绑定 Param / trait 名充当类型实参此前会静默注册、调用点
+    // 误报「method calls are not supported」；声明点稳定拒收。
+    {
+        let mut params: Vec<u32> = Vec::new();
+        st.tys.collect_param_indices(type_ty, &mut params);
+        st.tys.collect_param_indices(trait_ty, &mut params);
+        params.sort_unstable();
+        params.dedup();
+        let bound = i.type_params.len() as u32;
+        if params.iter().any(|p| *p >= bound) {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                i.trait_ref.span,
+                "impl type parameter is not bound; write impl<T> ...",
+            ));
+            return;
+        }
+        if impl_type_arg_is_trait(st, type_ty) {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                i.trait_ref.span,
+                "trait cannot be used as a type argument",
+            ));
+            return;
+        }
+    }
     let Some(tdef) = (match st.tys.kind(trait_ty) {
         TyKind::Named(d, _) if matches!(st.defs.get(*d).kind, DefKind::Trait) => Some(*d),
         _ => None,
@@ -532,6 +559,31 @@ fn reject_protected_member(
             span,
             "`protected` is not supported until inheritance is implemented",
         ));
+    }
+}
+
+/// P0 compiler trust：impl 头 for-类型的泛型实参里是否出现 trait
+///（根位置 trait 已由「impl header must name a nominal type」拒收）。
+fn impl_type_arg_is_trait(st: &SemState, ty: TyId) -> bool {
+    match st.tys.kind(ty) {
+        TyKind::Named(_, args) => {
+            args.iter().any(|a| {
+                matches!(
+                    st.tys.kind(*a),
+                    TyKind::Named(d, _) if matches!(st.defs.get(*d).kind, DefKind::Trait)
+                )
+            }) || args.iter().any(|a| impl_type_arg_is_trait(st, *a))
+        }
+        TyKind::Nullable(i) | TyKind::Range(i) => impl_type_arg_is_trait(st, *i),
+        TyKind::Array(e, _) => impl_type_arg_is_trait(st, *e),
+        TyKind::Tuple(elems) => elems.iter().any(|e| impl_type_arg_is_trait(st, *e)),
+        TyKind::Fn(ps, ret) => {
+            ps.iter().any(|p| impl_type_arg_is_trait(st, *p)) || impl_type_arg_is_trait(st, *ret)
+        }
+        TyKind::Ref { inner, .. } | TyKind::Pointer { inner, .. } => {
+            impl_type_arg_is_trait(st, *inner)
+        }
+        _ => false,
     }
 }
 
@@ -1622,6 +1674,22 @@ fn lower_ty_uncached(st: &mut SemState, scope: ScopeId, ty: &TypeWrap) -> TyId {
                 .iter()
                 .map(|a| lower_ty(st, scope, &a.ty))
                 .collect();
+            // P0 compiler trust：trait 只允许出现在 lower 的根位置（bounds、
+            // impl trait 槽经 in_impl_header 放行）；嵌进类型实参一律拒收
+            //（`impl T for L<T>` 此前静默注册成 spec、调用点误报）。
+            if args.iter().any(|a| {
+                matches!(
+                    st.tys.kind(*a),
+                    TyKind::Named(d, _) if matches!(st.defs.get(*d).kind, DefKind::Trait)
+                )
+            }) {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    ty.span,
+                    "trait cannot be used as a type argument",
+                ));
+                return st.tys.error;
+            }
             let kind = st.defs.get(def).kind.clone();
             match kind {
                 // M7：类型形参——克隆体经 mono_subst 兑现具体类型；
