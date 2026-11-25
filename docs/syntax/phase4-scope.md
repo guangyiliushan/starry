@@ -33,8 +33,11 @@ feature-matrix row that agree. A surface may be excluded with a stable typed
 diagnostic; a compiler path that accepts source but cannot lower or run is not
 admissible.
 
-## Phase 4 exit
+## Phase 4 closeout
 
-WP2-WP5 continue correctness/documentation closeout: ABI cases must either run
-end-to-end or reject with a stable diagnostic, sanitizer/IR coverage stays green,
-clean-clone builds work, and docs/sample tutorials match implementation.
+At `v0.1.0-rc`, WP2-WP5 close the correctness and release boundary: ABI cases
+run end-to-end or reject with a stable diagnostic; inheritance, aggregate/enum
+ARC, nullable ABI, and reassignment paths are in the Linux sanitizer corpus;
+TypeInfo/vtable snapshots are pinned; the CI matrix runs Windows/Linux plus the
+sanitizer job; a clean clone builds with `--locked` and the sample corpus runs;
+the quickstart tutorial covers five runnable language slices.
