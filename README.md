@@ -46,6 +46,8 @@ starryc build <dir|starry.toml> [out]  # multi-file: manifest = package identity
 `check`, `irc`, `opt`, `llvme`, and `build` exit `0` when clean and `1` on source
 diagnostics. Diagnostics are printed as `path:line:col: Code: message`.
 
+New to the language? Start with [docs/tutorial.md](docs/tutorial.md).
+
 ## Sample corpus
 
 - `samples/*.starry` — runnable examples; every file must pass `starryc check`, and (with a clang toolchain) `starryc build` + run must reproduce its golden output in `samples/golden/<name>.stdout`.
@@ -85,9 +87,10 @@ The implemented surface covers scalar and aggregate data, control flow,
 patterns, nullable values, string interpolation and concatenation, print I/O,
 `extern "c"` calls, structural equality, defaults, top-level globals initialized
 in dependency order, class/ARC (constructor, methods, deinit, `weak var`,
-nullable classes), generics (monomorphization), traits with static dispatch,
-closures with value capture, directory/manifest module paths, and the
-optimization pipeline listed above. Intentionally rejected surfaces (stable
+nullable classes, aggregate/enum payloads), generics (monomorphization), traits
+with static dispatch and class-root `dyn`, closures with value capture, single
+inheritance with abstract/open/override methods, directory/manifest module
+paths, and the optimization pipeline listed above. Intentionally rejected surfaces (stable
 diagnostics) are listed in `docs/syntax/feature-matrix.md`. See
 `semantic-notes.md` and `opt-notes.md` for the intentionally deferred language
 features.
