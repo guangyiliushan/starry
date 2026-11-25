@@ -142,6 +142,56 @@ fn register_import(scope: ScopeId, decl: &DeclNode, st: &mut SemState) {
 
 /// M9 9d：impl 注册（延后到签名 lower 后；泛型 enum/struct 实例化
 /// 须先有代入前的 sig）。重复 impl 拒收；签名与 trait 逐一核对。
+/// Trait methods plus inherited supertrait methods, deterministic by
+/// traversal order and tolerant of declaration-phase scope sharing.
+fn trait_methods_with_inherited(st: &SemState, def: DefId) -> Vec<(ast::interner::Symbol, DefId)> {
+    let mut out: Vec<(ast::interner::Symbol, DefId)> = Vec::new();
+    let mut seen: Vec<DefId> = Vec::new();
+    let mut queue = vec![def];
+    while let Some(cur) = queue.pop() {
+        if seen.contains(&cur) {
+            continue;
+        }
+        seen.push(cur);
+        queue.extend(st.defs.get(cur).sig.supertypes.iter().rev().copied());
+        let Some(ms) = st.defs.get(cur).member_scope else {
+            continue;
+        };
+        for (name, method) in st.scopes.entries(ms) {
+            if matches!(st.defs.get(method).kind, DefKind::Fun)
+                && !out.iter().any(|(n, _)| *n == name)
+            {
+                out.push((name, method));
+            }
+        }
+    }
+    out
+}
+
+/// Find a method already supplied by an impl of `def` or one of its
+/// transitive supertraits for `type_def`.
+fn inherited_trait_method(
+    st: &SemState,
+    def: DefId,
+    type_def: DefId,
+    name: ast::interner::Symbol,
+) -> Option<DefId> {
+    for parent in st.defs.get(def).sig.supertypes.clone() {
+        if let Some(im) = st
+            .impls
+            .iter()
+            .find(|im| im.trait_def == parent && im.type_def == type_def)
+            && let Some((_, method)) = im.methods.iter().find(|(n, _)| *n == name)
+        {
+            return Some(*method);
+        }
+        if let Some(method) = inherited_trait_method(st, parent, type_def, name) {
+            return Some(method);
+        }
+    }
+    None
+}
+
 fn register_impl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState) {
     let DeclKind::Impl(i) = &decl.kind else {
         return;
@@ -263,25 +313,30 @@ fn register_impl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemStat
         methods.push((f.name, fd));
     }
     // 覆盖与签名核对：trait 每个签名须恰有一个同名同型的 impl 方法
-    let trait_methods: Vec<(Symbol, DefId)> = st
-        .scopes
-        .entries(tms)
-        .iter()
-        .map(|(n, d)| (*n, *d))
-        .filter(|(_, d)| matches!(st.defs.get(*d).kind, DefKind::Fun))
-        .collect();
+    let trait_methods: Vec<(Symbol, DefId)> = trait_methods_with_inherited(st, tdef);
+    // A supertrait impl satisfies inherited requirements. Keep the derived
+    // registry free of copied methods so dispatch remains unambiguous: the
+    // most specific impl for each method owns that method.
+    for (name, _) in &trait_methods {
+        if methods.iter().any(|(n, _)| n == name) {
+            continue;
+        }
+        if inherited_trait_method(st, tdef, tydef, *name).is_none() {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnknownMember,
+                decl.span,
+                format!(
+                    "impl is missing inherited trait method `{}`",
+                    st.interner.resolve(*name)
+                ),
+            ));
+        }
+    }
     for (name, tfd) in &trait_methods {
         match methods.iter().find(|(n, _)| n == name) {
-            None => {
-                st.diags.emit(Diagnostic::error(
-                    DiagCode::SemUnknownMember,
-                    decl.span,
-                    format!(
-                        "impl is missing trait method `{}`",
-                        st.interner.resolve(*name)
-                    ),
-                ));
-            }
+            // Missing here is either reported by the inherited-requirement
+            // pass above or supplied by a supertrait impl; do not duplicate.
+            None => {}
             Some((_, ifd)) => {
                 let (tparams, tret) = {
                     let s = &st.defs.get(*tfd).sig;
@@ -1022,14 +1077,8 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
             }
         }
         DeclKind::TypeAlias(t) => {
-            if !t.type_params.is_empty() {
-                st.diags.emit(Diagnostic::error(
-                    DiagCode::SemUnsupportedConstruct,
-                    decl.span,
-                    "generic type aliases are not supported in this slice",
-                ));
-            }
             let def = add_def(st, scope, t.name, decl.span, DefKind::TypeAlias);
+            st.defs.get_mut(def).ty_params = t.type_params.len() as u32;
             *st.decl_def.last_mut().expect("decl_def slot") = Some(def);
             st.defs.get_mut(def).alias_of = Some(t.ty.clone());
         }
@@ -1067,27 +1116,16 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
             ));
         }
         DeclKind::Trait(t) => {
-            // M9 9a：trait 声明注册——纯签名集（Q6/Q7/Q8：无 dyn、无默认实现、
-            // 无关联类型/泛型 trait；继承拒收）
+            // M9 9a/WP5: signature-only traits, now with single-path
+            // inheritance. Default methods and associated types remain gated.
             let def = add_def(st, scope, t.name, decl.span, DefKind::Trait);
+            st.defs.get_mut(def).ty_params = t.type_params.len() as u32;
             *st.decl_def.last_mut().expect("decl_def slot") = Some(def);
-            if !t.type_params.is_empty() {
-                st.diags.emit(Diagnostic::error(
-                    DiagCode::SemUnsupportedConstruct,
-                    decl.span,
-                    "generic traits are not supported in this slice (M9 Q8)",
-                ));
-            }
-            if !t.supertypes.is_empty() {
-                st.diags.emit(Diagnostic::error(
-                    DiagCode::SemUnsupportedConstruct,
-                    decl.span,
-                    "trait inheritance is not supported in this slice",
-                ));
-            }
             let ms = st.scopes.new_scope(Some(scope));
             st.defs.get_mut(def).member_scope = Some(ms);
-            // Self 占位 def：签名 lower 期可引用；impl 核对时替换为具体类型
+            let tscope = type_param_scope(st, ms, &t.type_params);
+            // Self placeholder is visible to trait signatures and replaced by
+            // the impl target during registration.
             let self_sym = st.interner.intern("Self");
             let unit = st.tys.unit;
             let unknown = st.tys.unknown;
@@ -1106,13 +1144,59 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                 decl: None,
             });
             st.scopes.insert(ms, self_sym, self_def);
+            let mut supertypes: Vec<DefId> = Vec::new();
+            st.in_impl_header = true;
+            for sup in &t.supertypes {
+                let ty = lower_ty(st, tscope, &sup.ty);
+                if let TyKind::Named(d, _) = st.tys.kind(ty)
+                    && matches!(st.defs.get(*d).kind, DefKind::Trait)
+                {
+                    supertypes.push(*d);
+                }
+            }
+            st.in_impl_header = false;
+            supertypes.sort();
+            supertypes.dedup();
+            if supertypes.len() != t.supertypes.len() {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    decl.span,
+                    "trait supertypes must name traits",
+                ));
+            }
+            let mut ancestors: Vec<DefId> = supertypes.clone();
+            let mut i = 0;
+            while i < ancestors.len() {
+                let cur = ancestors[i];
+                if st.defs.get(cur).resolving {
+                    st.diags.emit(Diagnostic::error(
+                        DiagCode::SemTypeCycle,
+                        decl.span,
+                        "trait inheritance cycle",
+                    ));
+                    break;
+                }
+                for parent in &st.defs.get(cur).sig.supertypes {
+                    if !ancestors.contains(parent) {
+                        ancestors.push(*parent);
+                    } else {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnsupportedConstruct,
+                            decl.span,
+                            "trait inheritance must be a single path (diamonds are rejected)",
+                        ));
+                    }
+                }
+                i += 1;
+            }
+            st.defs.get_mut(def).sig.supertypes = supertypes;
             for m in &t.members {
                 match m {
                     ast::syntax::decl::TraitMember::Signature(sig) => {
                         let fd = add_def(st, ms, sig.name, decl.span, DefKind::Fun);
-                        let params = lower_params(st, ms, &sig.params, decl.span);
+                        let params = lower_params(st, tscope, &sig.params, decl.span);
                         let ret = match &sig.ret {
-                            Some(r) => lower_ty(st, ms, r),
+                            Some(r) => lower_ty(st, tscope, r),
                             None => st.tys.unit,
                         };
                         let defaults: Vec<bool> =
@@ -1135,6 +1219,20 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                             decl.span,
                             "trait default implementations are not supported in this slice (M9 Q7)",
                         ));
+                    }
+                }
+            }
+            // Inherited methods are member-scope aliases to the supertrait
+            // defs, so impl completeness and static dispatch see one table.
+            for parent in st.defs.get(def).sig.supertypes.clone() {
+                let Some(pms) = st.defs.get(parent).member_scope else {
+                    continue;
+                };
+                for (name, method) in st.scopes.entries(pms) {
+                    if st.scopes.lookup_local(ms, name).is_none()
+                        && matches!(st.defs.get(method).kind, DefKind::Fun)
+                    {
+                        st.scopes.insert(ms, name, method);
                     }
                 }
             }
@@ -1415,12 +1513,17 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                 // WP1b: enum payload ARC is handled by tag-aware copy/drop traversal.
                 st.defs.get_mut(def).sig.variants = variants;
             }
-            DeclKind::TypeAlias(_t) => {
-                // 急切 lower：值位置（F.A / O.Some(1)）不经 lower_ty，
-                // 惰性会让 alias_resolved 缺席、成员解析失败；循环守卫仍在 lower_ty
+            DeclKind::TypeAlias(t) => {
+                // Generic aliases store a Param-bearing target for use-site subst.
                 if let Some(def) = item_def {
-                    let dsc = st.defs.get(def).scope;
-                    alias_target(st, dsc, def, item.span);
+                    if t.type_params.is_empty() {
+                        let dsc = st.defs.get(def).scope;
+                        alias_target(st, dsc, def, &[], item.span);
+                    } else {
+                        let dsc = st.defs.get(def).scope;
+                        let tscope = type_param_scope(st, dsc, &t.type_params);
+                        st.defs.get_mut(def).sig.ty = lower_ty(st, tscope, &t.ty);
+                    }
                 }
             }
             DeclKind::Binding(b) => {
@@ -1617,7 +1720,7 @@ fn lower_variant_arg(st: &mut SemState, scope: ScopeId, p: &Param, span: Span) -
             // M7 slice 2：变体实参的裸类型名 = 类型形参（落 Param 标记，
             // 实例化时经 subst 兑现）
             DefKind::TypeParam { index } => st.tys.intern(TyKind::Param(index)),
-            DefKind::TypeAlias => alias_target(st, scope, def, span),
+            DefKind::TypeAlias => alias_target(st, scope, def, &[], span),
             _ => {
                 st.diags.emit(Diagnostic::error(
                     DiagCode::SemUndefinedType,
@@ -1781,7 +1884,22 @@ fn lower_ty_uncached(st: &mut SemState, scope: ScopeId, ty: &TypeWrap) -> TyId {
                     }
                     st.tys.intern(TyKind::Named(def, args))
                 }
-                DefKind::TypeAlias => alias_target(st, scope, def, ty.span),
+                DefKind::TypeAlias => {
+                    let want = st.defs.get(def).ty_params as usize;
+                    if args.len() != want {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemTypeArgMismatch,
+                            ty.span,
+                            format!(
+                                "type alias expects {want} type argument(s), got {}",
+                                args.len()
+                            ),
+                        ));
+                        st.tys.error
+                    } else {
+                        alias_target(st, scope, def, &args, ty.span)
+                    }
+                }
                 _ => {
                     st.diags.emit(Diagnostic::error(
                         DiagCode::SemUnsupportedConstruct,
@@ -1861,7 +1979,15 @@ fn lower_ty_uncached(st: &mut SemState, scope: ScopeId, ty: &TypeWrap) -> TyId {
     }
 }
 
-fn alias_target(st: &mut SemState, scope: ScopeId, def: DefId, span: Span) -> TyId {
+fn alias_target(st: &mut SemState, scope: ScopeId, def: DefId, args: &[TyId], span: Span) -> TyId {
+    if st.defs.get(def).ty_params > 0 {
+        let target = st.defs.get(def).sig.ty;
+        if st.tys.is_error(target) {
+            return target;
+        }
+        let substituted = st.tys.subst(target, args);
+        return crate::mono::concretize(st, substituted);
+    }
     if st.defs.get(def).resolving {
         st.diags.emit(Diagnostic::error(
             DiagCode::SemTypeCycle,

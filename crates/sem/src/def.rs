@@ -101,6 +101,8 @@ pub struct DefSig {
     /// M9 9c：类型形参 bounds——每项 = 该形参的 trait def 列表
     ///（`T : A & B` 交集；实例化时逐一查 impl 注册表兑现）
     pub tp_bounds: Vec<Vec<DefId>>,
+    /// Trait inheritance roots (trait defs only; empty for other defs).
+    pub supertypes: Vec<DefId>,
     pub params: Vec<(Symbol, TyId)>,
     pub ret: TyId,
     pub ty: TyId,
@@ -117,6 +119,7 @@ impl DefSig {
             vis: Vis::Pub,
             tp_defaults: Vec::new(),
             tp_bounds: Vec::new(),
+            supertypes: Vec::new(),
             params: Vec::new(),
             ret: unit,
             ty: error,

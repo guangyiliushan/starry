@@ -64,8 +64,8 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单；已删关�
 | 模块系统（M5 slice 2a–3） | ✅ | ✅ | ✅ | ✅ | — | manifest 包身份 + 目录推导模块路径（无 package 头）+ 包命名空间 + `import a.b`/`import util` 限定访问 + 可见性（默认 public/internal 包私有/private 文件私有/protected 拒收）；循环/自导入合法 |
 | class/ARC（M4 切片 1–4b，Plan C） | ✅ | ✅ | ✅ | ✅ | ✅ | 构造/字段/方法/deinit/weak var + upgrade 读取（`?P`）/可空 class/形参 +0/返回 +1 统一/重赋值所有权/语句级 +1 临时释放（`stmt_temps`，full-expression 纪律）；type-directed drop traversal 已建，但 ARC 聚合元素/字段仍稳定拒收 |
 | 闭包捕获（P2-3b-1/2） | ✅ | ✅ | ✅ | ✅ | ✅ | 标量/class 捕获 box（tagged）+ runtime tag 分派 + 快照语义 + box ARC（meta 逐 class 捕获 release，deinit 平衡 e2e）+ C 边界拒收；可空/i128/聚合捕获归批次 3（见未实现表） |
-| 泛型单态化（M7） | ✅ | ✅ | ✅ | ✅ | — | fun/struct 单态化；显式/推断实参、类型形参默认值、bounds 兑现（`T: Show` 实例化查 impl 注册表）；泛型 enum/struct 的 trait impl 分派已落地（9d：impl 注册延后到签名 lower 后，避免缓存空壳 spec） |
-| trait/impl 静态分派（M9） | ✅ | ✅ | ✅ | ✅ | — | trait 声明/impl/bounds/泛型 impl；aspect/provide 已从词表移除（D-014，parse 级拒收） |
+| 泛型单态化（M7） | ✅ | ✅ | ✅ | ✅ | — | fun/struct/enum 单态化；泛型 alias use-site 代入；显式/推断实参、类型形参默认值、bounds 兑现；泛型 trait 声明已入表（impl 参数核对后置）；impl 注册延后到签名 lower 后 |
+| trait/impl 静态分派（M9） | ✅ | ✅ | ✅ | ✅ | — | trait 声明/impl/bounds/泛型 impl/单路径继承；派生 impl 复用 supertrait impl 满足继承方法；diamond/cycle 拒收；关联类型/default method 仍拒收 |
 | 指针 `*const T`/`*mut T`（T2 thin） | ✅ | ✅ | ✅ | ✅ | — | M2：类型 + FFI + `&x`/`*p` + StorePtr；raw 解引读取/写入/复合读写须 unsafe（`SemUnsafeRequired`），创建/转换安全；T2 checked pointer 后置 M10（Q7） |
 | 引用 `&T`/`&mut T`（T1） | ✅ | ✅ | ✅ | ✅ | — | M2；v1 保守借用（R6：局部名/不逃逸/全局拒借/不可变只读）；重叠 `&mut`/区间追踪后置 M10 前专项 |
 | `--release` 构建 | — | — | — | ✅ | — | clang `-O2`；Windows freestanding CRT stubs、Linux 正常 libc；语言语义不变（checked 溢出所有模式生效，D5） |

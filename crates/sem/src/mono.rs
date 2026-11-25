@@ -250,7 +250,7 @@ pub(crate) fn instantiate_struct(st: &mut SemState, def: DefId, args: &[TyId]) -
 
 /// subst 后的收尾：把仍指向泛型原件的 Named(原件, 具体args) 逐层换成
 /// Named(spec, [])（布局/成员解析只认 spec def 的具体 sig）。
-fn concretize(st: &mut SemState, ty: TyId) -> TyId {
+pub(crate) fn concretize(st: &mut SemState, ty: TyId) -> TyId {
     match st.tys.kind(ty).clone() {
         TyKind::Named(def, args) => {
             let args: Vec<TyId> = args.iter().map(|a| concretize(st, *a)).collect();

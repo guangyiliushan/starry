@@ -1300,6 +1300,20 @@ fn class_i128_and_nullable_class_globals_e2e() {
 }
 
 #[test]
+fn generic_alias_and_trait_inheritance_e2e() {
+    // WP4/WP5: generic aliases instantiate at use; derived trait impls satisfy
+    // inherited methods through their supertrait impl and static dispatch
+    // remains unambiguous.
+    let Some(out) = build_and_run(
+        "generic_alias_trait_inherit",
+        "struct Box(val v: int)\nalias IntBox = Box\nalias BoxAlias<T> = Box\ntrait Base {\n    fun base(): int\n}\ntrait Derived: Base {\n    fun derived(): int\n}\nimpl Base for IntBox {\n    fun base(): int {\n        return 7\n    }\n}\nimpl Derived for BoxAlias<int> {\n    fun derived(): int {\n        return 8\n    }\n}\nfun main(): int {\n    val b = IntBox(1)\n    print(b.base())\n    print(b.derived())\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "7\n8\n");
+}
+
+#[test]
 fn aggregate_closure_captures_e2e() {
     // WP6: struct/tuple/array env slots follow scalar_slots; borrowed ARC
     // leaves retain at capture and release once with the closure env.

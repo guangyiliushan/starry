@@ -1648,11 +1648,8 @@ fn trait_impl_slice9a_semantics() {
         "trait Show {\n    fun show(): string\n}\nfun main(): int {\n    val x: Show = 1\n    return 0\n}",
         DiagCode::SemUnsupportedConstruct,
     );
-    // generic trait / associated type / default impl rejected
-    assert_has(
-        "trait T<T> {\n    fun f(x: T): T\n}",
-        DiagCode::SemUnsupportedConstruct,
-    );
+    // WP4: generic trait signatures now register; impl argument checking
+    // remains a later slice.
 }
 
 #[test]

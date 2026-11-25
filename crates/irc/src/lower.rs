@@ -337,6 +337,29 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
             out.funs.push(ctx.fun);
             out.funs.append(&mut ctx.extra_funs);
         }
+        // Inherited methods are concrete defs borrowed from the supertrait
+        // impl. Lower their original declarations; expr_def points at them.
+        for (name, mdef) in &entry.methods {
+            if im.members.iter().any(|member| {
+                let ClassMember::Declaration(d) = member else {
+                    return false;
+                };
+                matches!(&d.kind, DeclKind::Fun(f) if f.name == *name)
+            }) {
+                continue;
+            }
+            let Some(method_decl) = sem.defs.get(*mdef).decl else {
+                continue;
+            };
+            let DeclKind::Fun(f) = &ast.items[method_decl].kind else {
+                continue;
+            };
+            let mut ctx = Ctx::new(sem, source, i8_ty, &globals, &skipped);
+            ctx.lower_member_fun(f, *mdef);
+            out.diags.append(&mut ctx.diags);
+            out.funs.push(ctx.fun);
+            out.funs.append(&mut ctx.extra_funs);
+        }
     }
     reorder_globals(&mut out, sem.defs);
     out
