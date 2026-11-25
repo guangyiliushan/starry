@@ -418,13 +418,17 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
             continue;
         }
         let class_def = DefId(def_id as u32);
-        out.class_vtables.push(crate::tac::ClassVtable {
-            class_def,
-            methods: expr::class_vtable_methods(sem, class_def)
-                .into_iter()
-                .map(|(_, def)| def)
-                .collect(),
-        });
+        let methods = expr::class_vtable_methods(sem, class_def)
+            .into_iter()
+            .map(|(_, def)| def)
+            .collect::<Vec<_>>();
+        // LLVM rejects zero-sized arrays; classes without virtual slots use a
+        // null TypeInfo.vtable pointer and never perform virtual dispatch.
+        if methods.is_empty() {
+            continue;
+        }
+        out.class_vtables
+            .push(crate::tac::ClassVtable { class_def, methods });
     }
     reorder_globals(&mut out, sem.defs);
     out
@@ -2115,7 +2119,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
     /// Statement end / after cond eval / branch end: release untransferred
     /// +1 temporaries.
     pub(crate) fn drain_stmt_temps(&mut self) {
-        let pending: Vec<(TempId, TyId)> = self.stmt_temps.drain(..).collect();
+        let pending: Vec<(TempId, TyId)> = std::mem::take(&mut self.stmt_temps);
         for (t, ty) in pending {
             self.emit_drop_value(Place::Temp(t), ty, false);
         }

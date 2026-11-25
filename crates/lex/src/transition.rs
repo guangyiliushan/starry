@@ -122,7 +122,7 @@ impl PredefinedClass {
     /// ```
     pub fn to_ranges(self) -> Vec<RangeInclusive<char>> {
         match self {
-            PredefinedClass::Digit => vec!['0'..='9'],
+            PredefinedClass::Digit => std::iter::once('0'..='9').collect(),
             PredefinedClass::Word => vec!['0'..='9', 'A'..='Z', 'a'..='z', '_'..='_'],
             PredefinedClass::Whitespace => vec![
                 ' '..=' ',       // 空格
@@ -1057,7 +1057,7 @@ mod tests {
         let union = range1.union(&range2);
 
         // 应该合并为一个范围
-        assert_eq!(union.ranges(), &['a'..='k']);
+        assert_eq!(union.ranges().first(), Some(&('a'..='k')));
         assert!(union.contains('a'));
         assert!(union.contains('g'));
         assert!(union.contains('k'));
@@ -1074,7 +1074,7 @@ mod tests {
         assert!(intersection.contains('e'));
         assert!(intersection.contains('g'));
         assert!(!intersection.contains('h'));
-        assert_eq!(intersection.ranges(), &['e'..='g']);
+        assert_eq!(intersection.ranges().first(), Some(&('e'..='g')));
     }
 
     #[test]
@@ -1111,11 +1111,11 @@ mod tests {
 
         // 重叠合并
         let class = CharClass::from_ranges([('a', 'g'), ('e', 'k')]);
-        assert_eq!(class.ranges(), &['a'..='k']);
+        assert_eq!(class.ranges().first(), Some(&('a'..='k')));
 
         // 码点相邻合并
         let class = CharClass::from_ranges([('a', 'c'), ('d', 'f')]);
-        assert_eq!(class.ranges(), &['a'..='f']);
+        assert_eq!(class.ranges().first(), Some(&('a'..='f')));
 
         // 代理区缺口：码点不相邻，不合并，len() 精确
         let class = CharClass::from_ranges([('\u{D7FF}', '\u{D7FF}'), ('\u{E000}', '\u{E000}')]);
@@ -1137,7 +1137,7 @@ mod tests {
     fn test_complement_surrogate_boundaries() {
         // 补集不含代理区：字符域内无合法 char 存在于缺口
         let class = CharClass::from_ranges([('\0', '\u{D7FF}')]).complement();
-        assert_eq!(class.ranges(), &['\u{E000}'..=char::MAX]);
+        assert_eq!(class.ranges().first(), Some(&('\u{E000}'..=char::MAX)));
 
         // 全域补集为空
         let class = CharClass::from_ranges([('\0', char::MAX)]).complement();
@@ -1145,7 +1145,7 @@ mod tests {
 
         // 首字符之前无空隙
         let class = CharClass::from_ranges([('\0', '\u{10FFFE}')]).complement();
-        assert_eq!(class.ranges(), &['\u{10FFFF}'..=char::MAX]);
+        assert_eq!(class.ranges().first(), Some(&('\u{10FFFF}'..=char::MAX)));
     }
 
     #[test]

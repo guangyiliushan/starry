@@ -23,7 +23,7 @@ jobs:
           components: rustfmt, clippy
       - name: Install LLVM (Windows)
         if: runner.os == 'Windows'
-        run: choco install llvm --version=18.1.8 -y --no-progress
+        # Use the current Chocolatey package; only LLVM 15+ ABI behavior is required.        run: choco install llvm -y --no-progress
       - name: Install LLVM (Linux)
         if: runner.os == 'Linux'
         run: |
