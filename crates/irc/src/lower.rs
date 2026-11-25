@@ -385,8 +385,58 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
             out.funs.append(&mut ctx.extra_funs);
         }
     }
+    // Phase 2a: vtables are declaration-ordered and borrow inherited method
+    // defs from the most specific supertrait impl.
+    for entry in sem.impls {
+        let table = expr::trait_method_table(sem, entry.trait_def);
+        let mut methods = Vec::with_capacity(table.len());
+        let mut complete = true;
+        for (name, _) in &table {
+            match vtable_method_def(sem, entry, *name) {
+                Some(def) => methods.push(def),
+                None => complete = false,
+            }
+        }
+        if complete {
+            out.vtables.push(crate::tac::VtableBody {
+                trait_def: entry.trait_def,
+                type_def: entry.type_def,
+                methods,
+            });
+        }
+    }
     reorder_globals(&mut out, sem.defs);
     out
+}
+
+/// Resolve the concrete method def for a vtable slot, borrowing inherited
+/// methods from the most specific supertrait impl (Phase 1 registry rule).
+fn vtable_method_def(sem: &SemRef<'_>, entry: &sem::TraitImpl, name: Symbol) -> Option<DefId> {
+    if let Some((_, def)) = entry.methods.iter().find(|(n, _)| *n == name) {
+        return Some(*def);
+    }
+    fn inherited(
+        sem: &SemRef<'_>,
+        trait_def: DefId,
+        type_def: DefId,
+        name: Symbol,
+    ) -> Option<DefId> {
+        for parent in sem.defs.get(trait_def).sig.supertypes.clone() {
+            if let Some(im) = sem
+                .impls
+                .iter()
+                .find(|im| im.trait_def == parent && im.type_def == type_def)
+                && let Some((_, def)) = im.methods.iter().find(|(n, _)| *n == name)
+            {
+                return Some(*def);
+            }
+            if let Some(def) = inherited(sem, parent, type_def, name) {
+                return Some(def);
+            }
+        }
+        None
+    }
+    inherited(sem, entry.trait_def, entry.type_def, name)
 }
 
 /// 模式内全部绑定名（非简单顶层全局的 skipped 登记用，与 declare.walk 同形）
@@ -1955,6 +2005,15 @@ impl<'r, 'a> Ctx<'r, 'a> {
     /// M4 slice 4a: nullable class 的 payload（对象指针）在槽 1
     /// （槽 0 是 i8 flag）；标量 class 的指针在槽 0。
     fn class_ptr_operand(&mut self, place: Place, ty: TyId) -> Option<(Operand, TyId)> {
+        // Dyn owns the data pointer in slot 0, not the aggregate base itself.
+        if matches!(self.sem.tys.kind(ty), TyKind::Dyn(..)) {
+            let base = match place {
+                Place::Temp(t) | Place::Slot(t) => t,
+                Place::Global(_) => return None,
+            };
+            let ptr = crate::expr::load_slot(self, base, 0, self.sem.tys.ptr);
+            return Some((ptr, self.sem.tys.ptr));
+        }
         let inner = match self.sem.tys.kind(ty) {
             TyKind::Nullable(inner) => Some(*inner),
             _ => None,
@@ -1968,13 +2027,18 @@ impl<'r, 'a> Ctx<'r, 'a> {
             return Some((Operand::Temp(base), lty));
         }
         let v = self.temp();
+        let out_ty = if matches!(self.sem.tys.kind(lty), TyKind::Dyn(..)) {
+            self.sem.tys.ptr
+        } else {
+            lty
+        };
         self.emit(Instr::Load {
             dst: v,
             base,
             idx: Operand::Const(crate::tac::Const::Int(idx)),
-            ty: lty,
+            ty: out_ty,
         });
-        Some((Operand::Temp(v), lty))
+        Some((Operand::Temp(v), out_ty))
     }
 
     // ---- M4 slice 4b (Plan C): +1 temp discipline ----
@@ -2048,6 +2112,10 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 let payload = *inner;
                 let op = crate::expr::load_slot(self, base, off + 1, payload);
                 self.emit_operand_release(op, payload, weak);
+            }
+            TyKind::Dyn(..) => {
+                let data = crate::expr::load_slot(self, base, off, self.sem.tys.ptr);
+                self.emit_operand_release(data, self.sem.tys.ptr, false);
             }
             TyKind::Named(def, _) if matches!(self.sem.defs.get(*def).kind, DefKind::Enum) => {
                 if !crate::expr::contains_arc(self, ty) {
@@ -2156,7 +2224,12 @@ impl<'r, 'a> Ctx<'r, 'a> {
     }
 
     pub(crate) fn emit_operand_release(&mut self, op: Operand, ty: TyId, weak: bool) {
-        self.emit(Instr::Param { a: op, ty });
+        let pty = if matches!(self.sem.tys.kind(ty), TyKind::Dyn(..)) {
+            self.sem.tys.ptr
+        } else {
+            ty
+        };
+        self.emit(Instr::Param { a: op, ty: pty });
         let rt = if weak {
             crate::tac::RuntimeFn::WeakDrop
         } else {

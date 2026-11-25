@@ -341,7 +341,9 @@ fn register_impl(
         s.ret = ret;
         s.param_defaults = defaults;
         st.defs.get_mut(fd).decl = Some(index);
-        methods.push((f.name, fd));
+        methods.push((f.name, fd)); // Impl methods receive the concrete receiver, not a trait Self
+        // placeholder; this keeps direct and vtable ABI identical.
+        st.defs.get_mut(fd).sig.ty = type_ty;
     }
     // 覆盖与签名核对：trait 每个签名须恰有一个同名同型的 impl 方法
     let trait_methods: Vec<(Symbol, DefId)> = trait_methods_with_inherited(st, tdef);
@@ -1558,7 +1560,10 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                                 st.tys.error
                             }
                         };
-                        if matches!(st.tys.kind(ty), TyKind::Fn(..) | TyKind::Ref { .. }) {
+                        if matches!(
+                            st.tys.kind(ty),
+                            TyKind::Fn(..) | TyKind::Ref { .. } | TyKind::Dyn(..)
+                        ) {
                             st.diags.emit(Diagnostic::error(
                                 DiagCode::SemUnsupportedConstruct,
                                 item.span,
@@ -1571,7 +1576,10 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                 fields.extend(s.fields.iter().map(|f| {
                     let ft = lower_ty(st, sscope, &f.ty);
                     // M2 非逃逸纪律不变：引用字段拒绝（head 参数同规则）
-                    if matches!(st.tys.kind(ft), TyKind::Fn(..) | TyKind::Ref { .. }) {
+                    if matches!(
+                        st.tys.kind(ft),
+                        TyKind::Fn(..) | TyKind::Ref { .. } | TyKind::Dyn(..)
+                    ) {
                         st.diags.emit(Diagnostic::error(
                             DiagCode::SemUnsupportedConstruct,
                             f.ty.span,
@@ -2072,11 +2080,42 @@ fn lower_ty_uncached(st: &mut SemState, scope: ScopeId, ty: &TypeWrap) -> TyId {
                 }
             }
         }
-        TypeKind::Union(_) | TypeKind::Dyn(_) => {
+        TypeKind::Dyn(inner) => {
+            // The dyn wrapper legitimizes a trait root, unlike normal type
+            // annotation lowering. Restore the caller's impl-header state.
+            let saved_impl_header = st.in_impl_header;
+            st.in_impl_header = true;
+            let inner = lower_ty(st, scope, inner);
+            st.in_impl_header = saved_impl_header;
+            let Some(trait_def) = (match st.tys.kind(inner) {
+                TyKind::Named(d, _) if matches!(st.defs.get(*d).kind, DefKind::Trait) => Some(*d),
+                _ => None,
+            }) else {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemTypeMismatch,
+                    ty.span,
+                    "dyn target must name a trait",
+                ));
+                return st.tys.error;
+            };
+            let TyKind::Named(_, args) = st.tys.kind(inner) else {
+                unreachable!("trait target was matched as Named above")
+            };
+            if !args.is_empty() {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    ty.span,
+                    "generic dyn is not supported in this slice",
+                ));
+                return st.tys.error;
+            }
+            st.tys.intern(TyKind::Dyn(trait_def, Vec::new()))
+        }
+        TypeKind::Union(_) => {
             st.diags.emit(Diagnostic::error(
                 DiagCode::SemUnsupportedConstruct,
                 ty.span,
-                "union/dyn types are not supported in semantic v1",
+                "union types are not supported in semantic v1",
             ));
             st.tys.error
         }

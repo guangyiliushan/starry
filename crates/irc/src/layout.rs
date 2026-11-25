@@ -65,6 +65,8 @@ pub fn scalar_slots(v: &impl LayoutView, ty: TyId) -> usize {
         TyKind::Array(elem, len) => scalar_slots(v, *elem) * *len as usize,
         TyKind::Tuple(elems) => elems.iter().map(|e| scalar_slots(v, *e)).sum(),
         TyKind::Range(inner) => scalar_slots(v, *inner) * 2 + 1,
+        // Phase 2a: dyn = (data, vtable)
+        TyKind::Dyn(..) => 2,
         TyKind::Nullable(inner) => 1 + scalar_slots(v, *inner),
         TyKind::Named(def, _) => match v.defs().get(*def).kind {
             // M4 slice 4a：class 值 = 标量化对象指针（与 is_aggregate 同口径），
@@ -132,6 +134,13 @@ pub fn slot_ty(v: &impl LayoutView, ty: TyId, slot: usize) -> TyId {
                 v.i8_ty()
             } else {
                 slot_ty(v, *inner, slot - 1)
+            }
+        }
+        TyKind::Dyn(..) => {
+            if slot < 2 {
+                v.tys().ptr
+            } else {
+                v.tys().unit
             }
         }
         TyKind::Named(def, _) => match v.defs().get(*def).kind {

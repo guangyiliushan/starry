@@ -478,7 +478,26 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   编码与 native tag 对齐（裸 fn = def<<1，box = (id<<32)|1，payload
   地址 = (id<<32)+8j）；不建模 ARC（spec §4.4-6 纪律）。
 
-## Trait object-safety 预检（WP5）\n\n- Trait 声明期对泛型方法、Self 返回值发稳定 `SemObjectUnsafe`；这是为\n  后续 dyn/ thick-pointer 切片提前建立的可实现边界，不是运行时 ABI。\n- v1 仍拒绝 trait 作为类型标注；当前诊断保持 `SemUnsupportedConstruct`。\n\n## 泛型 alias 与 trait 继承（WP4/WP5，2026-11-25）\n\n- 泛型 alias 在签名 lower 期保存 Param-bearing target；use-site 传实参后\n  `subst + concretize` 返回具体目标。非泛型 alias 仍急切解析，成员路径\n  行为不变。\n- trait 继承只允许单路径；diamond/cycle 稳定拒收。派生 impl 的继承方法\n  可由既有 supertrait impl 满足；派生 registry 不复制方法，静态分派仍由\n  各 trait 的最具体 impl 提供。\n- trait default method：缺失 impl 方法复用 trait 方法体；body 在 trait\n  Self 占位下 resolve/check，IRC 只 lower 一份静态函数；impl override 仍\n  优先。default method 不得有泛型参数或 Self 返回（object-safety 预检）。\n- 泛型 trait 声明与签名入表，但 impl 实参核对/分派仍后置；关联类型仍\n  稳定拒收。\n\n## 诊断码
+## Trait objects（Phase 2a，2026-11-25）
+
+- `dyn Trait` 仅接受非泛型 trait 的 class 来源，unsize coercion 只在
+  绑定、赋值、实参和返回点生效。`?dyn Trait` 是 flag + data + vtable
+  三槽；非空 `dyn Trait` 是 data + vtable 两槽。
+- vtable ABI 冻结为 `[drop, size, align, methods...]`，方法按 trait
+  声明序并继承 supertrait 方法；IR 为 `@vtable.{trait}.{id}.{type}.{id}`
+  私有常量。动态调用加载选中函数指针后用既有间接调用 ABI
+  （`fnptr, data, args...`），impl 方法 receiver 保持具体 class 指针。
+- 对象安全预检拒收泛型方法、泛型 trait、关联类型、Self 返回值和
+  Self 参数。共享 class payload 的多个 dyn owner 共享引用计数；
+  deinit 只在最后引用 release 时回调。
+- Interp 局限：当前参考解释器不建模 `dyn` vtable 间接调用；Phase 2a
+  差分证据由 native e2e 与 LLVM validator/IR snapshot 提供。加入 interp
+  差分时需注册 `(trait,type) → method def` 与 `(data,vtable)` 值模型。
+- Phase 2a 稳定拒收：struct-borrowed dyn、upcast/跨 trait 转换、
+  dyn 存聚合字段/数组/全局、weak dyn、`impl Trait`、泛型 dyn。
+
+## 泛型 alias 与 trait 继承（WP4/WP5，2026-11-25）
+## 诊断码
 
 全部 `Sem*` 前缀，定义在 `crates/ast/src/syntax/node.rs::DiagCode`，
 27 个（SemUndefinedName … SemUnknownMember、SemTypeArgMismatch、SemConstOverflow、SemDivisionByZero、SemDivisionOverflow、SemUnsafeRequired）；另有 `Irc*` 2 个属 irc

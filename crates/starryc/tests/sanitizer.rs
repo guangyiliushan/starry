@@ -98,6 +98,17 @@ fn sanitizer_aggregate_corpus() {
 }
 
 #[test]
+fn sanitizer_dyn_class_corpus() {
+    // Phase 2a: non-null dyn, nullable dyn call, null propagation, and
+    // shared-payload reassignment release exactly once.
+    assert_sanitizer_clean(
+        "san_dyn_class",
+        "trait T {\n    fun num(): int\n}\nclass C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nimpl T for C {\n    fun num(): int {\n        return self.x + 5\n    }\n}\nfun main(): int {\n    val d: dyn T = C(2)\n    val n: ?dyn T = d\n    print(n?.num()!!)\n    var r: dyn T = C(3)\n    r = d\n    print(r.num())\n    return 0\n}\n",
+        "7\n7\n3\n2\n",
+    );
+}
+
+#[test]
 fn sanitizer_closure_corpus() {
     // 闭包 box ARC：捕获 class 的 env 释放平衡
     assert_sanitizer_clean(

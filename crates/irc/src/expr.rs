@@ -368,6 +368,59 @@ fn op_or_unit(ctx: &mut Ctx, op: Operand, ty: TyId) -> Operand {
 pub(crate) fn classish_ty(ctx: &Ctx, ty: TyId) -> bool {
     crate::layout::is_class(ctx, ty)
         || matches!(ctx.sem.tys.kind(ty), TyKind::Nullable(inner) if crate::layout::is_class(ctx, *inner))
+        || dyn_shape(ctx, ty).is_some()
+}
+
+/// Dyn type shape: (trait, optional nullable wrapper inner).
+pub(crate) fn dyn_shape(ctx: &Ctx, ty: TyId) -> Option<(sem::DefId, bool)> {
+    match ctx.sem.tys.kind(ty) {
+        TyKind::Dyn(trait_def, _) => Some((*trait_def, false)),
+        TyKind::Nullable(inner) => match ctx.sem.tys.kind(*inner) {
+            TyKind::Dyn(trait_def, _) => Some((*trait_def, true)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Trait declaration-order method table, including inherited methods.
+pub(crate) fn trait_method_table(
+    sem: &crate::lower::SemRef<'_>,
+    trait_def: sem::DefId,
+) -> Vec<(ast::interner::Symbol, sem::DefId)> {
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+    let mut queue = vec![trait_def];
+    while let Some(cur) = queue.pop() {
+        if seen.contains(&cur) {
+            continue;
+        }
+        seen.push(cur);
+        queue.extend(sem.defs.get(cur).sig.supertypes.iter().rev().copied());
+        let Some(ms) = sem.defs.get(cur).member_scope else {
+            continue;
+        };
+        for (name, method) in sem.scopes.entries(ms) {
+            if matches!(sem.defs.get(method).kind, DefKind::Fun)
+                && !out.iter().any(|(n, _)| *n == name)
+            {
+                out.push((name, method));
+            }
+        }
+    }
+    out
+}
+
+/// The vtable slot for a named method, if this receiver is dyn-shaped.
+pub(crate) fn dyn_vtable_index(
+    ctx: &Ctx,
+    base_ty: TyId,
+    name: ast::interner::Symbol,
+) -> Option<usize> {
+    let (trait_def, _) = dyn_shape(ctx, base_ty)?;
+    trait_method_table(ctx.sem, trait_def)
+        .iter()
+        .position(|(n, _)| *n == name)
 }
 
 /// M4 slice 4b (Plan C): +1-origin expressions. Calls/null are always +1;
@@ -537,7 +590,10 @@ pub(crate) fn read_place(ctx: &mut Ctx, place: Place, ty: TyId, span: Span) -> O
 /// 判定一个值需要 IRC 默认 i64 槽 ABI 以外的专用路径。class/Fn 要
 /// ARC；i128 要 wide slot；未知 Named 也保守拒收。
 pub(crate) fn value_abi_unsafe<V: crate::layout::LayoutView>(ctx: &V, ty: TyId) -> bool {
-    if crate::layout::is_class(ctx, ty) || matches!(ctx.tys().kind(ty), TyKind::Fn(..)) {
+    if crate::layout::is_class(ctx, ty)
+        || matches!(ctx.tys().kind(ty), TyKind::Fn(..))
+        || matches!(ctx.tys().kind(ty), TyKind::Dyn(..))
+    {
         return true;
     }
     match ctx.tys().kind(ty) {
@@ -576,7 +632,10 @@ pub(crate) enum CopyOwnership {
 }
 
 pub(crate) fn contains_arc<V: crate::layout::LayoutView>(ctx: &V, ty: TyId) -> bool {
-    if crate::layout::is_class(ctx, ty) || matches!(ctx.tys().kind(ty), TyKind::Fn(..)) {
+    if crate::layout::is_class(ctx, ty)
+        || matches!(ctx.tys().kind(ty), TyKind::Fn(..))
+        || matches!(ctx.tys().kind(ty), TyKind::Dyn(..))
+    {
         return true;
     }
     match ctx.tys().kind(ty) {
@@ -601,7 +660,14 @@ pub(crate) fn contains_arc<V: crate::layout::LayoutView>(ctx: &V, ty: TyId) -> b
 }
 
 fn retain_arc_operand(ctx: &mut Ctx, op: Operand, ty: TyId) {
-    ctx.emit(Instr::Param { a: op, ty });
+    // Dyn is represented as a 2-slot aggregate, but ARC owns only its data
+    // pointer; runtime calls use the scalar pointer ABI.
+    let pty = if matches!(ctx.sem.tys.kind(ty), TyKind::Dyn(..)) {
+        ctx.sem.tys.ptr
+    } else {
+        ty
+    };
+    ctx.emit(Instr::Param { a: op, ty: pty });
     ctx.emit(Instr::Call {
         dst: None,
         callee: Callee::Runtime(RuntimeFn::Retain),
@@ -619,6 +685,48 @@ fn copy_arc_slots(
 ) {
     let (dst_base, dst_off) = dst;
     let (src_base, src_off) = src;
+    if let TyKind::Nullable(inner) = ctx.sem.tys.kind(ty)
+        && matches!(ctx.sem.tys.kind(*inner), TyKind::Dyn(..))
+    {
+        let flag = load_slot(ctx, src_base, src_off, ctx.i8_ty);
+        let data = load_slot(ctx, src_base, src_off + 1, ctx.sem.tys.ptr);
+        let vt = load_slot(ctx, src_base, src_off + 2, ctx.sem.tys.ptr);
+        if ownership == CopyOwnership::Borrowed {
+            retain_arc_operand(ctx, data.clone(), ctx.sem.tys.ptr);
+        }
+        for (i, (v, sty)) in [
+            (flag, ctx.i8_ty),
+            (data, ctx.sem.tys.ptr),
+            (vt, ctx.sem.tys.ptr),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ctx.emit(Instr::Store {
+                base: dst_base,
+                idx: Operand::Const(Const::Int((dst_off + i) as i128)),
+                src: v,
+                ty: sty,
+            });
+        }
+        return;
+    }
+    if matches!(ctx.sem.tys.kind(ty), TyKind::Dyn(..)) {
+        let data = load_slot(ctx, src_base, src_off, ctx.sem.tys.ptr);
+        let vt = load_slot(ctx, src_base, src_off + 1, ctx.sem.tys.ptr);
+        if ownership == CopyOwnership::Borrowed {
+            retain_arc_operand(ctx, data.clone(), ctx.sem.tys.ptr);
+        }
+        for (i, v) in [data, vt].into_iter().enumerate() {
+            ctx.emit(Instr::Store {
+                base: dst_base,
+                idx: Operand::Const(Const::Int((dst_off + i) as i128)),
+                src: v,
+                ty: ctx.sem.tys.ptr,
+            });
+        }
+        return;
+    }
     if let TyKind::Nullable(inner) = ctx.sem.tys.kind(ty) {
         let flag = load_slot(ctx, src_base, src_off, ctx.i8_ty);
         ctx.emit(Instr::Store {
@@ -737,6 +845,33 @@ pub(crate) fn emit_copy_value(
     let dst = ctx.temp();
     if let TyKind::Nullable(inner) = ctx.sem.tys.kind(ty) {
         let payload_ty = *inner;
+        if matches!(ctx.sem.tys.kind(payload_ty), TyKind::Dyn(..)) {
+            let flag = load_slot(ctx, src_base, 0, ctx.i8_ty);
+            let data = load_slot(ctx, src_base, 1, ctx.sem.tys.ptr);
+            let vt = load_slot(ctx, src_base, 2, ctx.sem.tys.ptr);
+            if ownership == CopyOwnership::Borrowed {
+                retain_arc_operand(ctx, data.clone(), ctx.sem.tys.ptr);
+            }
+            ctx.emit(Instr::Store {
+                base: dst,
+                idx: Operand::Const(Const::Int(0)),
+                src: flag,
+                ty: ctx.i8_ty,
+            });
+            ctx.emit(Instr::Store {
+                base: dst,
+                idx: Operand::Const(Const::Int(1)),
+                src: data,
+                ty: ctx.sem.tys.ptr,
+            });
+            ctx.emit(Instr::Store {
+                base: dst,
+                idx: Operand::Const(Const::Int(2)),
+                src: vt,
+                ty: ctx.sem.tys.ptr,
+            });
+            return Operand::Temp(dst);
+        }
         let flag = load_slot(ctx, src_base, 0, ctx.i8_ty);
         let payload = load_slot(ctx, src_base, 1, payload_ty);
         if ownership == CopyOwnership::Borrowed {
@@ -748,15 +883,40 @@ pub(crate) fn emit_copy_value(
             src: flag,
             ty: ctx.i8_ty,
         });
+        let payload_store_ty = if matches!(ctx.sem.tys.kind(payload_ty), TyKind::Dyn(..)) {
+            ctx.sem.tys.ptr
+        } else {
+            payload_ty
+        };
         ctx.emit(Instr::Store {
             base: dst,
             idx: Operand::Const(Const::Int(1)),
             src: payload,
-            ty: payload_ty,
+            ty: payload_store_ty,
         });
         return Operand::Temp(dst);
     }
     match ctx.sem.tys.kind(ty) {
+        TyKind::Dyn(..) => {
+            let data = load_slot(ctx, src_base, 0, ctx.sem.tys.ptr);
+            let vt = load_slot(ctx, src_base, 1, ctx.sem.tys.ptr);
+            if ownership == CopyOwnership::Borrowed {
+                retain_arc_operand(ctx, data.clone(), ctx.sem.tys.ptr);
+            }
+            ctx.emit(Instr::Store {
+                base: dst,
+                idx: Operand::Const(Const::Int(0)),
+                src: data,
+                ty: ctx.sem.tys.ptr,
+            });
+            ctx.emit(Instr::Store {
+                base: dst,
+                idx: Operand::Const(Const::Int(1)),
+                src: vt,
+                ty: ctx.sem.tys.ptr,
+            });
+            return Operand::Temp(dst);
+        }
         TyKind::Named(def, _) if matches!(ctx.sem.defs.get(*def).kind, DefKind::Enum) => {
             return copy_enum_slots(ctx, src_base, *def, ty, dst, ownership, span);
         }
@@ -1814,7 +1974,119 @@ pub(crate) fn coerce(ctx: &mut Ctx, op: Operand, from: TyId, to: TyId) -> Operan
     {
         return op;
     }
-    // Null → 裸指针：0 地址常量。不能先落 nullable_null——它的 flag
+    // Phase 2a: build the dyn fat pointer at coercion points only. The
+    // source class keeps ownership; the caller/binding ownership rules add
+    // the retain at the normal +1 site.
+    if dyn_shape(ctx, to).is_some() {
+        let (trait_def, nullable_target) = match ctx.sem.tys.kind(to) {
+            TyKind::Dyn(def, _) => (*def, false),
+            TyKind::Nullable(inner) => match ctx.sem.tys.kind(*inner) {
+                TyKind::Dyn(def, _) => (*def, true),
+                _ => unreachable!("dyn_shape guaranteed a Dyn target"),
+            },
+            _ => unreachable!("dyn_shape guaranteed a Dyn target"),
+        };
+        let nonnullable_source = match ctx.sem.tys.kind(from) {
+            TyKind::Nullable(inner) => *inner,
+            _ => from,
+        }; // Rewrap an existing fat pointer into its optional form without a
+        // second retain; Null initializes all payload slots empty.
+        if matches!(ctx.sem.tys.kind(from), TyKind::Null) {
+            let base = ctx.temp();
+            for slot in 0..crate::layout::scalar_slots(ctx, to) {
+                ctx.emit(Instr::Store {
+                    base,
+                    idx: Operand::Const(Const::Int(slot as i128)),
+                    src: Operand::Const(Const::Int(0)),
+                    ty: crate::layout::slot_ty(ctx, to, slot),
+                });
+            }
+            return Operand::Temp(base);
+        }
+        if matches!(ctx.sem.tys.kind(from), TyKind::Dyn(..)) {
+            let src = as_base(ctx, op.clone(), Span { start: 0, end: 0 });
+            let data = load_slot(ctx, src, 0, ctx.sem.tys.ptr);
+            let vt = load_slot(ctx, src, 1, ctx.sem.tys.ptr);
+            let base = ctx.temp();
+            ctx.emit(Instr::Store {
+                base,
+                idx: Operand::Const(Const::Int(0)),
+                src: Operand::Const(Const::Int(1)),
+                ty: ctx.i8_ty,
+            });
+            ctx.emit(Instr::Store {
+                base,
+                idx: Operand::Const(Const::Int(1)),
+                src: data,
+                ty: ctx.sem.tys.ptr,
+            });
+            ctx.emit(Instr::Store {
+                base,
+                idx: Operand::Const(Const::Int(2)),
+                src: vt,
+                ty: ctx.sem.tys.ptr,
+            });
+            return Operand::Temp(base);
+        }
+        let TyKind::Named(type_def, _) = ctx.sem.tys.kind(nonnullable_source) else {
+            ctx.diag(
+                Span { start: 0, end: 0 },
+                "dyn unsize target must be nominal (sem invariant)",
+            );
+            return Operand::Const(Const::Unit);
+        };
+        let is_nullable_source = matches!(ctx.sem.tys.kind(from), TyKind::Nullable(_));
+        let source_base = if is_nullable_source {
+            Some(as_base(ctx, op.clone(), Span { start: 0, end: 0 }))
+        } else {
+            None
+        };
+        let (data, flag) = if let Some(source_base) = source_base {
+            (
+                load_slot(ctx, source_base, 1, ctx.sem.tys.ptr),
+                load_slot(ctx, source_base, 0, ctx.i8_ty),
+            )
+        } else if crate::layout::is_class(ctx, nonnullable_source) {
+            (op.clone(), Operand::Const(Const::Int(1)))
+        } else {
+            (Operand::Const(Const::Null), Operand::Const(Const::Int(1)))
+        };
+        let base = ctx.temp();
+        if nullable_target {
+            ctx.emit(Instr::Store {
+                base,
+                idx: Operand::Const(Const::Int(0)),
+                src: flag,
+                ty: ctx.i8_ty,
+            });
+            ctx.emit(Instr::Store {
+                base,
+                idx: Operand::Const(Const::Int(1)),
+                src: data,
+                ty: ctx.sem.tys.ptr,
+            });
+            ctx.emit(Instr::Store {
+                base,
+                idx: Operand::Const(Const::Int(2)),
+                src: Operand::Const(Const::Vtable(trait_def, *type_def)),
+                ty: ctx.sem.tys.ptr,
+            });
+        } else {
+            ctx.emit(Instr::Store {
+                base,
+                idx: Operand::Const(Const::Int(0)),
+                src: data,
+                ty: ctx.sem.tys.ptr,
+            });
+            ctx.emit(Instr::Store {
+                base,
+                idx: Operand::Const(Const::Int(1)),
+                src: Operand::Const(Const::Vtable(trait_def, *type_def)),
+                ty: ctx.sem.tys.ptr,
+            });
+        }
+        return Operand::Temp(base);
+    } // Null → 裸指针：0 地址常量。不能先落 nullable_null——它的 flag
     // 形值只有 1 字节，按 ptr 加载会读到未初始化高位（指针 FFI 探针
     // 抓到 is_null(null) 收到非空垃圾）
     if matches!(ctx.sem.tys.kind(from), TyKind::Null)
@@ -2047,6 +2319,220 @@ fn fn_value_call(
         None => Operand::Const(Const::Unit),
     }
 }
+/// Lower a class-root dyn call by loading the fixed vtable slot and using
+/// the existing indirect-call ABI (`fnptr, self, args...`).
+fn dyn_method_call(
+    ctx: &mut Ctx,
+    e: &ExprWrap,
+    callee: &ExprWrap,
+    args: &[ast::syntax::expr::CallArg],
+    def: sem::DefId,
+) -> Operand {
+    let ExprKind::Member {
+        base,
+        name,
+        safe: _,
+    } = &callee.kind
+    else {
+        ctx.diag(
+            callee.span,
+            "dyn call target is not a member (sem invariant)",
+        );
+        return Operand::Const(Const::Unit);
+    };
+    let bty = ctx.expr_ty(base);
+    let Some((_, nullable)) = dyn_shape(ctx, bty) else {
+        ctx.diag(callee.span, "dyn receiver shape missing (sem invariant)");
+        return Operand::Const(Const::Unit);
+    };
+    let Some(index) = dyn_vtable_index(ctx, bty, *name) else {
+        ctx.diag(callee.span, "dyn vtable index missing (sem invariant)");
+        return Operand::Const(Const::Unit);
+    };
+    let (param_tys, raw_ret) = {
+        let sig = &ctx.sem.defs.get(def).sig;
+        (sig.params.clone(), sig.ret)
+    };
+    if args.len() != param_tys.len() {
+        ctx.diag(e.span, "dyn call arity mismatch (sem invariant)");
+    }
+    let dyn_op = lower_expr(ctx, base);
+    let dyn_base = as_base(ctx, dyn_op, e.span);
+    if !nullable {
+        let data = load_slot(ctx, dyn_base, 0, ctx.sem.tys.ptr);
+        let vt = load_slot(ctx, dyn_base, 1, ctx.sem.tys.ptr);
+        let Operand::Temp(vt_t) = vt else {
+            ctx.diag(e.span, "vtable base is not a temp (internal invariant)");
+            return Operand::Const(Const::Unit);
+        };
+        let method_addr = ctx.temp();
+        ctx.emit(Instr::OffsetPtr {
+            dst: method_addr,
+            base: vt_t,
+            bytes: ((3 + index) * 8) as i64,
+            ty: ctx.sem.tys.unit,
+        });
+        let fptr = ctx.temp();
+        ctx.emit(Instr::LoadPtr {
+            dst: fptr,
+            ptr: method_addr,
+            ty: ctx.sem.tys.ptr,
+        });
+        let arg_vals: Vec<(Operand, TyId)> = args
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| {
+                let to = param_tys
+                    .get(i)
+                    .map(|(_, t)| *t)
+                    .unwrap_or(ctx.sem.tys.unit);
+                (lower_expr_as(ctx, &arg.value, to), to)
+            })
+            .collect();
+        ctx.emit(Instr::Param {
+            a: Operand::Temp(fptr),
+            ty: ctx.sem.tys.ptr,
+        });
+        ctx.emit(Instr::Param {
+            a: data,
+            ty: ctx.sem.tys.ptr,
+        });
+        for (v, ty) in arg_vals {
+            ctx.emit(Instr::Param { a: v, ty });
+        }
+        let dst = if ctx.is_unit(raw_ret) {
+            None
+        } else {
+            Some(ctx.temp())
+        };
+        if let Some(d) = dst
+            && classish_ty(ctx, raw_ret)
+        {
+            ctx.note_stmt_temp(d, raw_ret);
+        }
+        ctx.emit(Instr::Call {
+            dst,
+            callee: Callee::Indirect,
+            ty: raw_ret,
+        });
+        return match dst {
+            Some(d) => Operand::Temp(d),
+            None => Operand::Const(Const::Unit),
+        };
+    }
+
+    // `?.` lowers as flag + selected vtable call; null propagates the whole
+    // expression as Nullable(raw_ret).
+    let result_ty = ctx.expr_ty(e);
+    let flag = load_slot(ctx, dyn_base, 0, ctx.i8_ty);
+    let ok_b = ctx.reserve_block();
+    let null_b = ctx.reserve_block();
+    let merge_b = ctx.reserve_block();
+    ctx.terminate(Term::Br {
+        cond: flag,
+        then_: ok_b,
+        else_: null_b,
+    });
+    ctx.switch_to(ok_b);
+    let data = load_slot(ctx, dyn_base, 1, ctx.sem.tys.ptr);
+    let vt = load_slot(ctx, dyn_base, 2, ctx.sem.tys.ptr);
+    let Operand::Temp(vt_t) = vt else {
+        ctx.diag(
+            e.span,
+            "nullable vtable base is not a temp (internal invariant)",
+        );
+        return Operand::Const(Const::Unit);
+    };
+    let method_addr = ctx.temp();
+    ctx.emit(Instr::OffsetPtr {
+        dst: method_addr,
+        base: vt_t,
+        bytes: ((3 + index) * 8) as i64,
+        ty: ctx.sem.tys.unit,
+    });
+    let fptr = ctx.temp();
+    ctx.emit(Instr::LoadPtr {
+        dst: fptr,
+        ptr: method_addr,
+        ty: ctx.sem.tys.ptr,
+    });
+    let arg_vals: Vec<(Operand, TyId)> = args
+        .iter()
+        .enumerate()
+        .map(|(i, arg)| {
+            let to = param_tys
+                .get(i)
+                .map(|(_, t)| *t)
+                .unwrap_or(ctx.sem.tys.unit);
+            (lower_expr_as(ctx, &arg.value, to), to)
+        })
+        .collect();
+    ctx.emit(Instr::Param {
+        a: Operand::Temp(fptr),
+        ty: ctx.sem.tys.ptr,
+    });
+    ctx.emit(Instr::Param {
+        a: data,
+        ty: ctx.sem.tys.ptr,
+    });
+    for (v, ty) in arg_vals {
+        ctx.emit(Instr::Param { a: v, ty });
+    }
+    let raw_dst = if ctx.is_unit(raw_ret) {
+        None
+    } else {
+        Some(ctx.temp())
+    };
+    ctx.emit(Instr::Call {
+        dst: raw_dst,
+        callee: Callee::Indirect,
+        ty: raw_ret,
+    });
+    let out = ctx.temp();
+    ctx.emit(Instr::Store {
+        base: out,
+        idx: Operand::Const(Const::Int(0)),
+        src: Operand::Const(Const::Int(1)),
+        ty: ctx.i8_ty,
+    });
+    if let Some(raw) = raw_dst {
+        let raw_op = Operand::Temp(raw);
+        if crate::layout::is_aggregate(ctx, raw_ret) {
+            let staged =
+                emit_copy_value(ctx, raw_op.clone(), raw_ret, CopyOwnership::Owned, e.span);
+            copy_slots(ctx, (out, 1), (staged, 0), raw_ret, raw_ret, e.span);
+        } else {
+            ctx.emit(Instr::Store {
+                base: out,
+                idx: Operand::Const(Const::Int(1)),
+                src: raw_op,
+                ty: raw_ret,
+            });
+        }
+    }
+    ctx.terminate(Term::Jmp(merge_b));
+    ctx.switch_to(null_b);
+    ctx.emit(Instr::Store {
+        base: out,
+        idx: Operand::Const(Const::Int(0)),
+        src: Operand::Const(Const::Int(0)),
+        ty: ctx.i8_ty,
+    });
+    for slot in 1..crate::layout::scalar_slots(ctx, result_ty) {
+        ctx.emit(Instr::Store {
+            base: out,
+            idx: Operand::Const(Const::Int(slot as i128)),
+            src: Operand::Const(Const::Int(0)),
+            ty: crate::layout::slot_ty(ctx, result_ty, slot),
+        });
+    }
+    ctx.terminate(Term::Jmp(merge_b));
+    ctx.switch_to(merge_b);
+    if classish_ty(ctx, result_ty) {
+        ctx.note_stmt_temp(out, result_ty);
+    }
+    Operand::Temp(out)
+}
 fn call(
     ctx: &mut Ctx,
     e: &ExprWrap,
@@ -2087,6 +2573,11 @@ fn call(
         ctx.diag(e.span, "调用目标无 expr_def（sem 契约破缺）");
         return Operand::Const(Const::Unit);
     };
+    if let ExprKind::Member { base, .. } = &callee.kind
+        && dyn_shape(ctx, ctx.expr_ty(base)).is_some()
+    {
+        return dyn_method_call(ctx, e, callee, args, def);
+    }
     if let DefKind::TypeAlias = ctx.sem.defs.get(def).kind {
         def = match ctx.sem.defs.get(def).alias_resolved {
             Some(target) => target,

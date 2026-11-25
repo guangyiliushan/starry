@@ -1313,6 +1313,32 @@ fn trait_default_methods_e2e() {
 }
 
 #[test]
+fn dyn_class_dispatch_and_reassign_e2e() {
+    // Phase 2a: class-root dyn receivers dispatch through the trait vtable;
+    // fat-pointer reassignment releases the old payload exactly once.
+    let Some(out) = build_and_run(
+        "dyn_class_dispatch",
+        "trait Shape {\n    fun area(): int\n}\nclass Circle(val r: int) {\n    deinit {\n        print(self.r)\n    }\n}\nclass Square(val side: int) {\n    deinit {\n        print(self.side)\n    }\n}\nimpl Shape for Circle {\n    fun area(): int {\n        return self.r * 2\n    }\n}\nimpl Shape for Square {\n    fun area(): int {\n        return self.side * self.side\n    }\n}\nfun main(): int {\n    val d: dyn Shape = Circle(2)\n    print(d.area())\n    var s: dyn Shape = Square(3)\n    print(s.area())\n    s = d\n    print(s.area())\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "4\n9\n3\n4\n2\n");
+}
+
+#[test]
+fn dyn_nullable_dispatch_e2e() {
+    // Phase 2a: ?dyn keeps flag + both fat-pointer slots; `?.` null-propagates
+    // the dynamic call result and scope exit retains/releases exactly once.
+    let Some(out) = build_and_run(
+        "dyn_nullable_dispatch",
+        "trait T {\n    fun num(): int\n}\nclass C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nimpl T for C {\n    fun num(): int {\n        return 7\n    }\n}\nfun main(): int {\n    val d: dyn T = C(2)\n    val n: ?dyn T = d\n    val v: int? = n?.num()\n    print(100)\n    if (v != null) {\n        print(v!!)\n    } else {\n        print(88)\n    }\n    val z: ?dyn T = null\n    if (z?.num() != null) {\n        print(99)\n    } else {\n        print(87)\n    }\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "100\n7\n87\n2\n");
+}
+
+#[test]
 fn generic_alias_and_trait_inheritance_e2e() {
     // WP4/WP5: generic aliases instantiate at use; derived trait impls satisfy
     // inherited methods through their supertrait impl and static dispatch

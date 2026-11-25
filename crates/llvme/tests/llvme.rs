@@ -493,6 +493,25 @@ fn checked_arith_emits_overflow_intrinsic_and_panic_decl() {
 }
 
 #[test]
+fn dyn_class_vtable_layout_snapshot() {
+    // Phase 2a ABI: three-pointer header, declaration-ordered methods, and
+    // data/vtable fat-pointer slots.
+    let (text, codes) = emit(
+        "trait T {\n    fun first(): int\n}\nclass C(val v: int)\nimpl T for C {\n    fun first(): int {\n        return self.v\n    }\n}\nfun main(): int {\n    val d: dyn T = C(7)\n    return d.first()\n}",
+    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    if !llvm_as_ok(&text) {
+        panic!("LLVM validator rejected:\n{text}");
+    }
+    assert!(
+        text.contains("@vtable.T.16.C.19 = private constant [4 x ptr] [ptr null, ptr inttoptr (i64 24 to ptr), ptr inttoptr (i64 8 to ptr), ptr @first.")
+            && text.contains("getelementptr i8, ptr %u23, i64 24")
+            && text.contains("alloca [2 x i64]"),
+        "{text}"
+    );
+}
+
+#[test]
 fn class_object_emits_alloc_retain_release() {
     // M4 slice 1：class 对象 = alloc + 复制 retain + 块出口隐式 release；
     // 字段经 24B header 偏移（offsetptr/GEP i8）

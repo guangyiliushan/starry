@@ -33,6 +33,8 @@ pub enum Const {
     Unit,
     /// M8 slice 1：函数引用（顶层 fun 作为值；lower 为函数指针）
     Fun(sem::DefId),
+    /// Phase 2a: stable vtable global for (trait, implementing type)
+    Vtable(sem::DefId, sem::DefId),
 }
 
 /// 操作数
@@ -255,6 +257,15 @@ pub struct FunBody {
     pub entry: BlockId,
 }
 
+/// Phase 2a：一个 (trait, type) impl 的固定方法表；
+/// 布局 `[drop, size, align, methods...]` 由 llvme 统一发射。
+#[derive(Debug)]
+pub struct VtableBody {
+    pub trait_def: DefId,
+    pub type_def: DefId,
+    pub methods: Vec<DefId>,
+}
+
 /// 顶层全局声明（v1：纯值多槽存储；init 为合成初始化函数体，main 前调用）
 #[derive(Debug)]
 pub struct GlobalBody {
@@ -268,6 +279,7 @@ pub struct GlobalBody {
 pub struct TacOutput {
     pub funs: Vec<FunBody>,
     pub globals: Vec<GlobalBody>,
+    pub vtables: Vec<VtableBody>,
     pub diags: Vec<Diagnostic>,
 }
 
@@ -331,6 +343,9 @@ fn op_text(op: &Operand, interner: &Interner, out: &mut String) {
         }
         Operand::Const(Const::Fun(_)) => {
             let _ = write!(out, "@fn"); // M8 slice 1: 文本占位（语义在 llvm 层）
+        }
+        Operand::Const(Const::Vtable(t, tp)) => {
+            let _ = write!(out, "@vtable.{}.{}", t.0, tp.0);
         }
         Operand::Const(Const::Bool(b)) => {
             let _ = write!(out, "{b}");

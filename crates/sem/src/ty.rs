@@ -64,6 +64,8 @@ pub enum TyKind {
     /// 调用点经 subst 代入具体类型。只在泛型原件签名与未检查体里出现，
     /// 实例化产物（克隆/spec def）永远是具体类型。
     Param(u32),
+    /// trait 对象（Phase 2a class-only）：胖指针 data + vtable，2 槽聚合
+    Dyn(DefId, Vec<TyId>),
     /// 类型对象（类型名在值位置出现）：仅允许作构造器 callee，
     /// 其余使用点一律诊断（见 semantic-notes「类型名与值分立」）
     TypeObject(DefId),
@@ -81,6 +83,7 @@ pub struct TyArena {
     dedup: BTreeMap<TyKind, TyId>,
     named_cache: BTreeMap<DefId, TyId>,
     pub unit: TyId,
+    pub ptr: TyId,
     pub bool_: TyId,
     pub string: TyId,
     pub char_: TyId,
@@ -115,6 +118,7 @@ impl TyArena {
             dedup: BTreeMap::new(),
             named_cache: BTreeMap::new(),
             unit: TyId(0),
+            ptr: TyId(0),
             bool_: TyId(0),
             string: TyId(0),
             char_: TyId(0),
@@ -125,6 +129,10 @@ impl TyArena {
             default_float: TyId(0),
         };
         arena.unit = arena.intern(TyKind::Unit);
+        arena.ptr = arena.intern(TyKind::Pointer {
+            mutable: false,
+            inner: arena.unit,
+        });
         arena.bool_ = arena.intern(TyKind::Bool);
         arena.string = arena.intern(TyKind::String);
         arena.char_ = arena.intern(TyKind::Char);
@@ -198,6 +206,10 @@ impl TyArena {
             TyKind::Named(def, targs) => {
                 let ts = targs.iter().map(|t| self.subst(*t, args)).collect();
                 self.intern(TyKind::Named(def, ts))
+            }
+            TyKind::Dyn(def, targs) => {
+                let ts = targs.iter().map(|t| self.subst(*t, args)).collect();
+                self.intern(TyKind::Dyn(def, ts))
             }
             TyKind::Nullable(inner) => {
                 let i = self.subst(inner, args);
@@ -400,6 +412,7 @@ impl TyArena {
                 self.mentions_param(*inner)
             }
             TyKind::Named(_, args) => args.iter().any(|a| self.mentions_param(*a)),
+            TyKind::Dyn(_, args) => args.iter().any(|a| self.mentions_param(*a)),
             TyKind::Nullable(inner) | TyKind::Range(inner) => self.mentions_param(*inner),
             TyKind::Array(elem, _) => self.mentions_param(*elem),
             TyKind::Tuple(elems) => elems.iter().any(|e| self.mentions_param(*e)),
@@ -419,6 +432,11 @@ impl TyArena {
                 self.collect_param_indices(*inner, out)
             }
             TyKind::Named(_, args) => {
+                for a in args {
+                    self.collect_param_indices(*a, out);
+                }
+            }
+            TyKind::Dyn(_, args) => {
                 for a in args {
                     self.collect_param_indices(*a, out);
                 }

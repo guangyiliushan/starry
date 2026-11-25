@@ -447,6 +447,7 @@ fn op_key(op: &Operand) -> Option<OpKey> {
         Operand::Const(Const::Str(_)) => return None,
         // M8 slice 1: 函数引用不参与 CSE
         Operand::Const(Const::Fun(_)) => return None,
+        Operand::Const(Const::Vtable(..)) => return None,
     })
 }
 

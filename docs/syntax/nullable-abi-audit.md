@@ -7,7 +7,7 @@
 | 形态 | 判别 | ABI |
 |---|---|---|
 | 可空 class（`P?`） | `class_of` = Agg | 块指针：参数/返回/实参按 `ptr` 传递 2 槽块（flag i8 槽 0 + payload ptr 槽 1）；间接调用返回经 `emit_agg_result_copy` 槽拷贝（2026-11-12 修复） |
-| 可空标量（`int?` 等） | `class_of` = Agg（同走块路径） | 2 槽（flag i8 + 标量 payload）；局部按 slot_ty 逐槽 ✓ |
+| 可空标量（`int?` 等） | `class_of` = Agg（同走块路径） | 2 槽（flag i8 + 标量 payload）；局部按 slot_ty 逐槽 ✓ || 可空 trait 对象（`?dyn T`） | `class_of` = Agg | 3 槽（flag i8 + data ptr + vtable ptr）；借用拷贝 retain data，release 经 scalar ptr ABI ✓ |
 
 `scalar_ty` 已有显式 `Nullable => "i64"` 臂：仅可在「整槽视图」语境
 出现（flag 槽的 i64 视图——小端低字节 = flag）；出现在 payload/多槽
@@ -42,7 +42,16 @@
 - 超大栈帧：`__chkstk` 逐页降序探测 + 8MB 预留已落地；
   1.1MB/1.2MB 边界 regression 见 build_cli（p0_stack_probe_*）。
 
-## 5. 逆向引用
+## 5. Phase 2a dyn ABI
+
+- `dyn T`：`[data ptr, vtable ptr]` 两槽聚合。
+- `?dyn T`：`[flag i8, data ptr, vtable ptr]` 三槽聚合。
+- vtable：`[drop ptr, size ptr, align ptr, method ptrs...]`，其中
+  size/align 以 `inttoptr` 常量占位；方法槽从基址 `+24 + index*8` 读取。
+- 可空拷贝必须同时携带 data 与 vtable 两槽；release/retain 只作用于
+  data ptr，flag 与 vtable 无 ARC 副作用。
+
+## 6. 逆向引用
 
 - 可空捕获实现：closure-capture-spec.md（批次 3）
 - emit_agg_result_copy：llvme/src/emit.rs（间接调用 Agg 返回）

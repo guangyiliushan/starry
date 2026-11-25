@@ -88,6 +88,29 @@ pub fn emit_module(
         };
         let _ = writeln!(globals, "{} = global {} {}", name, storage_ty, zero);
     }
+    // Phase 2a: emit one fixed ABI vtable per registered impl.
+    for vt in &tac.vtables {
+        let trait_name = sanitize(interner.resolve(defs.get(vt.trait_def).name));
+        let type_name = sanitize(interner.resolve(defs.get(vt.type_def).name));
+        let name = format!(
+            "@vtable.{}.{}.{}.{}",
+            trait_name, vt.trait_def.0, type_name, vt.type_def.0
+        );
+        let mut elems = Vec::with_capacity(vt.methods.len() + 3);
+        elems.push("ptr null".to_string());
+        elems.push("ptr inttoptr (i64 24 to ptr)".to_string());
+        elems.push("ptr inttoptr (i64 8 to ptr)".to_string());
+        for method in &vt.methods {
+            elems.push(format!("ptr {}", fun_name(&lc, *method)));
+        }
+        let _ = writeln!(
+            globals,
+            "{} = private constant [{} x ptr] [{}]",
+            name,
+            elems.len(),
+            elems.join(", ")
+        );
+    }
     // 全局初始化函数：必须在字符串常量 flush 之前发射——init 表达式里
     // 新 intern 的字符串只在此时注册，提前 flush 会输出未定义的 @.str.N。
     for global in &tac.globals {
@@ -551,6 +574,13 @@ impl<'e, 'l> FnEmit<'e, 'l> {
             Const::Unit => "0".into(),
             // M8 slice 1：函数引用 = 全局函数指针
             Const::Fun(d) => fun_name(self.lc, *d),
+            Const::Vtable(trait_def, type_def) => format!(
+                "@vtable.{}.{}.{}.{}",
+                sanitize(self.lc.interner.resolve(self.lc.defs.get(*trait_def).name)),
+                trait_def.0,
+                sanitize(self.lc.interner.resolve(self.lc.defs.get(*type_def).name)),
+                type_def.0
+            ),
             Const::Str(sym) => {
                 let id = self.g.str_id(*sym);
                 self.g.used_strs.insert(id);
@@ -791,6 +821,7 @@ fn emit_type_has_arc(e: &FnEmit, ty: TyId) -> bool {
     match e.lc.tys.kind(ty).clone() {
         TyKind::Nullable(inner) => emit_type_has_arc(e, inner),
         TyKind::Fn(..) => true,
+        TyKind::Dyn(..) => true,
         TyKind::Named(def, _) => match e.lc.defs.get(def).kind {
             DefKind::Class => true,
             DefKind::Struct => {
@@ -861,6 +892,18 @@ fn emit_env_release_value(e: &mut FnEmit, out: &mut String, slot: i64, ty: TyId)
             true
         }
         TyKind::Fn(..) => {
+            let addr = e.fresh();
+            let _ = writeln!(
+                out,
+                "  {addr} = getelementptr i8, ptr %env, i64 {}",
+                8 * slot
+            );
+            let v = e.fresh();
+            let _ = writeln!(out, "  {v} = load ptr, ptr {addr}");
+            let _ = writeln!(out, "  call void @starry_release(ptr {v})");
+            true
+        }
+        TyKind::Dyn(..) => {
             let addr = e.fresh();
             let _ = writeln!(
                 out,

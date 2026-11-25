@@ -585,6 +585,9 @@ impl<'a> Machine<'a> {
                 // M8 slice 1：函数引用 = DefId 编码（间接调用时解码）。
                 // S2/P2-3b：<<1 留 bit0 给 tag（box = (id<<1)|1）
                 Const::Fun(d) => (d.0 as u128) << 1,
+                Const::Vtable(trait_def, type_def) => {
+                    (u128::from(trait_def.0) << 96) | u128::from(type_def.0)
+                }
             },
         }
     }

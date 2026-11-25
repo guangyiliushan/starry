@@ -17,6 +17,34 @@ use crate::def::{DefId, DefKind};
 use crate::ty::{IntKind, TyId, TyKind};
 use crate::{LoopFrame, PatRes, SemState};
 
+/// Regular lattice assignment plus the Phase 2a class-root -> dyn unsize rule.
+fn assignable_with_unsize(st: &mut SemState, from: TyId, to: TyId) -> bool {
+    if st.tys.assignable(from, to) {
+        return true;
+    }
+    // Unwrap ?dyn and optional class roots, then require a monomorphic
+    // trait and a concrete class payload.
+    let to_inner = match st.tys.kind(to) {
+        TyKind::Dyn(..) => to,
+        TyKind::Nullable(inner) if matches!(st.tys.kind(*inner), TyKind::Dyn(..)) => *inner,
+        _ => return false,
+    };
+    let from_inner = match st.tys.kind(from) {
+        TyKind::Nullable(inner) => *inner,
+        _ => from,
+    };
+    let TyKind::Dyn(trait_def, trait_args) = st.tys.kind(to_inner) else {
+        return false;
+    };
+    let TyKind::Named(type_def, type_args) = st.tys.kind(from_inner) else {
+        return false;
+    };
+    let target = *trait_def;
+    matches!(st.defs.get(*type_def).kind, DefKind::Class)
+        && trait_args.is_empty()
+        && type_args.is_empty()
+        && st.defs.get(target).ty_params == 0
+}
 pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
     run_from(ast, st, 0);
     let root = st.scopes.root();
@@ -83,7 +111,7 @@ pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
                                 def: mdef,
                             });
                             let ty = type_block(b, st, true);
-                            if !st.tys.assignable(ty, st.tys.unit) {
+                            if !assignable_with_unsize(st, ty, st.tys.unit) {
                                 mismatch(
                                     st,
                                     b.stmts
@@ -136,7 +164,7 @@ pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
                         retype_integer_literal(d, target, st);
 
                         let dty = st.expr_ty.get(d.id).copied().unwrap_or(dty);
-                        if !st.tys.assignable(dty, target) {
+                        if !assignable_with_unsize(st, dty, target) {
                             mismatch(st, d.span);
                         }
                     }
@@ -308,7 +336,7 @@ fn check_fun(decl_id: NodeId, f: &ast::syntax::decl::FunDecl, fdef: DefId, st: &
         };
         let dty = type_expr(default, st, true);
         if let Some((_, pty)) = param_tys.get(i)
-            && !st.tys.assignable(dty, *pty)
+            && !assignable_with_unsize(st, dty, *pty)
         {
             mismatch(st, default.span);
         }
@@ -345,7 +373,7 @@ fn check_fun(decl_id: NodeId, f: &ast::syntax::decl::FunDecl, fdef: DefId, st: &
     // 不能假阳性；`: unit` 与未声明的差异记入 semantic-notes
     if f.ret.is_some()
         && let Some(body_ty) = tail_ty
-        && !st.tys.assignable(body_ty, ret)
+        && !assignable_with_unsize(st, body_ty, ret)
     {
         st.diags.emit(Diagnostic::error(
             DiagCode::SemTypeMismatch,
@@ -465,7 +493,8 @@ fn check_binding_pattern(init: &ExprWrap, pat: &PatWrap, init_ty: TyId, st: &mut
                     retype_integer_literal(init, ann, st);
                     let init_ty = st.expr_ty.get(init.id).copied().unwrap_or(init_ty);
                     // M7 slice 2：泛型 enum 零参 ctor → spec 豁免（见 helper）
-                    if !st.tys.assignable(init_ty, ann) && !enum_ctor_matches_spec(st, init_ty, ann)
+                    if !assignable_with_unsize(st, init_ty, ann)
+                        && !enum_ctor_matches_spec(st, init_ty, ann)
                     {
                         mismatch(st, init.span);
                     }
@@ -535,7 +564,7 @@ fn type_stmt(s: &StmtWrap, st: &mut SemState) {
             let op = *op;
             match op {
                 OperatorKind::Eq => {
-                    if !st.tys.assignable(value_ty, target_ty) {
+                    if !assignable_with_unsize(st, value_ty, target_ty) {
                         mismatch(st, value.span);
                     }
                 }
@@ -549,7 +578,7 @@ fn type_stmt(s: &StmtWrap, st: &mut SemState) {
                 | OperatorKind::BitXorEq
                 | OperatorKind::ShlEq
                 | OperatorKind::ShrEq => {
-                    let ok = st.tys.assignable(value_ty, target_ty)
+                    let ok = assignable_with_unsize(st, value_ty, target_ty)
                         || st.tys.join(value_ty, target_ty) == Some(target_ty);
                     if !ok {
                         mismatch(st, value.span);
@@ -631,10 +660,10 @@ fn type_stmt(s: &StmtWrap, st: &mut SemState) {
                 retype_binary_literals(v, ret, st);
                 retype_integer_literal(v, ret, st);
                 let vty = st.expr_ty.get(v.id).copied().unwrap_or(vty);
-                if !st.tys.assignable(vty, ret) {
+                if !assignable_with_unsize(st, vty, ret) {
                     mismatch(st, v.span);
                 }
-            } else if !st.tys.assignable(st.tys.unit, ret) {
+            } else if !assignable_with_unsize(st, st.tys.unit, ret) {
                 // 裸 return 等价返回 unit：非 unit 返回型报错
                 mismatch(st, s.span);
             }
@@ -1829,7 +1858,7 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             let ret_ty = if infer_ret {
                 body_ty
             } else {
-                if !st.tys.assignable(body_ty, ret_ty) && !st.tys.is_error(body_ty) {
+                if !assignable_with_unsize(st, body_ty, ret_ty) && !st.tys.is_error(body_ty) {
                     mismatch(st, e.span);
                 }
                 ret_ty
@@ -2011,7 +2040,7 @@ fn type_binary(
                     return st.tys.error;
                 }
             };
-            if st.tys.assignable(r, inner) {
+            if assignable_with_unsize(st, r, inner) {
                 inner
             } else {
                 mismatch(st, rhs.span);
@@ -2153,7 +2182,7 @@ fn infer_call_targs(
     for (j, slot) in slots.iter().enumerate() {
         if let Some((aty, aspan)) = slot {
             let sub = st.tys.subst(params[j].1, &targs);
-            if !st.tys.assignable(*aty, sub) {
+            if !assignable_with_unsize(st, *aty, sub) {
                 st.diags.emit(Diagnostic::error(
                     DiagCode::SemTypeMismatch,
                     *aspan,
@@ -2332,12 +2361,40 @@ fn type_call(
                         } else {
                             None
                         };
+                        // Phase 2a: dynamic dispatch resolves to the trait's
+                        // declared method slot; IRC loads that vtable index.
+                        let dyn_trait = match st.tys.kind(base_ty) {
+                            TyKind::Dyn(trait_def, _) => Some(*trait_def),
+                            TyKind::Nullable(inner) => match st.tys.kind(*inner) {
+                                TyKind::Dyn(trait_def, _) => Some(*trait_def),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        let dyn_method = if let Some(tdef) = dyn_trait {
+                            member_lookup(st, tdef, *name)
+                                .filter(|mdef| matches!(st.defs.get(*mdef).kind, DefKind::Fun))
+                        } else {
+                            None
+                        };
+                        let method = if dyn_method.is_some() {
+                            dyn_method
+                        } else {
+                            method
+                        };
                         match method {
                             Some(m) => {
                                 let params = st.defs.get(m).sig.params.clone();
                                 let defaults = st.defs.get(m).sig.param_defaults.clone();
                                 check_call_args(args, &params, &defaults, span, st);
-                                let ret = st.defs.get(m).sig.ret;
+                                let raw_ret = st.defs.get(m).sig.ret;
+                                let ret = if *safe
+                                    && matches!(st.tys.kind(base_ty), TyKind::Nullable(inner) if matches!(st.tys.kind(*inner), TyKind::Dyn(..)))
+                                {
+                                    st.tys.nullable(raw_ret)
+                                } else {
+                                    raw_ret
+                                };
                                 st.expr_def.set(callee.id, m);
                                 // callee 值占位（irc 方法路径读 expr_def；早退绕过
                                 // 臂尾的 expr_ty.set，这里必须自写）
@@ -2474,7 +2531,7 @@ fn type_call(
                         let svparams = variant_arg_tys(sparent, sindex, st);
                         for (a, (_, pt)) in args.iter().zip(svparams.iter()) {
                             let aty = st.expr_ty.get(a.value.id).copied().unwrap_or(st.tys.error);
-                            if !st.tys.assignable(aty, *pt) {
+                            if !assignable_with_unsize(st, aty, *pt) {
                                 st.diags.emit(Diagnostic::error(
                                     DiagCode::SemTypeMismatch,
                                     a.value.span,
@@ -2719,7 +2776,7 @@ fn type_call(
         }
         for (a, p) in args.iter().zip(ps.iter()) {
             let at = type_expr(&a.value, st, true);
-            if !st.tys.assignable(at, *p) {
+            if !assignable_with_unsize(st, at, *p) {
                 mismatch(st, a.value.span);
             }
         }
@@ -2839,7 +2896,7 @@ fn check_call_args(
         }
     }
     for (i, slot) in slots.iter().enumerate() {
-        if !st.tys.assignable(slot.unwrap_or(st.tys.error), params[i].1) {
+        if !assignable_with_unsize(st, slot.unwrap_or(st.tys.error), params[i].1) {
             mismatch(st, span);
         }
     }
@@ -2908,7 +2965,10 @@ fn type_when(
                 let t = type_expr(e, st, true);
                 if let (Some(sty), false) = (subject_ty, st.tys.is_error(t)) {
                     // bool 表达式分支是谓词式（x > 1 -> ...），不做主语兼容核查
-                    if !st.tys.is_error(sty) && t != st.tys.bool_ && !st.tys.assignable(t, sty) {
+                    if !st.tys.is_error(sty)
+                        && t != st.tys.bool_
+                        && !assignable_with_unsize(st, t, sty)
+                    {
                         mismatch(st, e.span);
                     }
                 }
