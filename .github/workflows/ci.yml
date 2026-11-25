@@ -29,8 +29,10 @@ jobs:
           }
           if (Test-Path 'C:\Program Files\LLVM\bin') {
             Add-Content $env:GITHUB_PATH 'C:\Program Files\LLVM\bin'
+            RefreshEnv
           } elseif (Test-Path 'C:\Program Files\LLVM') {
             Add-Content $env:GITHUB_PATH 'C:\Program Files\LLVM'
+            RefreshEnv
           }
       - name: Install LLVM (Linux)
         if: runner.os == 'Linux'
