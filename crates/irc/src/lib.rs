@@ -54,6 +54,7 @@ pub fn lower(sem: &mut SemanticOutput, source: &str) -> TacOutput {
         decl_def,
         scopes,
         impls,
+        trait_defaults,
         lambda_defs,
         lambda_caps,
         ..
@@ -78,6 +79,7 @@ pub fn lower(sem: &mut SemanticOutput, source: &str) -> TacOutput {
         scopes,
         interner,
         impls,
+        trait_defaults,
         lambda_defs,
         lambda_caps,
         env_ref_ty,

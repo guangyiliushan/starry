@@ -112,6 +112,8 @@ pub struct SemanticOutput {
     pub scopes: ScopeArena,
     /// M9 9b：impl 注册表导出（irc 的 impl 方法体 lowering 用）
     pub impls: Vec<def::TraitImpl>,
+    /// WP5: default-body method DefIds, keyed by enclosing trait item index.
+    pub trait_defaults: std::collections::BTreeMap<usize, Vec<DefId>>,
     pub lambda_defs: std::collections::BTreeMap<u32, DefId>,
     /// S2/P2-3：lambda expr id → 捕获表（名称按首现序）
     pub lambda_caps: std::collections::BTreeMap<u32, Vec<(ast::interner::Symbol, TyId)>>,
@@ -166,6 +168,8 @@ pub(crate) struct SemState {
     pub pkg_scopes: Vec<ScopeId>,
     /// M9 9a：impl 注册表（静态分派按 (trait, type) 查；重复 impl 拒绝）
     pub impls: Vec<crate::def::TraitImpl>,
+    /// WP5: default-body method defs collected during declaration.
+    pub trait_defaults: std::collections::BTreeMap<usize, Vec<DefId>>,
     /// M9 9a：impl 头解析期置位——lower_ty 对 trait 名的拒收
     /// 跳过（impl Show for P 的 Show 不是 trait 对象标注）
     pub in_impl_header: bool,
@@ -247,6 +251,7 @@ impl Sem {
             own_def: None,
             pkg_scopes: Vec::new(),
             impls: Vec::new(),
+            trait_defaults: std::collections::BTreeMap::new(),
             lambda_defs: std::collections::BTreeMap::new(),
             lambda_cap_stack: Vec::new(),
             lambda_caps: std::collections::BTreeMap::new(),
@@ -297,6 +302,7 @@ impl Sem {
             decl_def: self.st.decl_def,
             scopes: self.st.scopes,
             impls: self.st.impls,
+            trait_defaults: self.st.trait_defaults,
             lambda_defs: self.st.lambda_defs,
             lambda_caps: self.st.lambda_caps,
         }

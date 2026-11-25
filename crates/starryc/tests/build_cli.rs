@@ -1300,6 +1300,19 @@ fn class_i128_and_nullable_class_globals_e2e() {
 }
 
 #[test]
+fn trait_default_methods_e2e() {
+    // WP5: missing impl methods resolve to trait default bodies; overridden
+    // methods keep the impl-local body.
+    let Some(out) = build_and_run(
+        "trait_default_methods",
+        "trait Greet {\n    fun greet(): int {\n        return 7\n    }\n    fun loud(): int\n}\nstruct P(val v: int)\nimpl Greet for P {\n    fun loud(): int {\n        return self.v + 1\n    }\n}\nstruct Q(val v: int)\nimpl Greet for Q {\n    fun loud(): int {\n        return self.v + 2\n    }\n}\nfun main(): int {\n    val p = P(2)\n    val q = Q(10)\n    print(p.greet())\n    print(p.loud())\n    print(q.greet())\n    print(q.loud())\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "7\n3\n7\n12\n");
+}
+
+#[test]
 fn generic_alias_and_trait_inheritance_e2e() {
     // WP4/WP5: generic aliases instantiate at use; derived trait impls satisfy
     // inherited methods through their supertrait impl and static dispatch

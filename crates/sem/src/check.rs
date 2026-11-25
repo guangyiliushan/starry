@@ -4,7 +4,7 @@
 //! 提升格规则见 semantic-notes（整型加宽 / int→float / Null→Nullable）。
 
 use ast::interner::Symbol;
-use ast::syntax::decl::{BindingDecl, DeclKind, FunctionBody};
+use ast::syntax::decl::{BindingDecl, DeclKind, FunctionBody, TraitMember};
 use ast::syntax::expr::*;
 use ast::syntax::node::{DiagCode, Diagnostic, NodeId, SourceFile};
 use ast::syntax::pat::{PatKind, PatWrap};
@@ -95,6 +95,29 @@ pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
                             st.funs.pop();
                         }
                         _ => {}
+                    }
+                }
+            }
+            // WP5: trait default bodies are checked against the trait Self
+            // placeholder; impl dispatch reuses the resulting method def.
+            DeclKind::Trait(t) => {
+                let Some(tdef) = st.decl_def.get(i).copied().flatten() else {
+                    continue;
+                };
+                let Some(ms) = st.defs.get(tdef).member_scope else {
+                    continue;
+                };
+                let self_key = st.interner.intern("Self");
+                let Some(self_def) = st.scopes.lookup_local(ms, self_key) else {
+                    continue;
+                };
+                let _self_ty = st.tys.builtin_named(self_def);
+                for member in &t.members {
+                    if let TraitMember::Fun(f) = member
+                        && f.body.is_some()
+                        && let Some(mdef) = member_lookup(st, tdef, f.name)
+                    {
+                        check_fun(item.id, f, mdef, st);
                     }
                 }
             }

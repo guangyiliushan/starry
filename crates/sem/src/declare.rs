@@ -60,7 +60,7 @@ pub(crate) fn run(ast: &SourceFile, st: &mut SemState) {
     }
     lower_top_level_sigs(ast, st);
     for (scope, index) in pending_impls {
-        register_impl(&ast.items[index], index, scope, st);
+        register_impl(ast, &ast.items[index], index, scope, st);
     }
 }
 
@@ -192,7 +192,38 @@ fn inherited_trait_method(
     None
 }
 
-fn register_impl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState) {
+/// Locate a trait default-body method def by declared method name.
+fn trait_default_method(
+    st: &SemState,
+    ast: &SourceFile,
+    name: ast::interner::Symbol,
+) -> Option<DefId> {
+    for (idx, item) in ast.items.iter().enumerate() {
+        let DeclKind::Trait(t) = &item.kind else {
+            continue;
+        };
+        for member in &t.members {
+            if let ast::syntax::decl::TraitMember::Fun(f) = member
+                && f.name == name
+                && f.body.is_some()
+            {
+                let Some(tdef) = st.decl_def.get(idx).copied().flatten() else {
+                    continue;
+                };
+                return member_lookup(st, tdef, name);
+            }
+        }
+    }
+    None
+}
+
+fn register_impl(
+    ast: &SourceFile,
+    decl: &DeclNode,
+    index: usize,
+    scope: ScopeId,
+    st: &mut SemState,
+) {
     let DeclKind::Impl(i) = &decl.kind else {
         return;
     };
@@ -314,6 +345,16 @@ fn register_impl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemStat
     }
     // 覆盖与签名核对：trait 每个签名须恰有一个同名同型的 impl 方法
     let trait_methods: Vec<(Symbol, DefId)> = trait_methods_with_inherited(st, tdef);
+    // Missing methods may come from a trait default body; the method def is
+    // reused by every impl so static dispatch stays a direct call.
+    for (name, _) in &trait_methods {
+        if methods.iter().any(|(n, _)| n == name) {
+            continue;
+        }
+        if let Some(default_fd) = trait_default_method(st, ast, *name) {
+            methods.push((*name, default_fd));
+        }
+    }
     // A supertrait impl satisfies inherited requirements. Keep the derived
     // registry free of copied methods so dispatch remains unambiguous: the
     // most specific impl for each method owns that method.
@@ -1222,6 +1263,53 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                         s.params = params;
                         s.ret = ret;
                         s.param_defaults = defaults;
+                    }
+                    ast::syntax::decl::TraitMember::Fun(f) => {
+                        reject_unsupported_modifiers(&f.modifiers.modifiers, st);
+                        if f.params.iter().any(|p| p.default.is_some()) {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemUnsupportedConstruct,
+                                decl.span,
+                                "trait method default parameters are not supported in this slice",
+                            ));
+                        }
+                        let fd = add_def(st, ms, f.name, decl.span, DefKind::Fun);
+                        let params = lower_params(st, tscope, &f.params, decl.span);
+                        let ret = match &f.ret {
+                            Some(r) => lower_ty(st, tscope, r),
+                            None => st.tys.unit,
+                        };
+                        let ret_has_param = f
+                            .ret
+                            .as_ref()
+                            .map(|r| lower_ty(st, tscope, r))
+                            .is_some_and(|ret| st.tys.mentions_param(ret));
+                        if !f.type_params.is_empty() || ret_has_param {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemObjectUnsafe,
+                                decl.span,
+                                format!(
+                                    "trait method `{}` is not object safe",
+                                    st.interner.resolve(f.name)
+                                ),
+                            ));
+                        }
+                        let defaults: Vec<bool> =
+                            f.params.iter().map(|p| p.default.is_some()).collect();
+                        let s = &mut st.defs.get_mut(fd).sig;
+                        s.params = params;
+                        s.ret = ret;
+                        s.param_defaults = defaults;
+                        // IRC injects self through the signature's self-type slot.
+                        // Keep the declaration-phase placeholder concrete enough for
+                        // scalar/class ABI lowering; impl dispatch passes the real type.
+                        if let Some(self_def) = st.scopes.lookup_local(ms, self_sym) {
+                            s.ty = st.tys.builtin_named(self_def);
+                        }
+                        st.defs.get_mut(fd).decl = Some(index);
+                        if f.body.is_some() {
+                            st.trait_defaults.entry(index).or_default().push(fd);
+                        }
                     }
                     ast::syntax::decl::TraitMember::AssociatedType(_) => {
                         st.diags.emit(Diagnostic::error(

@@ -4,7 +4,7 @@
 //! （pat_res 在 check 补写）；lambda/spawn 内部整体跳过（见 semantic-notes）。
 
 use ast::interner::Symbol;
-use ast::syntax::decl::{ClassMember, DeclKind, FunDecl, FunctionBody};
+use ast::syntax::decl::{ClassMember, DeclKind, FunDecl, FunctionBody, TraitMember};
 use ast::syntax::expr::*;
 use ast::syntax::node::{DiagCode, Diagnostic, NodeId, SourceFile, Span};
 use ast::syntax::pat::{PatKind, PatWrap};
@@ -74,6 +74,30 @@ pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
                         && let Some((_, mdef)) = entry.methods.iter().find(|(n, _)| *n == f.name)
                     {
                         resolve_method(d.id, f, *mdef, self_name, self_ty, st);
+                    }
+                }
+            }
+            // WP5: trait default bodies are checked once against the trait's
+            // Self placeholder. Impl dispatch reuses the lowered method def.
+            DeclKind::Trait(t) => {
+                let Some(tdef) = st.decl_def.get(i).copied().flatten() else {
+                    continue;
+                };
+                let Some(ms) = st.defs.get(tdef).member_scope else {
+                    continue;
+                };
+                let self_name = st.interner.intern("self");
+                let self_key = st.interner.intern("Self");
+                let Some(self_def) = st.scopes.lookup_local(ms, self_key) else {
+                    continue;
+                };
+                let self_ty = st.tys.builtin_named(self_def);
+                for member in &t.members {
+                    if let TraitMember::Fun(f) = member
+                        && f.body.is_some()
+                        && let Some(mdef) = member_lookup(st, tdef, f.name)
+                    {
+                        resolve_method(item.id, f, mdef, self_name, self_ty, st);
                     }
                 }
             }

@@ -37,6 +37,8 @@ pub(crate) struct SemRef<'a> {
     pub interner: &'a mut Interner,
     /// M9 9b：impl 注册表（impl 方法体 lowering 用）
     pub impls: &'a [sem::TraitImpl],
+    /// WP5: default-body method defs, keyed by trait item index.
+    pub trait_defaults: &'a std::collections::BTreeMap<usize, Vec<sem::DefId>>,
     pub lambda_defs: &'a std::collections::BTreeMap<u32, DefId>,
     /// S2/P2-3b：捕获表（lambda node → (名, ty) 首现序）
     pub lambda_caps: &'a std::collections::BTreeMap<u32, Vec<(ast::interner::Symbol, sem::TyId)>>,
@@ -269,6 +271,28 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
         out.diags.append(&mut ctx.diags);
         out.funs.push(ctx.fun);
         out.funs.append(&mut ctx.extra_funs);
+    }
+    // WP5: lower trait default bodies once. They are plain static methods
+    // over the trait Self ABI; impl dispatch reuses the emitted function.
+    for (item_index, defs) in sem.trait_defaults {
+        let DeclKind::Trait(t) = &ast.items[*item_index].kind else {
+            continue;
+        };
+        for mdef in defs {
+            let Some(member) = t.members.iter().find(|member| {
+                matches!(member, ast::syntax::decl::TraitMember::Fun(f) if f.name == sem.defs.get(*mdef).name)
+            }) else {
+                continue;
+            };
+            let ast::syntax::decl::TraitMember::Fun(f) = member else {
+                continue;
+            };
+            let mut ctx = Ctx::new(sem, source, i8_ty, &globals, &skipped);
+            ctx.lower_member_fun(f, *mdef);
+            out.diags.append(&mut ctx.diags);
+            out.funs.push(ctx.fun);
+            out.funs.append(&mut ctx.extra_funs);
+        }
     }
     // M4 slice 2b：class 成员函数与 deinit 的 lowering。self = 首参对象
     // 指针（静态分派）；deinit 由 release 经 header meta 回调。
