@@ -98,6 +98,14 @@ fn register_import(scope: ScopeId, decl: &DeclNode, st: &mut SemState) {
         for seg in &segments[1..] {
             target = target.and_then(|d| member_lookup(st, d, *seg));
         }
+        if target.is_none() {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUndefinedName,
+                decl.span,
+                "import target not found"
+            ));
+            return;
+        }
         if target.is_none()
             && st
                 .defs
