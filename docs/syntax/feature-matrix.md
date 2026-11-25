@@ -83,11 +83,12 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单；已删关�
 
 | 特性 | parser | sem | irc | llvme | runtime | 备注 |
 |---|---|---|---|---|---|---|
-| lambda 聚合/可空 class 捕获 | ✅ | ✅ | ✅ | ✅ | ✅ | env 按 scalar_slots 展开；ARC 叶借用 retain；llvme env release 递归 class/Fn/nullable/struct/tuple/array；enum ARC payload 拒收 |
+| lambda 聚合/可空 class 捕获 | ✅ | ✅ | ✅ | ✅ | ✅ | env 按 scalar_slots 展开；ARC 叶借用 retain；llvme env release 递归 class/Fn/nullable/struct/tuple/array；enum payload 按 active tag 释放 |
 | lambda i128 捕获 | ✅ | ✅ | ✅ | ✅ | — | 2 槽 WideCell 标量经 env scalar_slots 布局；与 aggregate capture 同一游标模型 |
 | 顶层标量可空全局 | ✅ | ✅ | ✅ | ✅ | — | nullable-abi-audit.md §3.3：`[2 x i64]` flag+payload；`i128?` 使用 wide payload，可空 class 是进程根 |
 | 指向可空的类型解引用（`*p` / `*p = v`） | ✅ | ✅ | ✅ | ✅ | — | D-007 类型语法契约保留；pointee 逐槽读写；class/可空 class 走 ARC、i128 走 wide payload（e2e 已钉） |
 | lambda-in-lambda 字面嵌套 + 柯里化调用 | ✅ | ✅ | ✅ | ✅ | — | parser body 位 `{` 消歧（深度感知 `->` 前瞻）+ 柯里化 Fn 值链；捕获外层参数逐层正确（e2e 3/7/15） |
+| ARC aggregate payload | ✅ | ✅ | ✅ | ✅ | ✅ | struct/tuple/array/class 字段与 enum payload 走 type-directed copy/drop；enum Borrowed copy/tag drop 按 active variant；scope/return/release 与 sanitizer corpus 已覆盖 |
 
 ## 稳定拒收登记
 
@@ -101,7 +102,6 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单；已删关�
 | bodyless non-abstract / impl method | sem | bodyless 语法限定 abstract class method；abstract method 必须无 body；具体子类缺 override 拒收 |
 | `as` 非数值/非指针转换（如 string→int） | sem | P0 trust：只允许数值↔数值、同型、Ref/Pointer 互转；其余 SemTypeMismatch |
 | impl 头 trait 充当类型实参（`impl T for L<T>`） | sem | P0 trust：lower_ty 拒收（此前静默注册成 spec） |
-| ARC aggregate payload | sem/irc/llvme | struct/tuple/array/class 字段与 enum payload 走 type-directed copy/drop；enum Borrowed copy/tag drop 按 active variant；scope/return/release 已有 e2e 回归 |
 | variance（类型形参型变标注） | parse | D-014：已从文法移除（parse 级拒收）；未来用 `+`/`-` 标注实现 |
 | 宏调用展开 `name!(...)` | sem | `SemMacroExpansion`（宏声明已删，D-014；展开后置） |
 | 聚合/宽值顶层全局 | ✅ | 纯值 `[n x i64]`；class 是进程根；i128 wide ABI；bare fn 全局允许；boxed Fn/未支持组合拒收 |

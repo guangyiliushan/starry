@@ -466,8 +466,8 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   纯值聚合初始化函数逐槽写全局并 `ret void`。class/可空 class 是
   进程根（不保证 exit deinit）；i128 用 wide ABI；bare fn 全局允许，
   boxed Fn/未建模 ABI 稳定拒收。
-  Fn var 重赋值的可空 class 变体已有手动 ARC probe 平衡，但 targeted
-  native e2e 与 ASan harness 仍待接；超大栈帧 1MB 边界 regression 待补。
+  Fn var 重赋值、可空 class var 重赋值与 1MB 边界栈帧均有 targeted native
+  e2e；Phase 4 sanitizer corpus 覆盖 class/Fn/nullable 重赋值与聚合/enum ARC。
 - **绑定位置 lambda（已落地，2026-11-11）**：`val f: Fn注解 = {…}` 把
   注解 Fn 型作期望压栈（与 check_call_args 实参压栈同纪律）；无注解
   绑定的显式参数全带类型标注时从标注构造参数表、返回型由 body 推断

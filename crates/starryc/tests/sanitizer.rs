@@ -109,6 +109,95 @@ fn sanitizer_dyn_class_corpus() {
 }
 
 #[test]
+fn sanitizer_class_inheritance_corpus() {
+    // Inherited payload prefix, ctor/deinit chaining, and shared derived->base
+    // references must stay allocation balanced.
+    assert_sanitizer_clean(
+        "san_class_inheritance",
+        "open class Base(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nopen class Derived(val y: int): Base(y * 10) {\n    deinit {\n        print(self.y)\n    }\n}\nfun main(): int {\n    val b: Base = Derived(3)\n    val d: Base = Derived(4)\n    print(99)\n    return 0\n}\n",
+        "99\n4\n40\n3\n30\n",
+    );
+}
+
+#[test]
+fn sanitizer_abstract_override_corpus() {
+    // Abstract declarations allocate no runtime representation; the concrete
+    // override owns the vtable entry used through the base receiver.
+    assert_sanitizer_clean(
+        "san_abstract_override",
+        "abstract class Shape(val name: int) {\n    abstract fun area(): int;\n}\nopen class Square(val side: int): Shape(side) {\n    override fun area(): int {\n        return self.side * self.side\n    }\n}\nfun main(): int {\n    val shape: Shape = Square(4)\n    print(shape.area())\n    return 0\n}\n",
+        "16\n",
+    );
+}
+
+#[test]
+fn sanitizer_struct_arc_corpus() {
+    // struct fields recursively retain/release class payloads.
+    assert_sanitizer_clean(
+        "san_struct_arc",
+        "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nstruct S(val c: C)\nfun main(): int {\n    val s = S(C(1))\n    print(s.c.x)\n    val b = s\n    print(b.c.x)\n    return 0\n}\n",
+        "1\n1\n1\n",
+    );
+}
+
+#[test]
+fn sanitizer_enum_payload_corpus() {
+    // Tag-aware traversal releases only the active ARC payload.
+    assert_sanitizer_clean(
+        "san_enum_payload",
+        "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nenum E {\n    Has(C)\n    Empty\n}\nfun main(): int {\n    val e = E.Has(C(1))\n    val f = e\n    print(9)\n    return 0\n}\n",
+        "9\n1\n",
+    );
+}
+
+#[test]
+fn sanitizer_nullable_abi_corpus() {
+    // Nullable class and i128 pointer pointees use multi-slot read/write ABI.
+    assert_sanitizer_clean(
+        "san_nullable_abi",
+        "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun class_part(): int {\n    var x: C? = C(1)\n    val p = &x\n    val y = *p\n    print(y!!.x)\n    val q = &mut x\n    *q = C(2)\n    print(x!!.x)\n    return 0\n}\nfun i128_part(): int {\n    var x: i128? = 123456789012345678\n    val p = &x\n    val y = *p\n    print(y!!)\n    val q = &mut x\n    *q = 123456789012345679\n    print(x!!)\n    *q = null\n    if (x != null) {\n        print(1)\n    } else {\n        print(9)\n    }\n    return 0\n}\nfun main(): int {\n    class_part()\n    i128_part()\n    return 0\n}\n",
+        "1\n2\n2\n123456789012345678\n123456789012345679\n9\n",
+    );
+}
+
+#[test]
+fn sanitizer_aggregate_closure_corpus() {
+    // struct/tuple/array capture environments recursively release ARC leaves.
+    assert_sanitizer_clean(
+        "san_aggregate_closure",
+        "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nstruct S(val c: C)\nfun call(f: () -> int): int {\n    return f()\n}\nfun main(): int {\n    val c = C(1)\n    val s = S(c)\n    val fs = { () -> s.c.x }\n    print(call(fs))\n    val t = (C(2), 20)\n    val ft = move { () -> t[0].x }\n    print(call(ft))\n    val a = [C(3)]\n    val fa = { () -> a[0].x }\n    print(call(fa))\n    return 0\n}\n",
+        "1\n2\n3\n3\n2\n1\n",
+    );
+}
+
+#[test]
+fn sanitizer_class_reassignment_corpus() {
+    // Plain and nullable class var reassignment release the old payload and
+    // retain/transfer the new one exactly once.
+    assert_sanitizer_clean(
+        "san_class_reassign",
+        "class P(val x: int) {\n}\nfun main(): int {\n    var b = P(1)\n    if (true) {\n        val a = P(2)\n        b = a\n    }\n    b = P(3)\n    b = b\n    return b.x\n}\n",
+        "",
+    );
+    assert_sanitizer_clean(
+        "san_nullable_class_reassign",
+        "class P(val x: int) {\n}\nfun main(): int {\n    var b: P? = null\n    b = P(1)\n    b = null\n    return 0\n}\n",
+        "",
+    );
+}
+
+#[test]
+fn sanitizer_fn_reassignment_corpus() {
+    // Fn var reassignment releases the old box and transfers the captured
+    // class value; the final binding release triggers deinit once.
+    assert_sanitizer_clean(
+        "san_fn_reassign",
+        "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun main(): int {\n    val k = 10\n    var f: () -> int = { () -> k }\n    print(f())\n    val c = C(7)\n    f = { () -> c.x }\n    print(f())\n    return 0\n}\n",
+        "10\n7\n7\n",
+    );
+}
+
+#[test]
 fn sanitizer_closure_corpus() {
     // 闭包 box ARC：捕获 class 的 env 释放平衡
     assert_sanitizer_clean(
