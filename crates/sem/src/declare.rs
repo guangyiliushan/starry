@@ -1412,7 +1412,7 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                         (v.name, args)
                     })
                     .collect();
-                                // WP1: enum payload ARC not yet handled; reject class/Fn/?class payloads
+                // WP1: enum payload ARC not yet handled; reject class/Fn/?class payloads
                 for (_, params) in &variants {
                     for (_, ty) in params {
                         if crate::declare::is_class_ty(st, *ty)
@@ -1422,13 +1422,12 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                             st.diags.emit(Diagnostic::error(
                                 DiagCode::SemUnsupportedConstruct,
                                 item.span,
-                                "enum payload ARC is not supported in v1"
+                                "enum payload ARC is not supported in v1",
                             ));
                         }
                     }
                 }
-st.defs.get_mut(def).sig.variants = variants;
-
+                st.defs.get_mut(def).sig.variants = variants;
             }
             DeclKind::TypeAlias(_t) => {
                 // 急切 lower：值位置（F.A / O.Some(1)）不经 lower_ty，
