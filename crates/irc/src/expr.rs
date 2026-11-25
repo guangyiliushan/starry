@@ -34,25 +34,18 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
         .cloned()
         .unwrap_or_default();
     for (name, cty) in &caps {
-        if !matches!(
+        // WP6: every layout-bearing aggregate is accepted through the same
+        // scalar_slots model. Enum payload ARC is the remaining exception
+        // because closure env release does not yet synthesize tag dispatch.
+        let enum_arc = matches!(
             ctx.sem.tys.kind(*cty),
-            TyKind::Int(IntKind::I4)
-                | TyKind::Int(IntKind::I8)
-                | TyKind::Int(IntKind::I16)
-                | TyKind::Int(IntKind::I32)
-                | TyKind::Int(IntKind::I64)
-                | TyKind::Int(IntKind::I128)
-                | TyKind::Float(_)
-                | TyKind::Bool
-                | TyKind::Char
-                | TyKind::String
-                | TyKind::Unit
-        ) && !is_class_ty(ctx, *cty)
-        {
+            TyKind::Named(def, _) if matches!(ctx.sem.defs.get(*def).kind, DefKind::Enum)
+        ) && contains_arc(ctx, *cty);
+        if enum_arc {
             ctx.diag(
                 e.span,
                 format!(
-                    "capture `{}` of this type lands in a later batch (scalar/class/nullable-class captures only; aggregate captures need aggregate-position ARC)",
+                    "capture `{}` has ARC enum payload; closure capture requires tag-aware env release (not supported in this slice)",
                     ctx.sem.interner.resolve(*name)
                 ),
             );
@@ -102,8 +95,9 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
         ctx.env_top().insert(pn, (Place::Temp(t), *ty));
     }
     if let Some(env_t) = env_t {
-        // 捕获名 → env 槽读取（槽位游标，每捕获 1 槽：标量/class 均
-        // 1 槽标量化指针；可空 class 待 nullable ABI 审计后启用）
+        // Capture names read from their scalar_slots layout. Aggregate
+        // captures are materialized into a local slot block; scalar/class
+        // captures remain the old single-value fast path.
         let mut slot = 1usize;
         for (name, cty) in &caps {
             let slots = crate::layout::scalar_slots(ctx, *cty);
@@ -114,13 +108,49 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
                 bytes: (8 * slot) as i64,
                 ty: ctx.sem.tys.unit,
             });
-            let v = ctx.temp();
-            ctx.emit(Instr::LoadPtr {
-                dst: v,
-                ptr: addr,
-                ty: *cty,
-            });
-            ctx.env_top().insert(*name, (Place::Temp(v), *cty));
+            if crate::layout::is_aggregate(ctx, *cty) {
+                let local = ctx.temp();
+                ctx.emit(Instr::Slot {
+                    dst: local,
+                    count: slots.max(1) as u32,
+                });
+                for s in 0..slots {
+                    let sty = crate::layout::slot_ty(ctx, *cty, s);
+                    let a = if s == 0 {
+                        addr
+                    } else {
+                        let p = ctx.temp();
+                        ctx.emit(Instr::OffsetPtr {
+                            dst: p,
+                            base: env_t,
+                            bytes: (8 * (slot + s)) as i64,
+                            ty: ctx.sem.tys.unit,
+                        });
+                        p
+                    };
+                    let v = ctx.temp();
+                    ctx.emit(Instr::LoadPtr {
+                        dst: v,
+                        ptr: a,
+                        ty: sty,
+                    });
+                    ctx.emit(Instr::Store {
+                        base: local,
+                        idx: Operand::Const(Const::Int(s as i128)),
+                        src: Operand::Temp(v),
+                        ty: sty,
+                    });
+                }
+                ctx.env_top().insert(*name, (Place::Temp(local), *cty));
+            } else {
+                let v = ctx.temp();
+                ctx.emit(Instr::LoadPtr {
+                    dst: v,
+                    ptr: addr,
+                    ty: *cty,
+                });
+                ctx.env_top().insert(*name, (Place::Temp(v), *cty));
+            }
             slot += slots;
         }
     }
@@ -161,20 +191,21 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
         })
         .collect();
     let box_t = ctx.temp();
-    // S2/P2-3b-2：有 class 捕获时填 env_caps——llvme 合成 env 释放函数
-    //（meta 逐 class 捕获 release）；纯标量捕获保持 meta=null（IR 不变）
-    let has_class_cap = caps.iter().any(|(_, cty)| is_class_ty(ctx, *cty));
+    // WP6: env payload is laid out by scalar_slots, not one slot per name.
+    // ARC leaves are borrowed-copied with retain; the synthesized env
+    // releaser owns the matching release traversal.
+    let total_slots: usize = caps
+        .iter()
+        .map(|(_, ty)| crate::layout::scalar_slots(ctx, *ty))
+        .sum();
+    let has_arc_cap = caps.iter().any(|(_, ty)| contains_arc(ctx, *ty));
     ctx.emit(Instr::AllocClass {
         dst: box_t,
-        bytes: crate::expr::ARC_HEADER_BYTES + (1 + caps.len() as i64) * 8,
+        bytes: crate::expr::ARC_HEADER_BYTES + (1 + total_slots as i64) * 8,
         deinit: None,
-        env_caps: has_class_cap.then(|| caps.iter().map(|(_, t)| *t).collect()),
+        env_caps: has_arc_cap.then(|| caps.iter().map(|(_, t)| *t).collect()),
         ty: fn_ty,
     });
-    // S2/P2-3b：box_t 持 tag 位值（raw|1）——创建侧 GEP 从 tagged 基址
-    // 起算。payload 布局 = alloc_object 返回的 raw 基址 + 槽 j*8：
-    // fn_ptr 在 raw+0（dispatch 从 boxp+0 取），caps 自 raw+8。
-    // tagged + bytes == raw + 槽址 → bytes = 槽址 - 1。
     let a0 = ctx.temp();
     ctx.emit(Instr::OffsetPtr {
         dst: a0,
@@ -190,24 +221,43 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
     let mut slot_j = 1usize;
     for (v, cty) in cap_vals.into_iter() {
         let cap_slots = crate::layout::scalar_slots(ctx, cty);
-        // class 捕获 +1（box meta 释放时归还）；标量无动作
-        if let Operand::Temp(t) = &v
-            && is_class_ty(ctx, cty)
-        {
-            ctx.emit_class_retain(crate::lower::Place::Temp(*t), cty);
+        let copied = if contains_arc(ctx, cty) {
+            emit_copy_value(ctx, v, cty, CopyOwnership::Borrowed, e.span)
+        } else {
+            v
+        };
+        if crate::layout::is_aggregate(ctx, cty) {
+            let base = as_base(ctx, copied.clone(), e.span);
+            for s in 0..cap_slots {
+                let sty = crate::layout::slot_ty(ctx, cty, s);
+                let src = crate::expr::load_slot(ctx, base, s, sty);
+                let a = ctx.temp();
+                ctx.emit(Instr::OffsetPtr {
+                    dst: a,
+                    base: box_t,
+                    bytes: (8 * (slot_j + s)) as i64 - 1,
+                    ty: ctx.sem.tys.unit,
+                });
+                ctx.emit(Instr::StorePtr {
+                    ptr: a,
+                    src,
+                    ty: sty,
+                });
+            }
+        } else {
+            let a = ctx.temp();
+            ctx.emit(Instr::OffsetPtr {
+                dst: a,
+                base: box_t,
+                bytes: (8 * slot_j) as i64 - 1,
+                ty: ctx.sem.tys.unit,
+            });
+            ctx.emit(Instr::StorePtr {
+                ptr: a,
+                src: copied,
+                ty: cty,
+            });
         }
-        let a = ctx.temp();
-        ctx.emit(Instr::OffsetPtr {
-            dst: a,
-            base: box_t,
-            bytes: (8 * slot_j) as i64 - 1,
-            ty: ctx.sem.tys.unit,
-        });
-        ctx.emit(Instr::StorePtr {
-            ptr: a,
-            src: v,
-            ty: cty,
-        });
         slot_j += cap_slots;
     }
     Operand::Temp(box_t)

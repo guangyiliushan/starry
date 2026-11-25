@@ -80,8 +80,8 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单；已删关�
 
 | 特性 | parser | sem | irc | llvme | runtime | 备注 |
 |---|---|---|---|---|---|---|
-| lambda 可空 class 捕获 | ✅ | ✅ | ✅ | ✅ | ✅ | 2 槽 env（flag+payload）+ flag 分支 retain/release + 间接调用 Agg 返回槽拷贝 |
-| lambda i128 捕获 | ✅ | ✅ | ✅ | ✅ | — | 2 槽 WideCell 标量经多槽 env（槽位游标按 scalar_slots 累计）；聚合捕获归后续 |
+| lambda 聚合/可空 class 捕获 | ✅ | ✅ | ✅ | ✅ | ✅ | env 按 scalar_slots 展开；ARC 叶借用 retain；llvme env release 递归 class/Fn/nullable/struct/tuple/array；enum ARC payload 拒收 |
+| lambda i128 捕获 | ✅ | ✅ | ✅ | ✅ | — | 2 槽 WideCell 标量经 env scalar_slots 布局；与 aggregate capture 同一游标模型 |
 | 顶层标量可空全局 | ✅ | ✅ | ✅ | ✅ | — | nullable-abi-audit.md §3.3：`[2 x i64]` flag+payload；`i128?` 使用 wide payload，可空 class 是进程根 |
 | 指向可空的类型解引用（`*p` / `*p = v`） | ✅ | ✅ | ✅ | ✅ | — | D-007 类型语法契约保留；pointee 逐槽读写；class/可空 class 走 ARC、i128 走 wide payload（e2e 已钉） |
 | lambda-in-lambda 字面嵌套 + 柯里化调用 | ✅ | ✅ | ✅ | ✅ | — | parser body 位 `{` 消歧（深度感知 `->` 前瞻）+ 柯里化 Fn 值链；捕获外层参数逐层正确（e2e 3/7/15） |
@@ -123,5 +123,5 @@ Feature Group 定义：**FG0** 标量核心（上表第一组）、**FG1** 数�
 v1 预算冻结：**35 hard / 10 modifier / 8 slot = 53**（2026-11-25 删 `static`：顶层 fun/val/var 加包命名空间已覆盖），不再减少。保留待实现的
 capability 关键字：`operator`（运算符重载）、
 `union`（重叠字段值类型）、`get`/`set`（属性）、`by`（委托，随继承落地）、
-`it`/`move`（lambda 推断/捕获）。以上均有稳定拒收诊断。
+`it`/`move`（lambda 推断/捕获）。`it` 与 `move { ... }` 形式已有 e2e；`move` 当前为捕获形式标记，ARC 捕获统一借用 retain。
 已实现新增：`alias`（类型别名）、`deinit`（析构）。

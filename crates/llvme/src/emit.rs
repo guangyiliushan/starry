@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use ast::interner::{Interner, Symbol};
-use irc::layout::scalar_slots;
+use irc::layout::{field_slot, scalar_slots};
 use irc::tac::{
     BinOp, Callee, Const, FunBody, Instr, Operand, RuntimeFn, TacOutput, TempId, Term, UnOp,
 };
@@ -786,6 +786,122 @@ fn emit_checked_div(e: &mut FnEmit, dst: TempId, op: BinOp, ty: TyId, lv: &str, 
     let _ = writeln!(e.out, "  {} = {} {} {}, {}", v, mnemonic, tname, lv, rv);
     e.store_val(dst, ty, v);
 }
+/// Static ARC-leaf predicate shared by capture creation and env release.
+fn emit_type_has_arc(e: &FnEmit, ty: TyId) -> bool {
+    match e.lc.tys.kind(ty).clone() {
+        TyKind::Nullable(inner) => emit_type_has_arc(e, inner),
+        TyKind::Fn(..) => true,
+        TyKind::Named(def, _) => match e.lc.defs.get(def).kind {
+            DefKind::Class => true,
+            DefKind::Struct => {
+                e.lc.defs
+                    .get(def)
+                    .sig
+                    .fields
+                    .iter()
+                    .any(|(_, t)| emit_type_has_arc(e, *t))
+            }
+            DefKind::Enum => {
+                e.lc.defs
+                    .get(def)
+                    .sig
+                    .variants
+                    .iter()
+                    .any(|(_, params)| params.iter().any(|(_, t)| emit_type_has_arc(e, *t)))
+            }
+            _ => false,
+        },
+        TyKind::Tuple(fields) => fields.iter().any(|t| emit_type_has_arc(e, *t)),
+        TyKind::Array(elem, _) => emit_type_has_arc(e, elem),
+        _ => false,
+    }
+}
+
+/// Recursively emit release code for one closure-env capture at `slot`.
+/// Returns whether any ARC leaf was released; scalar leaves are no-ops.
+/// Enum ARC payload is rejected at capture creation, so no tag CFG is needed.
+fn emit_env_release_value(e: &mut FnEmit, out: &mut String, slot: i64, ty: TyId) -> bool {
+    match e.lc.tys.kind(ty).clone() {
+        TyKind::Nullable(inner) => {
+            if !emit_type_has_arc(e, inner) {
+                return false;
+            }
+            let flag_addr = e.fresh();
+            let _ = writeln!(
+                out,
+                "  {flag_addr} = getelementptr i8, ptr %env, i64 {}",
+                8 * slot
+            );
+            let flag = e.fresh();
+            let _ = writeln!(out, "  {flag} = load i8, ptr {flag_addr}");
+            let rel = e.fresh();
+            let end = e.fresh();
+            let _ = writeln!(
+                out,
+                "  br i1 {flag}, label {}, label {}",
+                &rel[1..],
+                &end[1..]
+            );
+            let _ = writeln!(out, "{}:", &rel[1..]);
+            emit_env_release_value(e, out, slot + 1, inner);
+            let _ = writeln!(out, "  br label {}", &end[1..]);
+            let _ = writeln!(out, "{}:", &end[1..]);
+            true
+        }
+        TyKind::Named(def, _) if matches!(e.lc.defs.get(def).kind, DefKind::Class) => {
+            let addr = e.fresh();
+            let _ = writeln!(
+                out,
+                "  {addr} = getelementptr i8, ptr %env, i64 {}",
+                8 * slot
+            );
+            let v = e.fresh();
+            let _ = writeln!(out, "  {v} = load ptr, ptr {addr}");
+            let _ = writeln!(out, "  call void @starry_release(ptr {v})");
+            true
+        }
+        TyKind::Fn(..) => {
+            let addr = e.fresh();
+            let _ = writeln!(
+                out,
+                "  {addr} = getelementptr i8, ptr %env, i64 {}",
+                8 * slot
+            );
+            let v = e.fresh();
+            let _ = writeln!(out, "  {v} = load ptr, ptr {addr}");
+            let _ = writeln!(out, "  call void @starry_release(ptr {v})");
+            true
+        }
+        TyKind::Named(def, _) if matches!(e.lc.defs.get(def).kind, DefKind::Struct) => {
+            let fields = e.lc.defs.get(def).sig.fields.clone();
+            let mut released = false;
+            for (index, (_, fty)) in fields.iter().enumerate().rev() {
+                let fslot = slot + field_slot(e.lc, def, index) as i64;
+                released |= emit_env_release_value(e, out, fslot, *fty);
+            }
+            released
+        }
+        TyKind::Tuple(fields) => {
+            let total: i64 = fields.iter().map(|t| scalar_slots(e.lc, *t) as i64).sum();
+            let mut cursor = slot + total;
+            let mut released = false;
+            for fty in fields.iter().rev() {
+                cursor -= scalar_slots(e.lc, *fty) as i64;
+                released |= emit_env_release_value(e, out, cursor, *fty);
+            }
+            released
+        }
+        TyKind::Array(elem, len) => {
+            let es = scalar_slots(e.lc, elem).max(1) as i64;
+            let mut released = false;
+            for i in (0..len as i64).rev() {
+                released |= emit_env_release_value(e, out, slot + i * es, elem);
+            }
+            released
+        }
+        _ => false,
+    }
+}
 fn emit_instr(
     e: &mut FnEmit,
     pending: &mut Vec<(String, String)>,
@@ -1056,73 +1172,15 @@ fn emit_instr(
             let d = match (deinit, env_caps) {
                 (Some(d), _) => fun_name(e.lc, *d),
                 (None, Some(caps)) => {
-                    // S2/P2-3b-2/3：逐捕获槽走查——class 槽直接 release；
-                    // 可空 class 槽按 flag 分支（Some 才 release payload）；
-                    // 标量槽无动作。槽位游标 = scalar_slots 累计（fn=0）
-                    use irc::layout::{is_class, scalar_slots};
-                    let mut slot: i64 = 1;
-                    let mut ftxt = String::new();
-                    let mut has_release = false;
                     e.g.runtime_decls
                         .entry("starry_release".into())
                         .or_insert(("void".into(), "ptr".into()));
-                    for t in caps {
-                        let slots = scalar_slots(e.lc, *t) as i64;
-                        let class_cap = is_class(e.lc, *t);
-                        let nullable_class_cap = matches!(
-                            e.lc.tys.kind(*t),
-                            TyKind::Nullable(inner) if is_class(e.lc, *inner)
-                        );
-                        if class_cap {
-                            has_release = true;
-                            let addr = e.fresh();
-                            let _ = writeln!(
-                                ftxt,
-                                "  {} = getelementptr i8, ptr %env, i64 {}",
-                                addr,
-                                8 * slot
-                            );
-                            let v = e.fresh();
-                            let _ = writeln!(ftxt, "  {} = load ptr, ptr {}", v, addr);
-                            let _ = writeln!(ftxt, "  call void @starry_release(ptr {})", v);
-                        } else if nullable_class_cap {
-                            has_release = true;
-                            let flag_addr = e.fresh();
-                            let _ = writeln!(
-                                ftxt,
-                                "  {} = getelementptr i8, ptr %env, i64 {}",
-                                flag_addr,
-                                8 * slot
-                            );
-                            let flag = e.fresh();
-                            let _ = writeln!(ftxt, "  {} = load i8, ptr {}", flag, flag_addr);
-                            let payload_addr = e.fresh();
-                            let _ = writeln!(
-                                ftxt,
-                                "  {} = getelementptr i8, ptr %env, i64 {}",
-                                payload_addr,
-                                8 * (slot + 1)
-                            );
-                            let payload = e.fresh();
-                            let _ =
-                                writeln!(ftxt, "  {} = load ptr, ptr {}", payload, payload_addr);
-                            let cond = e.fresh();
-                            let _ = writeln!(ftxt, "  {} = icmp ne i8 {}, 0", cond, flag);
-                            let rel = e.fresh();
-                            let end = e.fresh();
-                            let _ = writeln!(
-                                ftxt,
-                                "  br i1 {}, label %{}, label %{}",
-                                cond,
-                                &rel[1..],
-                                &end[1..]
-                            );
-                            let _ = writeln!(ftxt, "{}:", &rel[1..]);
-                            let _ = writeln!(ftxt, "  call void @starry_release(ptr {})", payload);
-                            let _ = writeln!(ftxt, "  br label %{}", &end[1..]);
-                            let _ = writeln!(ftxt, "{}:", &end[1..]);
-                        }
-                        slot += slots;
+                    let mut slot: i64 = 1;
+                    let mut ftxt = String::new();
+                    let mut has_release = false;
+                    for ty in caps {
+                        has_release |= emit_env_release_value(e, &mut ftxt, slot, *ty);
+                        slot += scalar_slots(e.lc, *ty) as i64;
                     }
                     if !has_release {
                         "null".to_string()

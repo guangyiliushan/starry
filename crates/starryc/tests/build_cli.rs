@@ -1300,6 +1300,30 @@ fn class_i128_and_nullable_class_globals_e2e() {
 }
 
 #[test]
+fn aggregate_closure_captures_e2e() {
+    // WP6: struct/tuple/array env slots follow scalar_slots; borrowed ARC
+    // leaves retain at capture and release once with the closure env.
+    let Some(out) = build_and_run(
+        "aggregate_captures",
+        "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nstruct S(val c: C)\nfun call(f: () -> int): int {\n    return f()\n}\nfun main(): int {\n    val c = C(1)\n    val s = S(c)\n    val fs = { () -> s.c.x }\n    print(call(fs))\n    val t = (C(2), 20)\n    val ft = move { () -> t[0].x }\n    print(call(ft))\n    val a = [C(3)]\n    val fa = { () -> a[0].x }\n    print(call(fa))\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "1\n2\n3\n3\n2\n1\n");
+}
+
+#[test]
+fn lambda_it_and_move_forms_still_e2e() {
+    let Some(out) = build_and_run(
+        "lambda_it_move",
+        "fun apply(f: (int) -> int): int {\n    return f(7)\n}\nfun make(n: int): () -> int {\n    return move { () -> n * 2 }\n}\nfun main(): int {\n    print(apply({ it + 1 }))\n    print(make(9)())\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "8\n18\n");
+}
+
+#[test]
 fn fn_var_reassign_arc_e2e() {
     // P2-3b-2 收尾：Fn var 重赋值 = release 旧 box + retain/转移新值
     //（tag 分派）；class 捕获的 meta 释放照常平衡（deinit 一次）

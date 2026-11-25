@@ -492,5 +492,5 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   dyn/Self（trait 外）、宏调用展开（SemMacroExpansion）、
   open/abstract/sealed/override/operator、二级构造 init、protected。
 - **已实现**：alias（类型别名）、deinit（析构）、by（superitem 委托槽，
-  随继承实现）、it/move（lambda 推断/捕获）。
+  随继承实现）、it/move 形式（WP6 e2e；move 当前是捕获形式标记）。
 - 冻结预算：35 hard / 10 modifier / 8 slot = 53，不再减少（2026-11-25 删 `namespace`、`static`）。

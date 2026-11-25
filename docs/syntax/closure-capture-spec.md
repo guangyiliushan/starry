@@ -1,6 +1,6 @@
 # 闭包捕获规范（S2/P2-2，2026-11-10）
 
-状态：spec（P2-3 实现基准；前置 = closure-env-spike 决策记录 + 0.6 S2）
+状态：spec + WP6 实现（2026-11-25）。boxed env + 值捕获；struct/tuple/array/nullable/i128 均按 scalar_slots 展开。
 裁定：boxed env（`Fn` 保持 1 slot）+ 值捕获；不做借用捕获（S2/A′）
 
 ## 1. env box = ARC 对象（零新 runtime）
@@ -39,7 +39,7 @@ lambda 体引用的**外层局部名**（非形参、非全局）：
 |---|---|---|
 | 标量（int/float/bool/char/string/unit） | copy（按当前值快照） | 快照值 |
 | class（含 `?Class`） | retain +1，存对象指针 | 同一对象 |
-| 结构性聚合（struct/tuple/array/enum/range/nullable-聚合） | 逐槽 copy 到 box 槽 | 拷贝副本 |
+| 结构性聚合（struct/tuple/array/range/nullable-聚合） | 逐槽 copy 到 box 槽；ARC 叶借用 retain | 拷贝副本；enum ARC payload 稳定拒收 |
 | 顶层 `val` 全局 | **不捕获**——按名直读全局（地址稳定） | 全局当前值 |
 | 顶层 `var` 全局 | **稳定拒收**（SemUnsupportedConstruct） | — |
 | 外层 lambda 形参 | 同外层局部（标量 copy / class +1） | — |
@@ -105,6 +105,14 @@ lambda 体引用的**外层局部名**（非形参、非全局）：
   deinit meta 合成随 P2-3b（标量捕获先行时 alloc deinit=null，
   class 捕获暂缓——矩阵 #4/#11 归 P2-3b）。
 
+- **WP6（2026-11-25 已落地）**：env payload 改为
+  `sum(capture.scalar_slots)`；aggregate capture 先经
+  `emit_copy_value(Borrowed)` 做 ARC-leaf retain，再逐槽写入；lambda
+  体把 aggregate capture 物化为局部 slot block；llvme env releaser
+  递归处理 class/Fn/nullable/struct/tuple/array。enum ARC payload
+  捕获保持稳定拒收。e2e：struct/tuple/array capture、`it`、`move`
+  形式与 deinit 恰好一次。
+
 ## 6c. P2-3b-0 设计修正（2026-11-11，裁决表 Q4-a/Q5-a）
 
 ### 修正 1：表示 = tagged（裸 fn + box），非统一 boxed
@@ -141,12 +149,12 @@ fn_value_call 判别 Const::Fun → Indirect；Temp → Closure。
   meta = 环境释放器（class 捕获的 deinit 合成随 P2-3b 批次 2）
 - **Fn 类型字段/全局**：v1 拒收（聚合全局已拒；Fn 全局同纪律）
 
-### 修正 4：聚合拷贝缺 class retain（N2）→ v1 裁定：class 不进聚合容器
+### 修正 4（已被 WP1/WP6 超越）：聚合拷贝缺 class retain
 
-struct/tuple/array 聚合拷贝路径无字段级 ARC（裸指针拷贝 + 源 binding
-出口 release = UAF）。字段级 retain 涉及「转移 vs 借用」的逐调用点
-判定（nullable payload 转移不可 retain、构造/快照必须 retain）——
-2026-11-11 裁定：**v1 class 值不进聚合容器，三路稳定拒收**（struct
+2026-11-11 曾为避免 UAF 稳定拒收 class 进聚合容器。WP1 已实现
+type-directed aggregate ARC；WP6 将同一 `contains_arc` + `scalar_slots`
+模型用于闭包 env。当前 enum ARC payload 捕获仍稳定拒收，等待 env
+release 的 tag-aware CFG。
 字段 declare 侧、tuple/array 字面量 + array repeat sem 侧，含可空
 class 与 Fn 元素）；负测试 `class_in_aggregate_rejected`。字段级 ARC
 （含 struct 字段 release 面 = 结构化 drop glue）归后续切片设计。
