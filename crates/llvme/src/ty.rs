@@ -98,6 +98,14 @@ pub fn class_of(tys: &TyArena, defs: &DefArena, ty: TyId) -> TyClass {
 }
 
 /// 函数名编码 name_defid（防 Symbol 重名导致 LLVM 重定义）
+pub fn typeinfo_name(lc: &Lc, def: sem::DefId) -> String {
+    format!(
+        "@typeinfo.{}.{}",
+        sanitize(lc.interner.resolve(lc.defs.get(def).name)),
+        def.0
+    )
+}
+
 pub fn fun_name(lc: &Lc, def: sem::DefId) -> String {
     format!(
         "@{}.{}",

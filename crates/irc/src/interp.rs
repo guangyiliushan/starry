@@ -959,6 +959,7 @@ impl<'a> Machine<'a> {
                     // AllocClass trap，retain 不可达）
                     Callee::Runtime(RuntimeFn::Retain)
                     | Callee::Runtime(RuntimeFn::Release)
+                    | Callee::Runtime(RuntimeFn::ReleaseClass)
                     | Callee::Runtime(RuntimeFn::WeakRetain)
                     | Callee::Runtime(RuntimeFn::WeakDrop) => 0,
                     Callee::Runtime(RuntimeFn::WeakUpgrade) => {

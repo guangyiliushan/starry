@@ -49,6 +49,7 @@ pub fn emit_module(
         let id = g.str_id(sym);
         g.fun_str.insert(def, (id, name.len() + 1));
     }
+    let deinit_sym = interner.intern("deinit");
     let lc = Lc {
         tys,
         defs,
@@ -87,6 +88,46 @@ pub fn emit_module(
             "0"
         };
         let _ = writeln!(globals, "{} = global {} {}", name, storage_ty, zero);
+    }
+    // Phase 3a: one stable TypeInfo per class. The vtable field stays null
+    // until virtual dispatch is enabled; deinit is resolved from class members.
+    for (def_id, def) in defs.iter().enumerate() {
+        if !matches!(def.kind, DefKind::Class) {
+            continue;
+        }
+        let def_id = DefId(def_id as u32);
+        // D-019: a derived class without a user deinit inherits the nearest
+        // base deinit; a derived user deinit chains to that base in IRC.
+        let mut deinit = None;
+        let mut cursor = def_id;
+        while deinit.is_none() {
+            let Some(ms) = defs.get(cursor).member_scope else {
+                break;
+            };
+            deinit = defs
+                .iter()
+                .enumerate()
+                .find(|(_, candidate)| {
+                    candidate.scope == ms
+                        && candidate.name == deinit_sym
+                        && matches!(candidate.kind, DefKind::Fun)
+                })
+                .map(|(id, _)| DefId(id as u32));
+            let Some(base) = defs.get(cursor).sig.supertypes.first().copied() else {
+                break;
+            };
+            cursor = base;
+        }
+        let deinit_ptr = deinit
+            .map(|d| format!("ptr {}", fun_name(&lc, d)))
+            .unwrap_or_else(|| "ptr null".to_string());
+        let _ = writeln!(
+            globals,
+            "{} = private constant {{ ptr, ptr, i64, ptr }} {{ {}, ptr null, i64 {}, ptr null }}",
+            crate::ty::typeinfo_name(&lc, def_id),
+            deinit_ptr,
+            def_id.0
+        );
     }
     // Phase 2a: emit one fixed ABI vtable per registered impl.
     for vt in &tac.vtables {
@@ -888,7 +929,7 @@ fn emit_env_release_value(e: &mut FnEmit, out: &mut String, slot: i64, ty: TyId)
             );
             let v = e.fresh();
             let _ = writeln!(out, "  {v} = load ptr, ptr {addr}");
-            let _ = writeln!(out, "  call void @starry_release(ptr {v})");
+            let _ = writeln!(out, "  call void @starry_release_class(ptr {v})");
             true
         }
         TyKind::Fn(..) => {
@@ -912,7 +953,7 @@ fn emit_env_release_value(e: &mut FnEmit, out: &mut String, slot: i64, ty: TyId)
             );
             let v = e.fresh();
             let _ = writeln!(out, "  {v} = load ptr, ptr {addr}");
-            let _ = writeln!(out, "  call void @starry_release(ptr {v})");
+            let _ = writeln!(out, "  call void @starry_release_class(ptr {v})");
             true
         }
         TyKind::Named(def, _) if matches!(e.lc.defs.get(def).kind, DefKind::Struct) => {
@@ -1203,43 +1244,53 @@ fn emit_instr(
             dst,
             bytes,
             deinit,
+            type_info,
             env_caps,
             ty,
-            ..
         } => {
-            e.g.runtime_decls
-                .entry("starry_alloc_object".into())
-                .or_insert(("ptr".into(), "i64, ptr".into()));
             // S2/P2-3b-2：闭包 box（有 class 捕获）合成 env 释放函数——
-            // meta 逐 class 捕获槽 release（标量槽无动作）
-            let d = match (deinit, env_caps) {
-                (Some(d), _) => fun_name(e.lc, *d),
-                (None, Some(caps)) => {
-                    e.g.runtime_decls
-                        .entry("starry_release".into())
-                        .or_insert(("void".into(), "ptr".into()));
-                    let mut slot: i64 = 1;
-                    let mut ftxt = String::new();
-                    let mut has_release = false;
-                    for ty in caps {
-                        has_release |= emit_env_release_value(e, &mut ftxt, slot, *ty);
-                        slot += scalar_slots(e.lc, *ty) as i64;
-                    }
-                    if !has_release {
-                        "null".to_string()
-                    } else {
-                        e.g.env_release_n += 1;
-                        let name = format!("__closure_env_release.{}", e.g.env_release_n);
-                        let mut full = format!("define private void @{}(ptr %env) {{\n", name);
-                        full.push_str(&ftxt);
-                        let _ = writeln!(full, "  ret void");
-                        let _ = writeln!(full, "}}");
-                        let _ = writeln!(full);
-                        e.g.env_release_fns.push(full);
-                        format!("@{name}")
-                    }
+            // meta 逐 class 捕获槽 release（标量槽无动作）。Phase 3a classes
+            // instead use the typed allocation entry with a TypeInfo global.
+            let d = if let Some(caps) = env_caps {
+                e.g.runtime_decls
+                    .entry("starry_alloc_box".into())
+                    .or_insert(("ptr".into(), "i64, ptr".into()));
+                e.g.runtime_decls
+                    .entry("starry_release".into())
+                    .or_insert(("void".into(), "ptr".into()));
+                let mut slot: i64 = 1;
+                let mut ftxt = String::new();
+                let mut has_release = false;
+                for ty in caps {
+                    has_release |= emit_env_release_value(e, &mut ftxt, slot, *ty);
+                    slot += scalar_slots(e.lc, *ty) as i64;
                 }
-                _ => "null".to_string(),
+                if !has_release {
+                    "null".to_string()
+                } else {
+                    e.g.env_release_n += 1;
+                    let name = format!("__closure_env_release.{}", e.g.env_release_n);
+                    let mut full = format!("define private void @{}(ptr %env) {{\n", name);
+                    full.push_str(&ftxt);
+                    let _ = writeln!(full, "  ret void");
+                    let _ = writeln!(full, "}}");
+                    let _ = writeln!(full);
+                    e.g.env_release_fns.push(full);
+                    format!("@{name}")
+                }
+            } else if let Some(type_def) = type_info {
+                e.g.runtime_decls
+                    .entry("starry_alloc_object".into())
+                    .or_insert(("ptr".into(), "i64, ptr".into()));
+                crate::ty::typeinfo_name(e.lc, *type_def)
+            } else {
+                e.g.runtime_decls
+                    .entry("starry_alloc_object".into())
+                    .or_insert(("ptr".into(), "i64, ptr".into()));
+                match deinit {
+                    Some(d) => fun_name(e.lc, *d),
+                    None => "null".to_string(),
+                }
             };
             let v = e.fresh();
             let _ = writeln!(
@@ -1553,6 +1604,12 @@ fn emit_instr(
                         .entry("starry_release".into())
                         .or_insert(("void".into(), "ptr".into()));
                     ("@starry_release".to_string(), "void".to_string())
+                }
+                Callee::Runtime(RuntimeFn::ReleaseClass) => {
+                    e.g.runtime_decls
+                        .entry("starry_release_class".into())
+                        .or_insert(("void".into(), "ptr".into()));
+                    ("@starry_release_class".to_string(), "void".to_string())
                 }
                 Callee::Runtime(RuntimeFn::WeakRetain) => {
                     e.g.runtime_decls

@@ -90,9 +90,22 @@ pub enum Vis {
     Private,
 }
 
+/// Phase 3a inheritance/overriding flags. They are extracted once from the
+/// AST modifiers; downstream passes must not re-scan modifier lists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeclFlags {
+    pub open: bool,
+    pub abstract_: bool,
+    pub sealed: bool,
+    pub overrides: bool,
+    pub protected: bool,
+}
+
 /// 定义签名槽（各 kind 按需取用；单一结构避免按 kind 分型的抽象膨胀）
 #[derive(Debug, Clone)]
 pub struct DefSig {
+    /// D-019 class/method inheritance flags (default = final, non-virtual).
+    pub flags: DeclFlags,
     /// M5 slice 3：顶层声明可见性（默认 Pub）
     pub vis: Vis,
     /// M7 slice 2：类型形参默认值（declare 期在类型形参作用域 lower；
@@ -117,6 +130,7 @@ impl DefSig {
     pub fn new(unit: TyId, error: TyId) -> Self {
         Self {
             vis: Vis::Pub,
+            flags: DeclFlags::default(),
             tp_defaults: Vec::new(),
             tp_bounds: Vec::new(),
             supertypes: Vec::new(),

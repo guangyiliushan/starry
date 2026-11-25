@@ -625,14 +625,26 @@ fn vis_of(decl: &DeclNode, st: &mut SemState) -> crate::def::Vis {
 /// P0 compiler trust：无实现路径的修饰词在声明点稳定拒收。
 /// public/private/internal/weak 有语义；protected 由 vis_of/class 成员
 /// 路径单独处理；其余一律拒收，杜绝静默接受。
+fn decl_flags(mods: &[ast::syntax::modifier::Modifier]) -> crate::def::DeclFlags {
+    use ast::token::ModifierWord;
+    let mut flags = crate::def::DeclFlags::default();
+    for m in mods {
+        match m.word {
+            ModifierWord::Open => flags.open = true,
+            ModifierWord::Abstract => flags.abstract_ = true,
+            ModifierWord::Sealed => flags.sealed = true,
+            ModifierWord::Override => flags.overrides = true,
+            ModifierWord::Protected => flags.protected = true,
+            _ => {}
+        }
+    }
+    flags
+}
+
 fn reject_unsupported_modifiers(mods: &[ast::syntax::modifier::Modifier], st: &mut SemState) {
     use ast::token::ModifierWord;
     for m in mods {
         let msg: &'static str = match m.word {
-            ModifierWord::Open => "open classes are not supported in v1",
-            ModifierWord::Abstract => "abstract classes are not supported in v1",
-            ModifierWord::Sealed => "sealed classes are not supported in v1",
-            ModifierWord::Override => "override is not supported in v1",
             ModifierWord::OperatorWord => "operator declarations are not supported in v1",
             _ => continue,
         };
@@ -1024,12 +1036,22 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
             if let Some(slot) = st.decl_def.last_mut() {
                 *slot = Some(def);
             }
-            // R4：v1 class 默认 final——继承语法稳定拒收（trait 继承同纪律）
-            if !c.supertypes.is_empty() {
+            st.defs.get_mut(def).sig.flags = decl_flags(&c.modifiers.modifiers);
+            if c.supertypes
+                .iter()
+                .any(|super_item| super_item.by.is_some())
+            {
                 st.diags.emit(Diagnostic::error(
                     DiagCode::SemUnsupportedConstruct,
                     decl.span,
-                    "class inheritance is not supported in this slice (v1 classes are final)",
+                    "class delegation (`by`) is not supported in Phase 3a",
+                ));
+            }
+            if c.supertypes.len() > 1 {
+                st.diags.emit(Diagnostic::error(
+                    DiagCode::SemUnsupportedConstruct,
+                    decl.span,
+                    "class inheritance supports at most one supertype",
                 ));
             }
             let ms = st.scopes.new_scope(Some(scope));
@@ -1658,6 +1680,63 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                 // 字段与默认值在 slice 1 拒收，保字段寻址的 8B 槽模型）
                 let Some(class_def) = item_def else { continue };
                 let dsc = st.defs.get(class_def).scope;
+                // Phase 3a: resolve the single class supertype only after every
+                // nominal declaration exists; cycles and final bases are
+                // rejected at declaration phase, not left to codegen.
+                if let Some(super_item) = c.supertypes.first() {
+                    st.in_impl_header = true;
+                    let base_ty = lower_ty(st, dsc, &super_item.ty);
+                    st.in_impl_header = false;
+                    let TyKind::Named(base_def, _) = st.tys.kind(base_ty) else {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemTypeMismatch,
+                            super_item.ty.span,
+                            "class supertype must name a class",
+                        ));
+                        continue;
+                    };
+                    let base_def = *base_def;
+                    if !matches!(st.defs.get(base_def).kind, DefKind::Class) {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemTypeMismatch,
+                            super_item.ty.span,
+                            "class supertype must name a class",
+                        ));
+                        continue;
+                    }
+                    if !st.defs.get(base_def).sig.flags.open {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnsupportedConstruct,
+                            super_item.ty.span,
+                            "cannot inherit a final class; mark the base `open`",
+                        ));
+                    }
+                    if super_item.args.is_none() {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnsupportedConstruct,
+                            super_item.ty.span,
+                            "class inheritance requires base constructor arguments",
+                        ));
+                    }
+                    let mut chain = vec![class_def];
+                    let mut cursor = base_def;
+                    loop {
+                        if chain.contains(&cursor) {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemTypeCycle,
+                                super_item.ty.span,
+                                "class inheritance cycle",
+                            ));
+                            break;
+                        }
+                        chain.push(cursor);
+                        let Some(next) = st.defs.get(cursor).sig.supertypes.first().copied() else {
+                            break;
+                        };
+                        cursor = next;
+                    }
+                    st.defs.get_mut(class_def).sig.supertypes = vec![base_def];
+                }
                 let mut fields: Vec<(Symbol, TyId)> = Vec::new();
                 if let Some(pc) = &c.primary_ctor {
                     for p in &pc.params {
@@ -1721,10 +1800,78 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                         };
                         let defaults: Vec<bool> =
                             f.params.iter().map(|p| p.default.is_some()).collect();
+                        let flags = decl_flags(&f.modifiers.modifiers);
+                        let base_method = st
+                            .defs
+                            .get(class_def)
+                            .sig
+                            .supertypes
+                            .first()
+                            .copied()
+                            .and_then(|base| member_lookup(st, base, f.name));
+                        if flags.overrides {
+                            let Some(base_fd) = base_method else {
+                                st.diags.emit(Diagnostic::error(
+                                    DiagCode::SemUnknownMember,
+                                    d.span,
+                                    format!(
+                                        "override `{}` has no inherited method",
+                                        st.interner.resolve(f.name)
+                                    ),
+                                ));
+                                return;
+                            };
+                            if base_fd == fd {
+                                st.diags.emit(Diagnostic::error(
+                                    DiagCode::SemDuplicateDef,
+                                    d.span,
+                                    "method overrides itself",
+                                ));
+                                return;
+                            }
+                            let base_sig = &st.defs.get(base_fd).sig;
+                            let same_shape = base_sig.params.len() == params.len()
+                                && base_sig
+                                    .params
+                                    .iter()
+                                    .zip(params.iter())
+                                    .all(|((_, a), (_, b))| a == b)
+                                && base_sig.ret == ret;
+                            if !same_shape {
+                                st.diags.emit(Diagnostic::error(
+                                    DiagCode::SemTypeMismatch,
+                                    d.span,
+                                    format!(
+                                        "override `{}` does not match the inherited signature",
+                                        st.interner.resolve(f.name)
+                                    ),
+                                ));
+                            }
+                            if !base_sig.flags.open {
+                                st.diags.emit(Diagnostic::error(
+                                    DiagCode::SemUnsupportedConstruct,
+                                    d.span,
+                                    format!(
+                                        "cannot override non-open method `{}`",
+                                        st.interner.resolve(f.name)
+                                    ),
+                                ));
+                            }
+                        } else if base_method.is_some() {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemDuplicateDef,
+                                d.span,
+                                format!(
+                                    "method `{}` hides an inherited method; write `override`",
+                                    st.interner.resolve(f.name)
+                                ),
+                            ));
+                        }
                         let sig = &mut st.defs.get_mut(fd).sig;
                         sig.params = params;
                         sig.ret = ret;
                         sig.param_defaults = defaults;
+                        sig.flags = flags;
                     }
                 }
             }
@@ -2211,6 +2358,13 @@ pub(crate) fn member_lookup(st: &SemState, def: DefId, name: Symbol) -> Option<D
     // 别名归一：`type F = E` 的 F.A 按 E.A 解析（值位置已由 def_value_ty 归一）
     let def = st.defs.get(def).alias_resolved.unwrap_or(def);
     let ms = st.defs.get(def).member_scope?;
-    let found = st.scopes.lookup_local(ms, name)?;
-    expand_import(st, found)
+    if let Some(found) = st.scopes.lookup_local(ms, name) {
+        return expand_import(st, found);
+    }
+    // D-019: inherited class members resolve along the single base chain.
+    let base = st.defs.get(def).sig.supertypes.first().copied()?;
+    if !matches!(st.defs.get(base).kind, DefKind::Class) {
+        return None;
+    }
+    member_lookup(st, base, name)
 }

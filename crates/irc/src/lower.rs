@@ -326,7 +326,7 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
                         continue;
                     };
                     let mut ctx = Ctx::new(sem, source, i8_ty, &globals, &skipped);
-                    ctx.lower_deinit(b, mdef);
+                    ctx.lower_deinit(b, mdef, class_def);
                     out.diags.append(&mut ctx.diags);
                     out.funs.push(ctx.fun);
                     out.funs.append(&mut ctx.extra_funs);
@@ -823,7 +823,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
     }
 
     /// M4 slice 2b：deinit lowering——只有 self 一个形参，返回 unit
-    fn lower_deinit(&mut self, body: &Block, mdef: DefId) {
+    fn lower_deinit(&mut self, body: &Block, mdef: DefId, class_def: DefId) {
         let class_ty = self.sem.defs.get(mdef).sig.ty;
         self.fun.def = mdef;
         self.fun.ret = self.sem.tys.unit;
@@ -836,9 +836,40 @@ impl<'r, 'a> Ctx<'r, 'a> {
         let self_name = self.sem.interner.intern("self");
         self.env[0].insert(self_name, (Place::Temp(self_t), class_ty));
         let tail = self.lower_block(body);
+        // D-019: derived user deinit always chains to the nearest base deinit
+        // before ARC releases the object. If a class has no user deinit,
+        // TypeInfo inherits the base function directly.
+        let base_def = self
+            .sem
+            .defs
+            .get(class_def)
+            .sig
+            .supertypes
+            .first()
+            .copied()
+            .filter(|base| {
+                *base != mdef && matches!(self.sem.defs.get(*base).kind, DefKind::Class)
+            });
+        if let Some(base_def) = base_def
+            && let Some(base_deinit) = self.sem.defs.get(base_def).member_scope.and_then(|ms| {
+                self.sem
+                    .scopes
+                    .lookup_local(ms, self.sem.interner.intern("deinit"))
+            })
+        {
+            let base_ty = self.sem.env_ref_ty;
+            self.emit(Instr::Param {
+                a: Operand::Temp(self_t),
+                ty: base_ty,
+            });
+            self.emit(Instr::Call {
+                dst: None,
+                callee: Callee::Def(base_deinit),
+                ty: self.sem.tys.unit,
+            });
+        }
         self.finish_fun(tail, None);
     }
-
     fn lower_fun(&mut self, def: DefId) {
         let Some(decl) = self.find_fun_decl(def) else {
             self.diag(
@@ -2115,7 +2146,7 @@ impl<'r, 'a> Ctx<'r, 'a> {
             }
             TyKind::Dyn(..) => {
                 let data = crate::expr::load_slot(self, base, off, self.sem.tys.ptr);
-                self.emit_operand_release(data, self.sem.tys.ptr, false);
+                self.emit_operand_release(data, ty, false);
             }
             TyKind::Named(def, _) if matches!(self.sem.defs.get(*def).kind, DefKind::Enum) => {
                 if !crate::expr::contains_arc(self, ty) {
@@ -2230,8 +2261,13 @@ impl<'r, 'a> Ctx<'r, 'a> {
             ty
         };
         self.emit(Instr::Param { a: op, ty: pty });
+        let is_object = crate::layout::is_class(self, ty)
+            || matches!(self.sem.tys.kind(ty), TyKind::Dyn(..))
+            || matches!(self.sem.tys.kind(ty), TyKind::Nullable(inner) if crate::layout::is_class(self, *inner));
         let rt = if weak {
             crate::tac::RuntimeFn::WeakDrop
+        } else if is_object {
+            crate::tac::RuntimeFn::ReleaseClass
         } else {
             crate::tac::RuntimeFn::Release
         };

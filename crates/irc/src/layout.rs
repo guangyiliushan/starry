@@ -186,12 +186,38 @@ pub fn slot_ty(v: &impl LayoutView, ty: TyId, slot: usize) -> TyId {
     }
 }
 
-/// struct 字段的槽偏移（前序字段槽数和）
-pub fn field_slot(v: &impl LayoutView, def: DefId, index: usize) -> usize {
-    v.defs().get(def).sig.fields[..index]
+/// D-019: total scalar slots in [base fields][derived fields].
+pub fn class_payload_slots(v: &impl LayoutView, def: DefId) -> usize {
+    let own: usize = v
+        .defs()
+        .get(def)
+        .sig
+        .fields
         .iter()
         .map(|(_, t)| scalar_slots(v, *t))
-        .sum()
+        .sum();
+    match class_base(v, def) {
+        Some(base) => class_payload_slots(v, base) + own,
+        None => own,
+    }
+}
+
+/// D-019: the direct class supertype, when inheritance is enabled.
+fn class_base(v: &impl LayoutView, def: DefId) -> Option<DefId> {
+    let base = v.defs().get(def).sig.supertypes.first().copied()?;
+    matches!(v.defs().get(base).kind, DefKind::Class).then_some(base)
+}
+
+/// struct 字段的槽偏移；派生 class 先加上 base 字段前缀。
+pub fn field_slot(v: &impl LayoutView, def: DefId, index: usize) -> usize {
+    let local = v.defs().get(def).sig.fields[..index]
+        .iter()
+        .map(|(_, t)| scalar_slots(v, *t))
+        .sum();
+    match class_base(v, def) {
+        Some(base) => class_payload_slots(v, base) + local,
+        None => local,
+    }
 }
 
 /// enum 变体的第 i 个形参的槽偏移（变体 payload 内，不含 tag 槽）
@@ -223,6 +249,25 @@ pub enum MemberRes {
     Variant { parent: DefId, index: usize },
 }
 
+fn resolve_class_member(
+    v: &impl LayoutView,
+    def: DefId,
+    name: ast::interner::Symbol,
+) -> Option<MemberRes> {
+    if let Some(index) = v
+        .defs()
+        .get(def)
+        .sig
+        .fields
+        .iter()
+        .position(|(n, _)| *n == name)
+    {
+        return Some(MemberRes::Field { parent: def, index });
+    }
+    let base = class_base(v, def)?;
+    resolve_class_member(v, base, name)
+}
+
 /// 按名解析类型成员。sem v1 不公开字段/变体的 expr_def 侧表——命名类型
 /// 的成员名在 def 签名内唯一，本地解析与 sem 的 member_lookup 等价。
 /// 类型别名经 `Def.alias_resolved` 预解析目标（sem 四轮回修产物）。
@@ -244,7 +289,7 @@ pub fn resolve_member(
         def = v.defs().get(def).alias_resolved?;
     }
     match &v.defs().get(def).kind {
-        DefKind::Struct | DefKind::Class => v
+        DefKind::Struct => v
             .defs()
             .get(def)
             .sig
@@ -252,6 +297,19 @@ pub fn resolve_member(
             .iter()
             .position(|(n, _)| *n == name)
             .map(|index| MemberRes::Field { parent: def, index }),
+        DefKind::Class => {
+            if let Some(index) = v
+                .defs()
+                .get(def)
+                .sig
+                .fields
+                .iter()
+                .position(|(n, _)| *n == name)
+            {
+                return Some(MemberRes::Field { parent: def, index });
+            }
+            resolve_class_member(v, class_base(v, def)?, name)
+        }
         DefKind::Enum => v
             .defs()
             .get(def)

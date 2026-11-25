@@ -22,6 +22,24 @@ fn assignable_with_unsize(st: &mut SemState, from: TyId, to: TyId) -> bool {
     if st.tys.assignable(from, to) {
         return true;
     }
+    // D-019: derived and base class values share the same object pointer.
+    // Upcasts are a no-op at the ABI level and are allowed at every normal
+    // assignment/coercion point, never through generic substitutions.
+    if let (TyKind::Named(from_def, from_args), TyKind::Named(to_def, to_args)) =
+        (st.tys.kind(from), st.tys.kind(to))
+        && from_args.is_empty()
+        && to_args.is_empty()
+        && matches!(st.defs.get(*from_def).kind, DefKind::Class)
+        && matches!(st.defs.get(*to_def).kind, DefKind::Class)
+    {
+        let mut cursor = *from_def;
+        while let Some(base) = st.defs.get(cursor).sig.supertypes.first().copied() {
+            if base == *to_def {
+                return true;
+            }
+            cursor = base;
+        }
+    }
     // Unwrap ?dyn and optional class roots, then require a monomorphic
     // trait and a concrete class payload.
     let to_inner = match st.tys.kind(to) {
@@ -88,6 +106,46 @@ pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
                 let Some(class_def) = st.decl_def.get(i).copied().flatten() else {
                     continue;
                 };
+                // D-019: check base initializer expressions in the exact
+                // constructor-parameter scope installed by resolve.
+                if let Some(super_item) = c.supertypes.first()
+                    && let Some(args) = &super_item.args
+                {
+                    let _scope = st
+                        .node_scope
+                        .get(item.id)
+                        .copied()
+                        .unwrap_or_else(|| st.defs.get(class_def).scope);
+                    let base_def = st.defs.get(class_def).sig.supertypes.first().copied();
+                    let params = base_def
+                        .map(|def| st.defs.get(def).sig.params.clone())
+                        .unwrap_or_default();
+                    for (index, arg) in args.iter().enumerate() {
+                        let target = match arg.name {
+                            Some(name) => params
+                                .iter()
+                                .find(|(param, _)| *param == name)
+                                .map(|(_, ty)| *ty),
+                            None => params.get(index).map(|(_, ty)| *ty),
+                        };
+                        let Some(target) = target else {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemUnknownParam,
+                                arg.value.span,
+                                "base constructor argument has no matching parameter".to_string(),
+                            ));
+                            type_expr(&arg.value, st, true);
+                            continue;
+                        };
+                        let value = type_expr(&arg.value, st, true);
+                        retype_binary_literals(&arg.value, target, st);
+                        retype_integer_literal(&arg.value, target, st);
+                        let value = st.expr_ty.get(arg.value.id).copied().unwrap_or(value);
+                        if !assignable_with_unsize(st, value, target) {
+                            mismatch(st, arg.value.span);
+                        }
+                    }
+                }
                 for member in &c.members {
                     match member {
                         ast::syntax::decl::ClassMember::Declaration(d)
@@ -912,7 +970,7 @@ fn member_field_ty_ex(
                     None
                 }
             },
-            DefKind::Struct | DefKind::Class => {
+            DefKind::Struct => {
                 let fields = st.defs.get(def).sig.fields.clone();
                 match fields.iter().find(|(n, _)| *n == name) {
                     Some((_, t)) => Some(*t),
@@ -927,6 +985,35 @@ fn member_field_ty_ex(
                         None
                     }
                 }
+            }
+            DefKind::Class => {
+                let mut cursor = def;
+                loop {
+                    if let Some((_, field_ty)) = st
+                        .defs
+                        .get(cursor)
+                        .sig
+                        .fields
+                        .iter()
+                        .find(|(n, _)| *n == name)
+                    {
+                        break Some(*field_ty);
+                    }
+                    let Some(base) = st.defs.get(cursor).sig.supertypes.first().copied() else {
+                        break None;
+                    };
+                    cursor = base;
+                }
+                .or_else(|| {
+                    if diagnose {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnknownMember,
+                            span,
+                            format!("unknown field `{}`", st.interner.resolve(name)),
+                        ));
+                    }
+                    None
+                })
             }
             _ => {
                 if diagnose {

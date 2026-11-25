@@ -1796,13 +1796,15 @@ fn p0_rejects_vararg_modifier() {
 }
 
 #[test]
-fn p0_rejects_open_abstract_sealed_override() {
-    assert_has("open class C {\n}", DiagCode::SemUnsupportedConstruct);
-    assert_has("abstract class C {\n}", DiagCode::SemUnsupportedConstruct);
-    assert_has("sealed class C {\n}", DiagCode::SemUnsupportedConstruct);
+fn p0_rejects_misplaced_inheritance_modifiers() {
+    // D-019 now accepts these on classes/methods; misuse gets precise codes.
     assert_has(
         "class C {\n    override fun f(): int {\n        return 0\n    }\n}",
-        DiagCode::SemUnsupportedConstruct,
+        DiagCode::SemUnknownMember,
+    );
+    assert_has(
+        "open class B {\n}\nclass C: B(1) {\n}",
+        DiagCode::SemUnknownParam,
     );
 }
 

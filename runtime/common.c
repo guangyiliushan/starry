@@ -263,15 +263,32 @@ void starry_overflow_panic(signed char op, const char *fun) {
 }
 
 /* M4 slice 1：class 对象 + ARC 头（R3 线程本地非原子）。
- * header 布局定案 24B：strong / weak / meta(deinit 派发)。
- * payload 紧跟 header；字段槽全 i64（i128 class 字段 slice 1 拒收）。 */
+ * header 布局定案 24B：strong / weak / meta。Phase 3a 中 class meta 是
+ * TypeInfo*；闭包 box 继续使用裸 deinit 回调并经 alloc_box 分配。 */
+typedef struct StarryTypeInfo StarryTypeInfo;
+struct StarryTypeInfo {
+    void (*deinit)(void *);
+    void *vtable;
+    unsigned long long type_id;
+    StarryTypeInfo *parent;
+};
+
 typedef struct StarryArcHdr {
     long long strong;
     long long weak;
     void *meta;
 } StarryArcHdr;
 
-void *starry_alloc_object(unsigned long long payload_bytes, void (*deinit)(void *)) {
+void *starry_alloc_object(unsigned long long payload_bytes, StarryTypeInfo *type_info) {
+    SIZE_T total = sizeof(StarryArcHdr) + payload_bytes;
+    StarryArcHdr *h = (StarryArcHdr *)rt_alloc(total);
+    h->strong = 1;
+    h->weak = 0;
+    h->meta = (void *)type_info;
+    return h + 1;
+}
+
+void *starry_alloc_box(unsigned long long payload_bytes, void (*deinit)(void *)) {
     SIZE_T total = sizeof(StarryArcHdr) + payload_bytes;
     StarryArcHdr *h = (StarryArcHdr *)rt_alloc(total);
     h->strong = 1;
@@ -290,9 +307,18 @@ void starry_release(void *p) {
     if (!p) return;
     h = (StarryArcHdr *)p - 1;
     if (--h->strong == 0) {
-        /* meta = deinit 函数指针；末引用先回调再释放（weak>0 时 header
-         * 延迟释放） */
+        /* meta is a raw deinit for closure boxes and a TypeInfo* for classes. */
         if (h->meta) (*(void (*)(void *))h->meta)(p);
+        if (h->weak == 0) rt_free(h);
+    }
+}
+void starry_release_class(void *p) {
+    StarryArcHdr *h;
+    if (!p) return;
+    h = (StarryArcHdr *)p - 1;
+    if (--h->strong == 0) {
+        StarryTypeInfo *ti = (StarryTypeInfo *)h->meta;
+        if (ti && ti->deinit) ti->deinit(p);
         if (h->weak == 0) rt_free(h);
     }
 }

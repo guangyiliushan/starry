@@ -39,6 +39,47 @@ pub(crate) fn run_from(ast: &SourceFile, st: &mut SemState, start: usize) {
                 };
                 let self_ty = st.tys.builtin_named(class_def);
                 let self_name = st.interner.intern("self");
+                // D-019: base initializer expressions are checked in the
+                // derived primary-constructor parameter scope. Keep this scope
+                // on node_scope so check uses exactly the same lexical view.
+                let ctor_scope = st.scopes.new_scope(Some(st.defs.get(class_def).scope));
+                if let Some(pc) = &c.primary_ctor {
+                    let sig_params = st.defs.get(class_def).sig.params.clone();
+                    for p in &pc.params {
+                        let ty = sig_params
+                            .iter()
+                            .find(|(n, _)| *n == p.name)
+                            .map(|(_, ty)| *ty)
+                            .unwrap_or(st.tys.unknown);
+                        let binding = st.defs.push(Def {
+                            kind: DefKind::LocalBinding {
+                                mutable: false,
+                                weak: false,
+                            },
+                            name: p.name,
+                            scope: ctor_scope,
+                            span: item.span,
+                            sig: DefSig::new(st.tys.unit, st.tys.unknown),
+                            resolving: false,
+                            alias_of: None,
+                            alias_resolved: None,
+                            member_scope: None,
+                            external: false,
+                            ty_params: 0,
+                            decl: None,
+                        });
+                        st.defs.get_mut(binding).sig.ty = ty;
+                        st.scopes.insert(ctor_scope, p.name, binding);
+                    }
+                }
+                st.node_scope.set(item.id, ctor_scope);
+                if let Some(super_item) = c.supertypes.first()
+                    && let Some(args) = &super_item.args
+                {
+                    for arg in args {
+                        resolve_expr(&arg.value, st, ctor_scope);
+                    }
+                }
                 for member in &c.members {
                     match member {
                         ClassMember::Declaration(d) if matches!(&d.kind, DeclKind::Fun(_)) => {

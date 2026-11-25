@@ -203,6 +203,7 @@ fn lambda_lower(ctx: &mut Ctx, e: &ExprWrap, lparams: &LambdaParams, lbody: &Blo
         dst: box_t,
         bytes: crate::expr::ARC_HEADER_BYTES + (1 + total_slots as i64) * 8,
         deinit: None,
+        type_info: None,
         env_caps: has_arc_cap.then(|| caps.iter().map(|(_, t)| *t).collect()),
         ty: fn_ty,
     });
@@ -1059,77 +1060,137 @@ pub(crate) fn class_field_addr(ctx: &mut Ctx, obj: TempId, parent: DefId, index:
 /// 构造者持 strong=1；槽机同 struct_ctor（位置/命名实参）。
 fn class_ctor(ctx: &mut Ctx, e: &ExprWrap, def: DefId, args: &[CallArg]) -> Operand {
     let fields = ctx.sem.defs.get(def).sig.fields.clone();
-    let payload = fields.len() as i64 * 8;
+    let payload = crate::layout::class_payload_slots(ctx, def) as i64 * 8;
     let obj = ctx.temp();
-    // M4 slice 2b：deinit 派发——class 带 deinit 成员时把函数指针
-    // 塞进 header meta（release 末引用时回调）；无则 null
-    let deinit = ctx.sem.defs.get(def).member_scope.and_then(|ms| {
-        ctx.sem
-            .scopes
-            .lookup_local(ms, ctx.sem.interner.intern("deinit"))
-    });
     let obj_ty = ctx.expr_ty(e);
     ctx.emit(Instr::AllocClass {
         dst: obj,
         bytes: ARC_HEADER_BYTES + payload,
-        deinit,
+        deinit: None,
+        type_info: Some(def),
         env_caps: None,
         ty: obj_ty,
     });
-    // 主构造槽机：sig.params（头参数全量，含仅构造参数）；字段参数落
-    // payload，仅构造参数求值后丢弃（M3 纪律）
+    // Bind primary-constructor parameters before evaluating the base call:
+    // `: Base(a * 2)` is a declaration-site expression over those params.
     let ctor_params = ctx.sem.defs.get(def).sig.params.clone();
-    let slot_of = |name| fields.iter().position(|(n, _)| *n == name);
     let mut slots: Vec<Option<Operand>> = vec![None; ctor_params.len()];
-    let mut bad = false;
     for (i, arg) in args.iter().enumerate() {
         let idx = match arg.name {
-            Some(n) => match ctor_params.iter().position(|(s, _)| *s == n) {
-                Some(p) => p,
-                None => {
-                    ctx.diag(
-                        e.span,
-                        "named arg has no parameter (SemUnknownParam missed)",
-                    );
-                    bad = true;
-                    continue;
-                }
-            },
+            Some(n) => ctor_params.iter().position(|(s, _)| *s == n).unwrap_or(i),
             None => i,
         };
         if idx >= slots.len() || slots[idx].is_some() {
-            ctx.diag(e.span, "ctor arg slot conflict (SemArityMismatch missed)");
-            bad = true;
+            ctx.diag(e.span, "ctor arg slot mismatch (sem invariant)");
             continue;
         }
+        let to = ctor_params[idx].1;
         let v = lower_expr(ctx, &arg.value);
-        slots[idx] = Some(coerce(ctx, v, ctx.expr_ty(&arg.value), ctor_params[idx].1));
+        slots[idx] = Some(coerce(ctx, v, ctx.expr_ty(&arg.value), to));
     }
-    if !bad {
-        for s in &slots {
-            if s.is_none() {
-                ctx.diag(e.span, "missing ctor arg (SemArityMismatch missed)");
+    for slot in slots.iter() {
+        if slot.is_none() {
+            ctx.diag(e.span, "missing ctor arg (sem invariant)");
+        }
+    }
+    ctx.env_push();
+    for (idx, value) in slots.iter().enumerate() {
+        let Some(value) = value else { continue };
+        let place = match *value {
+            Operand::Temp(t) => Place::Temp(t),
+            Operand::Const(_) => {
+                let t = ctx.temp();
+                ctx.emit(Instr::Copy {
+                    dst: t,
+                    src: value.clone(),
+                    ty: ctor_params[idx].1,
+                });
+                Place::Temp(t)
+            }
+        };
+        ctx.env_top()
+            .insert(ctor_params[idx].0, (place, ctor_params[idx].1));
+    }
+
+    // D-019: base fields form the payload prefix and initialize first.
+    let base_def = ctx.sem.defs.get(def).sig.supertypes.first().copied();
+    if let Some(base_def) = base_def
+        && matches!(ctx.sem.defs.get(base_def).kind, DefKind::Class)
+    {
+        let super_args: Vec<CallArg> = ctx
+            .sem
+            .defs
+            .get(def)
+            .decl
+            .and_then(|index| ctx.sem.source.items.get(index))
+            .and_then(|item| match &item.kind {
+                ast::syntax::decl::DeclKind::Class(class) => class
+                    .supertypes
+                    .first()
+                    .and_then(|super_item| super_item.args.as_ref().map(|args| args.to_vec())),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let base_params = ctx.sem.defs.get(base_def).sig.params.clone();
+        let base_fields = ctx.sem.defs.get(base_def).sig.fields.clone();
+        eprintln!(
+            "DEBUG name0={:?} kind0={:?}",
+            base_params
+                .first()
+                .map(|(s, _)| ctx.sem.interner.resolve(*s)),
+            base_params.first().map(|(_, t)| ctx.sem.tys.kind(*t))
+        );
+        let mut base_slots: Vec<Option<Operand>> = vec![None; base_params.len()];
+        for (i, arg) in super_args.iter().enumerate() {
+            let idx = match arg.name {
+                Some(n) => base_params.iter().position(|(s, _)| *s == n).unwrap_or(i),
+                None => i,
+            };
+            if idx >= base_slots.len() || base_slots[idx].is_some() {
+                ctx.diag(e.span, "base ctor arg slot mismatch (sem invariant)");
+                continue;
+            }
+            let to = base_params[idx].1;
+            let v = lower_expr(ctx, &arg.value);
+            base_slots[idx] = Some(coerce(ctx, v, ctx.expr_ty(&arg.value), to));
+        }
+        for (idx, value) in base_slots.into_iter().enumerate() {
+            let Some(value) = value else {
+                ctx.diag(e.span, "missing base ctor arg (sem invariant)");
+                continue;
+            };
+            if let Some(fidx) = base_fields
+                .iter()
+                .position(|(n, _)| *n == base_params[idx].0)
+            {
+                let addr = class_field_addr(ctx, obj, base_def, fidx);
+                ctx.emit(Instr::StorePtr {
+                    ptr: addr,
+                    src: value,
+                    ty: base_fields[fidx].1,
+                });
             }
         }
     }
-    for (idx, v) in slots.into_iter().enumerate() {
-        if let Some(v) = v
-            && let Some(fidx) = slot_of(ctor_params[idx].0)
-        {
+
+    // Store derived fields after base initialization. Constructor-only params
+    // are evaluated but intentionally leave no payload slot.
+    let slot_of = |name| fields.iter().position(|(n, _)| *n == name);
+    for (idx, value) in slots.into_iter().enumerate() {
+        let Some(value) = value else { continue };
+        if let Some(fidx) = slot_of(ctor_params[idx].0) {
             let addr = class_field_addr(ctx, obj, def, fidx);
             ctx.emit(Instr::StorePtr {
                 ptr: addr,
-                src: v,
+                src: value,
                 ty: fields[fidx].1,
             });
         }
     }
-    // M4 slice 4b (Plan C): ctor result is a +1 temp (consumers take;
-    // otherwise released at statement end)
+    ctx.env_pop();
     ctx.note_stmt_temp(obj, obj_ty);
     Operand::Temp(obj)
 }
-
 /// 逐槽拷贝（带跨槽类型转换）：源值（类型 src_ty，位于 src 基址的
 /// src_off 槽处）的第 s 槽经 coerce 写入 dst[dst_off+s]。slot_ty 的
 /// 下标是值类型内部下标，与基址偏移无关（off 只参与 Load/Store 的

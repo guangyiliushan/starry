@@ -106,6 +106,8 @@ pub enum RuntimeFn {
     Retain,
     /// M4 slice 1: ARC release (ptr -> void; frees on last)
     Release,
+    /// ARC release for TypeInfo-bearing class objects.
+    ReleaseClass,
     /// M4 slice 3: ARC weak retain (ptr -> ptr; weak++)
     WeakRetain,
     /// M4 slice 3: ARC weak drop (ptr -> void; weak--, frees when both 0)
@@ -189,6 +191,8 @@ pub enum Instr {
         dst: TempId,
         bytes: i64,
         deinit: Option<DefId>,
+        /// Phase 3a: class allocations point at the type's TypeInfo global.
+        type_info: Option<sem::DefId>,
         /// S2/P2-3b-2：闭包 box 的捕获类型表（按源码序；仅闭包 box 填写）
         /// ——llvme 据此合成 env 释放函数（meta 回调逐 class 捕获 release）
         env_caps: Option<Vec<TyId>>,
@@ -530,11 +534,18 @@ impl TacOutput {
                 let _ = writeln!(out);
             }
             Instr::AllocClass {
-                dst, bytes, deinit, ..
+                dst,
+                bytes,
+                deinit,
+                type_info,
+                ..
             } => {
                 let _ = write!(out, "%t{} = allocclass {}", dst.0, bytes);
                 if let Some(d) = deinit {
                     let _ = write!(out, " deinit.{}", d.0);
+                }
+                if let Some(t) = type_info {
+                    let _ = write!(out, " typeinfo.{}", t.0);
                 }
                 let _ = writeln!(out);
             }
@@ -568,6 +579,7 @@ impl TacOutput {
                     Callee::Runtime(RuntimeFn::Print) => "starry_print".to_string(),
                     Callee::Runtime(RuntimeFn::PrintChar) => "starry_print_char".to_string(),
                     Callee::Runtime(RuntimeFn::Retain) => "starry_retain".to_string(),
+                    Callee::Runtime(RuntimeFn::ReleaseClass) => "starry_release_class".to_string(),
                     Callee::Runtime(RuntimeFn::Release) => "starry_release".to_string(),
                     Callee::Runtime(RuntimeFn::WeakRetain) => "starry_weak_retain".to_string(),
                     Callee::Runtime(RuntimeFn::WeakDrop) => "starry_weak_drop".to_string(),
