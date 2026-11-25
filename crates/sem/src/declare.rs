@@ -102,7 +102,7 @@ fn register_import(scope: ScopeId, decl: &DeclNode, st: &mut SemState) {
             st.diags.emit(Diagnostic::error(
                 DiagCode::SemUndefinedName,
                 decl.span,
-                "import target not found"
+                "import target not found",
             ));
             return;
         }

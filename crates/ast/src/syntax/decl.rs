@@ -358,6 +358,7 @@ pub struct MacroDecl {
 
 #[derive(Debug, Clone)]
 pub struct ImplDecl {
+    pub where_clause: Vec<WhereConstraint>,
     pub type_params: Vec<TypeParam>,
     pub type_ref: TypeWrap,
     pub trait_ref: TypeWrap,

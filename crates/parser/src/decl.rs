@@ -590,11 +590,13 @@ fn parse_top_level_inner(session: &mut ParseSession<'_>) -> Result<DeclNode, Par
                 let type_ref = parse_type(session)?;
                 expect_keyword(session, HardKeyword::For, "for");
                 let trait_ref = parse_type(session)?;
+                let where_clause = parse_where_clause(session)?;
                 expect_punctuation(session, PunctuationKind::LBrace, '{');
                 let members = parse_class_members(session)?;
                 expect_punctuation(session, PunctuationKind::RBrace, '}');
                 DeclKind::Impl(ImplDecl {
                     type_params,
+                    where_clause,
                     type_ref,
                     trait_ref,
                     members,
