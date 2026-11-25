@@ -1,7 +1,7 @@
 # Starry 编译器 CI：五道门禁全量跑，不允许静默 SKIP。
 # 工具链：stable Rust 2024（1.85+）+ LLVM 15+（不透明指针是槽模型硬前提；
 # llvm-as/clang 验证层与 build e2e 依赖它，探测 PATH 与常见安装位）。
-# LLVM pin：Windows = choco llvm 18.1.8；Linux = apt clang/llvm 18
+# LLVM source：Windows = current Chocolatey package；Linux = apt clang/llvm 18
 # （ubuntu-24.04 默认源）。低于 15 的行为不受支持。
 name: ci
 
@@ -23,7 +23,8 @@ jobs:
           components: rustfmt, clippy
       - name: Install LLVM (Windows)
         if: runner.os == 'Windows'
-        # Use the current Chocolatey package; only LLVM 15+ ABI behavior is required.        run: choco install llvm -y --no-progress
+        # Use the current Chocolatey package; only LLVM 15+ ABI behavior is required.
+        run: choco install llvm -y --no-progress
       - name: Install LLVM (Linux)
         if: runner.os == 'Linux'
         run: |
