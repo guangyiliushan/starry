@@ -4,7 +4,7 @@
 generates the Rust definitions, the reserved-token fragment for the ANTLR4
 lexer reference, and the Markdown table.
 
-The frozen counts are 35 hard keywords, 11 modifier words, and 8 slot words (54 total; frozen 2026-11-25, see keyword-capability-plan).
+The frozen counts are 35 hard keywords, 10 modifier words, and 8 slot words (53 total; frozen 2026-11-25, amended the same day when `static` was removed, see keyword-capability-plan).
 Only hard keywords are reserved by the lexer. Modifier and slot words remain
 identifiers and are recognized by parser predicates only in their listed
 grammar slots.

@@ -195,10 +195,12 @@ for pattern matching. The grammar needs an explicit is-pattern production
 Removed from the lexicon (parse-level rejection): async/await/spawn/
 detached/concurrent/thread/fiber/process/actor/aspect/provide/macro/
 comptime/grow/bits/before/after/around/proceed/singleton/scoped/
-transient/bind/to/out/vararg/const/inline/infix/package/namespace.
+transient/bind/to/out/vararg/const/inline/infix/package/namespace/static.
 
 Added: "alias" (type-alias hard keyword; "type" remains for
 associated types only) and "deinit" (slot word, parsed via
-SlotWord::Deinit). Frozen v1 budget: 35 hard / 11 modifier / 8 slot
-= 54 keywords; `namespace` removed 2026-11-25 (parse-only, no C++ FFI
-design; re-add with a spec). No further reduction (capability needs).
+SlotWord::Deinit). Frozen v1 budget: 35 hard / 10 modifier / 8 slot
+= 53 keywords; `namespace` and `static` removed 2026-11-25 (namespace:
+parse-only, no C++ FFI design; static: top-level fun/val/var and package
+namespaces cover static members; re-add with a spec). No further reduction
+(capability needs).

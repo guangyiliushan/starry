@@ -487,10 +487,10 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
 ## 关键字收敛（D-014，2026-11-25）
 
 - **parse 级拒收**（词已删）：actor/provide/aspect/spawn/async/await/
-  concurrent/grow/comptime/macro 声明/const/inline/infix/vararg/out/namespace。
+  concurrent/grow/comptime/macro 声明/const/inline/infix/vararg/out/namespace/static。
 - **sem 级拒收**（保留字，语义待实现）：union 声明、accessor（get/set）、
   dyn/Self（trait 外）、宏调用展开（SemMacroExpansion）、
-  open/abstract/sealed/override/static/operator、二级构造 init、protected。
+  open/abstract/sealed/override/operator、二级构造 init、protected。
 - **已实现**：alias（类型别名）、deinit（析构）、by（superitem 委托槽，
   随继承实现）、it/move（lambda 推断/捕获）。
-- 冻结预算：35 hard / 11 modifier / 8 slot = 54，不再减少（2026-11-25 删 `namespace`）。
+- 冻结预算：35 hard / 10 modifier / 8 slot = 53，不再减少（2026-11-25 删 `namespace`、`static`）。

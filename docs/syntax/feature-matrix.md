@@ -92,9 +92,9 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单；已删关�
 |---|---|---|
 | lambda 存 struct 字段（矩阵 #5） | sem | 修正 3：Fn 字段稳定拒收（主构造头字段 + body 字段两路已接，declare 侧） |
 | union 声明 / accessor（get/set） | sem | P0 trust：此前静默接受，现声明点稳定拒收（D-014 保留字） |
-| macro 声明 / comptime / grow / spawn / actor / aspect / provide / async / await / concurrent / detached / thread / fiber / process / variance / const / inline / infix / vararg / namespace | parse | D-014：已从词表移除，parse 级拒收（2026-11-25） |
+| macro 声明 / comptime / grow / spawn / actor / aspect / provide / async / await / concurrent / detached / thread / fiber / process / variance / const / inline / infix / vararg / namespace / static | parse | D-014：已从词表移除，parse 级拒收（2026-11-25） |
 | protected（顶层 + class 成员） | sem | P0 trust：继承未实现，稳定拒收 |
-| open/abstract/sealed/override/static/operator | sem | P0 trust：无实现路径的 modifier，声明点稳定拒收（const/inline/infix/vararg 已从词表移除） |
+| open/abstract/sealed/override/operator | sem | P0 trust：无实现路径的 modifier，声明点稳定拒收（const/inline/infix/vararg/static 已从词表移除） |
 | `as` 非数值/非指针转换（如 string→int） | sem | P0 trust：只允许数值↔数值、同型、Ref/Pointer 互转；其余 SemTypeMismatch |
 | impl 头 trait 充当类型实参（`impl T for L<T>`） | sem | P0 trust：lower_ty 拒收（此前静默注册成 spec） |
 | class/可空 class/Fn 存 struct 字段/tuple/array；ARC enum payload | sem | return/break/repeat ownership transfer 未完成，enum payload 需 tag-aware traversal；所有 ARC-bearing aggregate slots 稳定拒收 |
@@ -120,8 +120,8 @@ Feature Group 定义：**FG0** 标量核心（上表第一组）、**FG1** 数�
 
 ## 关键字（D-014 冻结，2026-11-25）
 
-v1 预算冻结：**35 hard / 11 modifier / 8 slot = 54**，不再减少。保留待实现的
-capability 关键字：`static`（静态成员）、`operator`（运算符重载）、
+v1 预算冻结：**35 hard / 10 modifier / 8 slot = 53**（2026-11-25 删 `static`：顶层 fun/val/var 加包命名空间已覆盖），不再减少。保留待实现的
+capability 关键字：`operator`（运算符重载）、
 `union`（重叠字段值类型）、`get`/`set`（属性）、`by`（委托，随继承落地）、
 `it`/`move`（lambda 推断/捕获）。以上均有稳定拒收诊断。
 已实现新增：`alias`（类型别名）、`deinit`（析构）。

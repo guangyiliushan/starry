@@ -135,7 +135,6 @@ pub enum ModifierWord {
     Abstract,
     Sealed,
     Override,
-    Static,
     OperatorWord,
     Weak,
 }
@@ -152,7 +151,6 @@ impl ModifierWord {
             Self::Abstract => "abstract",
             Self::Sealed => "sealed",
             Self::Override => "override",
-            Self::Static => "static",
             Self::OperatorWord => "operator",
             Self::Weak => "weak",
         }
@@ -170,7 +168,6 @@ pub fn lookup_modifier_word(word: &str) -> Option<ModifierWord> {
         "abstract" => Some(ModifierWord::Abstract),
         "sealed" => Some(ModifierWord::Sealed),
         "override" => Some(ModifierWord::Override),
-        "static" => Some(ModifierWord::Static),
         "operator" => Some(ModifierWord::OperatorWord),
         "weak" => Some(ModifierWord::Weak),
         _ => None,
@@ -221,5 +218,5 @@ pub fn lookup_slot_word(word: &str) -> Option<SlotWord> {
 }
 
 pub const HARD_KEYWORD_COUNT: usize = 35;
-pub const MODIFIER_WORD_COUNT: usize = 11;
+pub const MODIFIER_WORD_COUNT: usize = 10;
 pub const SLOT_WORD_COUNT: usize = 8;

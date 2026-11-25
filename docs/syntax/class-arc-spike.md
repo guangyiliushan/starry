@@ -6,7 +6,7 @@ class）」结论作废（D-003/D-004 已确认引用语义，不再开放比选
 现状（2026-11-24 校准）：class/ARC 已按 M4 Plan C 全链落地（构造/字段/
 方法/deinit/weak var/可空 class）；本 spike §1 拍板项均已实现。
 剩余缺口：ARC 聚合（struct 字段/tuple/array/enum payload）、继承、
-二级构造 init、static、protected（P0 起稳定拒收）。
+二级构造 init、protected（P0 起稳定拒收）。
 
 ## 1. 已拍板（D-003/D-004，无需重开）
 

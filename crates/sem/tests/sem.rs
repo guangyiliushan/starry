@@ -1750,10 +1750,20 @@ fn p0_baseline_clean_value_program() {
 
 #[test]
 fn p0_rejects_static_modifier() {
+    // D-014: keyword removed from the lexicon; rejected at parse level.
     assert_has(
         "static fun f(): int {\n    return 1\n}",
-        DiagCode::SemUnsupportedConstruct,
+        DiagCode::UnexpectedToken,
     );
+    // Class-member position must not be silently accepted either.
+    let member = "class C(val x: int) {\n    static fun f(): int {\n        return 1\n    }\n}";
+    assert!(!codes(member).is_empty());
+}
+
+#[test]
+fn static_stays_a_plain_identifier() {
+    // Modifier words are identifiers lexically; removal must not reserve the word.
+    assert_clean("fun main(): int {\n    val static = 3\n    return static\n}");
 }
 
 #[test]

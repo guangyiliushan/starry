@@ -52,12 +52,14 @@ Declaration := FunDecl
              | TypeAliasDecl ;
 
 Modifiers := { Modifier } ;
-(* D-014: const/inline/infix/vararg removed (2026-11-25). static/operator
- * are retained but sem-rejected until static members and operator
- * overloading land. weak is the ARC-cycle modifier (D-008). *)
+(* D-014: const/inline/infix/vararg/static removed (2026-11-25). static is
+ * covered by top-level fun/val/var and package namespaces (re-add with a
+ * spec if type-scoped members are designed). operator is retained: the
+ * operator-overloading decision (parser-notes) uses it as syntax.
+ * weak is the ARC-cycle modifier (D-008). *)
 Modifier  := "public" | "private" | "protected" | "internal"
            | "open" | "abstract" | "sealed" | "override"
-           | "static" | "operator" | «weak» ;
+           | "operator" | «weak» ;
 
 FunDecl      := Modifiers "fun" IDENT TypeParams?
                 "(" ParameterList ")" [ ":" Type ]

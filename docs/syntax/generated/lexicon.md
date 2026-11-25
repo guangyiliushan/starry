@@ -42,7 +42,7 @@
 | `Where` | `where` | `global` |
 | `Mut` | `mut` | `global` |
 
-## Modifier word (11)
+## Modifier word (10)
 
 | Variant | Lexeme | Grammar slot |
 |---|---|---|
@@ -54,7 +54,6 @@
 | `Abstract` | `abstract` | `modifier` |
 | `Sealed` | `sealed` | `modifier` |
 | `Override` | `override` | `modifier` |
-| `Static` | `static` | `modifier` |
 | `OperatorWord` | `operator` | `modifier` |
 | `Weak` | `weak` | `modifier` |
 

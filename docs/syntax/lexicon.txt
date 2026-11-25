@@ -7,6 +7,7 @@
 # grow families; added `alias` (type alias) and `deinit` (class destructor).
 # Removed words live in docs/keyword-capability-plan-2026-11-24.md (Optional).
 # 2026-11-25: removed `namespace` (parse-only extern slot; no C++ FFI design).
+# 2026-11-25: removed `static` (top-level fun/val/var and package namespaces cover static members).
 
 # 35 globally reserved keywords.
 hard alias Alias global
@@ -46,7 +47,7 @@ hard in In global
 hard where Where global
 hard mut Mut global
 
-# 11 modifier words, recognized only in a modifier list.
+# 10 modifier words, recognized only in a modifier list.
 modifier public Public modifier
 modifier private Private modifier
 modifier protected Protected modifier
@@ -55,7 +56,6 @@ modifier open Open modifier
 modifier abstract Abstract modifier
 modifier sealed Sealed modifier
 modifier override Override modifier
-modifier static Static modifier
 modifier operator OperatorWord modifier
 modifier weak Weak modifier
 

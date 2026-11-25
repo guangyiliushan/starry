@@ -527,7 +527,6 @@ fn reject_unsupported_modifiers(mods: &[ast::syntax::modifier::Modifier], st: &m
             ModifierWord::Abstract => "abstract classes are not supported in v1",
             ModifierWord::Sealed => "sealed classes are not supported in v1",
             ModifierWord::Override => "override is not supported in v1",
-            ModifierWord::Static => "static members are not supported in v1",
             ModifierWord::OperatorWord => "operator declarations are not supported in v1",
             _ => continue,
         };

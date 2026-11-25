@@ -50,7 +50,6 @@ IDENTIFIER : [A-Za-z_][A-Za-z0-9_]*;
 // modifier: Abstract = 'abstract' in modifier
 // modifier: Sealed = 'sealed' in modifier
 // modifier: Override = 'override' in modifier
-// modifier: Static = 'static' in modifier
 // modifier: OperatorWord = 'operator' in modifier
 // modifier: Weak = 'weak' in modifier
 // slot: Impl = 'impl' in declaration
