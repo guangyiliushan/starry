@@ -937,60 +937,6 @@ fn require_bool(ty: TyId, span: Span, st: &mut SemState) {
 }
 
 /// Enum payload layout is tag-switched but not yet ARC-safe; reject only
-/// enum types whose active payload may contain class/Fn storage.
-fn enum_arc_payload_unsafe(st: &SemState, ty: TyId) -> bool {
-    fn walk(st: &SemState, ty: TyId, seen: &mut std::collections::HashSet<DefId>) -> bool {
-        match st.tys.kind(ty) {
-            TyKind::Named(def, _) => match st.defs.get(*def).kind {
-                DefKind::Enum => {
-                    if !seen.insert(*def) {
-                        return false;
-                    }
-                    st.defs
-                        .get(*def)
-                        .sig
-                        .variants
-                        .iter()
-                        .any(|(_, params)| params.iter().any(|(_, t)| walk(st, *t, seen)))
-                }
-                DefKind::Struct => {
-                    if !seen.insert(*def) {
-                        return false;
-                    }
-                    st.defs
-                        .get(*def)
-                        .sig
-                        .fields
-                        .iter()
-                        .any(|(_, t)| walk(st, *t, seen))
-                }
-                _ => false,
-            },
-            TyKind::Array(elem, _) | TyKind::Nullable(elem) => walk(st, *elem, seen),
-            TyKind::Tuple(elems) => elems.iter().any(|e| walk(st, *e, seen)),
-            _ => false,
-        }
-    }
-    walk(st, ty, &mut std::collections::HashSet::new())
-}
-
-/// Tuple/array ownership transfer still has unsafe return/break/repeat
-/// escape paths; keep ARC-bearing elements stably rejected until those CFG
-/// paths transfer ownership correctly.
-fn agg_element_unsafe(st: &SemState, ty: TyId) -> bool {
-    if crate::declare::is_class_ty(st, ty) || matches!(st.tys.kind(ty), TyKind::Fn(..)) {
-        return true;
-    }
-    if matches!(
-        st.tys.kind(ty),
-        TyKind::Nullable(inner) if crate::declare::is_class_ty(st, *inner)
-    ) {
-        return true;
-    }
-    enum_arc_payload_unsafe(st, ty)
-}
-
-/// Raw pointer loads/stores are unchecked; references remain safe operations.
 fn require_unsafe_if_raw_deref(st: &mut SemState, ty: TyId, span: Span) {
     if st.unsafe_depth == 0 && matches!(st.tys.kind(ty), TyKind::Pointer { .. }) {
         // Assignment targets are typed as expressions first; the shared
@@ -1605,17 +1551,6 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             for x in xs {
                 ts.push(type_expr(x, st, true));
             }
-            // S2/N2：class/可空 class/Fn 元素 v1 拒收——聚合拷贝无字段级
-            // ARC（裸指针拷贝 + 源 binding 出口 release = UAF）
-            for t in &ts {
-                if agg_element_unsafe(st, *t) {
-                    unsupported(
-                        st,
-                        e.span,
-                        "this element type in tuple literals is not supported in v1 (no field-level ARC on aggregate copies)",
-                    );
-                }
-            }
             st.tys.intern(TyKind::Tuple(ts))
         }
         ExprKind::Array(xs) => {
@@ -1639,27 +1574,11 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
                     }
                 }
             }
-            // S2/N2：class/可空 class/Fn 元素 v1 拒收（同 tuple 字面量）
-            if agg_element_unsafe(st, acc) {
-                unsupported(
-                    st,
-                    e.span,
-                    "this element type in array literals is not supported in v1 (no field-level ARC on aggregate copies)",
-                );
-            }
             let n = xs.len() as u32;
             st.tys.intern(TyKind::Array(acc, n))
         }
         ExprKind::ArrayRepeat { value, count } => {
             let v = type_expr(value, st, true);
-            // S2/N2：class/可空 class/Fn 元素 v1 拒收（同 array 字面量）
-            if agg_element_unsafe(st, v) {
-                unsupported(
-                    st,
-                    e.span,
-                    "this element type in array repeat expressions is not supported in v1 (no field-level ARC on aggregate copies)",
-                );
-            }
             st.tys.intern(TyKind::Array(v, *count))
         }
         ExprKind::StringInterp { parts } => {

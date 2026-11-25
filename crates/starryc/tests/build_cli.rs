@@ -1218,9 +1218,8 @@ fn fn_struct_field_rejected() {
     );
 }
 #[test]
-fn class_aggregate_arc_is_stably_rejected() {
-    // Return/break/repeat ownership transfer is not complete yet; tuple/array
-    // ARC-bearing elements remain rejected instead of shipping UAF paths.
+fn class_aggregate_arc_builds_and_runs() {
+    // WP1: ARC aggregate tuple/array class elements enabled (D-014 Phase 1)
     let cases: [(&str, &str); 2] = [
         (
             "tuple_elem",
@@ -1233,7 +1232,7 @@ fn class_aggregate_arc_is_stably_rejected() {
     ];
     for (name, src) in cases {
         let dir =
-            std::env::temp_dir().join(format!("starry_arc_gate_{}_{}", std::process::id(), name));
+            std::env::temp_dir().join(format!("starry_arc_ok_{}_{}", std::process::id(), name));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{name}.starry"));
         std::fs::write(&path, src).unwrap();
@@ -1241,22 +1240,14 @@ fn class_aggregate_arc_is_stably_rejected() {
             .args(["build", path.to_str().unwrap()])
             .output()
             .unwrap();
-        let combined = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
+        assert!(
+            out.status.success(),
+            "ARC aggregate build failed for {name}: {}",
             String::from_utf8_lossy(&out.stderr)
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            !out.status.success(),
-            "{name}: ARC aggregate must be rejected"
-        );
-        assert!(
-            combined.contains("not supported in v1"),
-            "{name}: diag missing: {combined}"
         );
     }
 }
+
 #[test]
 fn fn_var_reassign_arc_e2e() {
     // P2-3b-2 收尾：Fn var 重赋值 = release 旧 box + retain/转移新值

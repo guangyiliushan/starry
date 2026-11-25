@@ -1347,9 +1347,7 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                                 st.tys.error
                             }
                         };
-                        if matches!(st.tys.kind(ty), TyKind::Fn(..) | TyKind::Ref { .. })
-                            || crate::declare::is_class_ty(st, ty)
-                        {
+                        if matches!(st.tys.kind(ty), TyKind::Fn(..) | TyKind::Ref { .. }) {
                             st.diags.emit(Diagnostic::error(
                                 DiagCode::SemUnsupportedConstruct,
                                 item.span,
@@ -1362,9 +1360,7 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                 fields.extend(s.fields.iter().map(|f| {
                     let ft = lower_ty(st, sscope, &f.ty);
                     // M2 非逃逸纪律不变：引用字段拒绝（head 参数同规则）
-                    if matches!(st.tys.kind(ft), TyKind::Fn(..) | TyKind::Ref { .. })
-                        || crate::declare::is_class_ty(st, ft)
-                    {
+                    if matches!(st.tys.kind(ft), TyKind::Fn(..) | TyKind::Ref { .. }) {
                         st.diags.emit(Diagnostic::error(
                             DiagCode::SemUnsupportedConstruct,
                             f.ty.span,

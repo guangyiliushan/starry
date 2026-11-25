@@ -1947,15 +1947,9 @@ fn p0_impl_rejects_trait_as_type_argument() {
 }
 
 #[test]
-fn p0_struct_class_field_stays_rejected() {
-    // Task 6a 决策：ARC 聚合保持稳定拒收（return/break/repeat ownership
-    // transfer 未补齐；宁可拒收不半开）
-    assert_has(
-        "class C(val v: int)\nstruct S(val c: C)",
-        DiagCode::SemUnsupportedConstruct,
-    );
-    assert_has(
-        "class C(val v: int)\nstruct S {\n    c: C\n}",
-        DiagCode::SemUnsupportedConstruct,
-    );
+fn p0_struct_class_field_now_allowed() {
+    // WP1: ARC aggregate struct fields enabled (emit_copy_value/emit_drop_slots
+    // handle class fields via type-directed recursion)
+    assert_clean("class C(val v: int)\nstruct S(val c: C)");
+    assert_clean("class C(val v: int)\nstruct S {\n    c: C\n}");
 }
