@@ -93,20 +93,9 @@ pub(crate) fn parse_bounds(session: &mut ParseSession<'_>) -> Result<Vec<TypeWra
     Ok(bounds)
 }
 
-fn parse_variance(session: &mut ParseSession<'_>) -> Option<ast::syntax::ty::Variance> {
-    if session
-        .cursor
-        .check(&TokenKind::Keyword(ast::token::HardKeyword::In))
-    {
-        session.cursor.advance();
-        return Some(ast::syntax::ty::Variance::In);
-    }
-    if let TokenKind::Identifier = session.cursor.peek().kind
-        && session.token_text(session.cursor.peek()) == "out"
-    {
-        session.cursor.advance();
-        return Some(ast::syntax::ty::Variance::Out);
-    }
+fn parse_variance(_session: &mut ParseSession<'_>) -> Option<ast::syntax::ty::Variance> {
+    // D-014: variance is deferred (Optional). in stays membership-only;
+    // future variance markers will use +/- (see keyword-capability-plan).
     None
 }
 
@@ -162,10 +151,6 @@ fn parse_type_inner(
         };
     }
     Ok(function)
-}
-
-pub(crate) fn parse_union_type(session: &mut ParseSession<'_>) -> Result<TypeWrap, ParserError> {
-    parse_union_type_with(session, true)
 }
 
 fn parse_union_type_with(

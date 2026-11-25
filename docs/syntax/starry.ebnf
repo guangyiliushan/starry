@@ -3,7 +3,7 @@
  *
  * Notation:
  *   "val"       hard keyword, globally reserved by the lexer
- *   «provide»   slot/modifier word; lexically IDENTIFIER and recognized
+ *   «deinit»    e»   slot/modifier word; lexically IDENTIFIER and recognized
  *               only by a parser predicate in its named grammar slot
  *   NL          line terminator; spaces and tabs are not tokens
  *   [ X ]       optional
@@ -34,12 +34,7 @@ NativeLanguage := StringLiteral ;
 ImportMember  := FunSignature ;
 
 TopLevelDecl  := Declaration
-               | ActorDecl
-               | AspectDecl
-               | ProvideDecl
                | ImplDecl
-               | MacroDecl
-               | ComptimeDecl
                | ExternDecl ;
 
 (* ---------- Declarations ---------- *)
@@ -57,10 +52,12 @@ Declaration := FunDecl
              | TypeAliasDecl ;
 
 Modifiers := { Modifier } ;
-Modifier  := "public" | "private" | "protected" | "internal"
-           | "open" | "abstract" | "sealed" | "override"
-           | "const" | "static" | "inline" | "operator"
-           | "infix" | "vararg" ;
+(* D-014: const/inline/infix/vararg removed (2026-11-25). static/operator
+ * are retained but sem-rejected until static members and operator
+ * overloading land. weak is the ARC-cycle modifier (D-008). *)
+Modifier  := \x22public\x22 [|] \x22private\x22 [|] \x22protected\x22 [|] \x22internal\x22
+           [|] \x22open\x22 [|] \x22abstract\x22 [|] \x22sealed\x22 [|] \x22override\x22
+           [|] \x22static\x22 [|] \x22operator\x22 | «weak» ;
 
 FunDecl      := Modifiers "fun" IDENT TypeParams?
                 "(" ParameterList ")" [ ":" Type ]
@@ -85,7 +82,7 @@ Supertypes   := ":" SuperItem { "," SuperItem } ;
 SuperItem    := Type [ "(" ArgumentList? ")" ] [ «by» Expr ] ;
 ClassBody    := "{" { ClassMember } "}" ;
 ClassMember  := Declaration | ConstructorDecl | AccessorDecl | InitBlock | DeinitBlock ;
-DeinitBlock  := "deinit" Block ;
+DeinitBlock  := «deinit» Block ;
 
 ConstructorDecl := Modifiers «init» "(" ParameterList ")" Block ;
 InitBlock       := «init» Block ;
@@ -108,31 +105,9 @@ TraitDecl      := Modifiers "trait" IDENT TypeParams? Supertypes? "{" { TraitMem
 TraitMember    := AssociatedType | FunSignature | FunDecl | Declaration ;
 AssociatedType := "type" IDENT [ ":" Bound ] [ "=" Type ] [ ";" ] ;
 
-TypeAliasDecl := Modifiers "type" IDENT TypeParams? "=" Type ;
+TypeAliasDecl := Modifiers \x22alias\x22 IDENT TypeParams\? \x22=\x22 Type ;
 
-ActorDecl    := «actor» IDENT [ PrimaryConstructor ] ClassBody ;
-AspectDecl   := «aspect» IDENT TypeParams? "{" { AspectMember } "}" ;
-AspectMember := Declaration | AdviceDecl ;
-AdviceDecl   := ( «before» | «after» | «around» ) Pointcut Block ;
-Pointcut     := QualifiedName | Type "." ( "*" | IDENT ) ;
-
-(* The impl block is its own generic scope, so it binds its own parameters.
- * `impl<T> Show for List<T>`; a `where` constraint is not part of this form. *)
 ImplDecl := «impl» TypeParams? Type "for" Type "{" { ClassMember } "}" ;
-
-MacroDecl      := «macro» IDENT "(" [ MacroParameter { "," MacroParameter } ] ")" Block ;
-MacroParameter := IDENT ;
-ComptimeDecl   := «comptime» Block ;
-
-(* ---------- Dependency injection ---------- *)
-
-(* The right side of a provider is a lifecycle construction rule. It is
- * intentionally not ordinary assignment syntax or a function type. *)
-ProvideDecl     := «provide» IDENT "{" { ProviderItem } "}" ;
-ProviderItem    := ProviderDecl | ProviderBinding ;
-ProviderDecl    := ( «singleton» | «scoped» | «transient» ) ProviderType "->" Expr ;
-ProviderType    := UnionType ;
-ProviderBinding := «bind» Type «to» Type ;
 
 (* ---------- External interfaces ---------- *)
 
@@ -140,13 +115,14 @@ ExternDecl     := "extern" ExternLanguage ExternBody ;
 ExternLanguage := StringLiteral ;
 ExternBody     := FunSignature
                 | "{" { FunSignature } "}"
-                | "namespace" IDENT "{" { FunSignature } "}" ;
+                | «namespace»" IDENT "{" { FunSignature } "}" ;
 
 (* ---------- Generics ---------- *)
 
 TypeParams    := "<" TypeParameter { "," TypeParameter } ">" ;
-TypeParameter := [ Variance ] IDENT [ ":" Bound ] [ "=" Type ] ;
-Variance      := "in" | «out» ;
+TypeParameter := IDENT [ ":" Bound ] [ "=" Type ] ;
+(* D-014: variance markers removed (deferred). in is membership-only;
+ * future variance will use +/- signs instead of keywords. *)
 (* An intersection bound. Used in both the inline `T : A & B` slot and the
  * `where` slot, so the two spell the same constraint. `+` is avoided: it is
  * already the addition operator. *)
@@ -189,9 +165,7 @@ Statement := ExpressionStatement
            | WhileStatement
            | LoopStatement
            | JumpStatement
-           | DeferStatement
-           | GrowStatement
-           | ComptimeDecl ;
+           | DeferStatement ;
 
 ExpressionStatement := Expr ;
 AssignmentStatement := Place AssignmentOperator Expr ;
@@ -221,7 +195,6 @@ LoopStatement  := [ Label ":" ] "loop" Block ;
 
 JumpStatement  := "break" [ Label ] [ Expr ] | "continue" [ Label ] | "return" [ Expr ] ;
 DeferStatement := "defer" Block ;
-GrowStatement  := «grow» Expr «to» INTEGER «bits» ;
 Label          := "'" IDENT ;
 
 (* ---------- Expressions ---------- *)
@@ -230,11 +203,8 @@ Expr := LambdaExpr
        | LoopExpr
        | WhenExpr
        | IfExpr
-       | ConcurrencyExpr
        | UnsafeBlock
        | MacroCall
-       | ComptimeExpr
-       | ProceedExpr
        | BinaryExpr ;
 
 LambdaExpr       := [ «move» ] "{" [ LambdaParameters "->" ] Block "}" ;
@@ -254,17 +224,8 @@ WhenPattern := Pattern [ "if" Expr ] | Expr | "else" ;
  * are ordinary types. *)
 NoArrowType  := ? Type with no "->" at its top level ? ;
 
-ConcurrencyExpr := SpawnExpr | AsyncExpr | ConcurrentBlock ;
-SpawnExpr       := "spawn" [ "detached" ] [ SpawnTarget ]
-                   [ "actor" ActorConstruction ] Block ;
-SpawnTarget     := "thread" | "fiber" | "process" ;
-ConcurrentBlock := «concurrent» Block ;
-AsyncExpr       := "async" Block ;
-ActorConstruction := QualifiedName "(" ArgumentList? ")" ;
 UnsafeBlock     := "unsafe" Block ;
-ProceedExpr     := «proceed» ;
 
-ComptimeExpr := «comptime» Block ;
 MacroCall    := IDENT "!" "(" MacroTokenStream ")" ;
 MacroTokenStream := ? balanced raw token groups until the matching ")" ? ;
 

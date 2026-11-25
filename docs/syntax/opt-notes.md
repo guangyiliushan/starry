@@ -163,7 +163,7 @@ LLVM。修法各记一条，防回退：
   lowering = 逐 part stringify + concat 的运行时操作序列；是否落成
   extern call、运行时入口命名，是 IR 开工时的运行时契约设计。
   part 的可字符串化规则（如 `int?`）依赖 trait 体系，解冻后再回访。
-- comptime/unsafe 块按普通块 lowering（与 sem 现有行为一致）。
+- unsafe 块按普通块 lowering（comptime 已随 D-014 从词表删除）。
 - 生成期不消重（无 DAG/值编号）：表达式重复原样发射，交给 opt 的
   局部 CSE——单一事实来源。
 
@@ -175,7 +175,7 @@ LLVM。修法各记一条，防回退：
 `as` 数值转换（`UnOp::Conv`）、具名/命名实参调用 + 默认实参调用点求值、
 if 语句与 if 表达式（结果槽绕 phi）、while/loop、break/continue
 （flow_res 回指）、return、val→Temp / var→slot / 无初始化→slot
-（未定义值读取）、comptime/unsafe 块按普通块。
+（未定义值读取）、unsafe 块按普通块。
 
 **M2a（2026-10-26）数据布局**：槽位布局全案（`layout.rs`：标量 1 槽、
 struct 按字段序、和类型 tag(i8)+payload、enum payload 取最大变体、
@@ -224,7 +224,7 @@ StrConcat 折叠；插值裸 chunk 的 span 形态（parser string_chunk 无
 兼容插值 chunk span。
 String `+` shares the StrConcat runtime with interpolation; scalar top-level globals use LoadGlobal/StoreGlobal plus a synthetic GlobalBody.init function called before main.
 
-**仍发 `IrcUnsupportedLowering`**：grow、复合基座（成员/索引链）及
+**仍发 `IrcUnsupportedLowering`**：复合基座（成员/索引链）及
 nullable/`?.` 基座的赋值（写穿透的 lvalue 基座解算限 Ident）、
 nullable/aggregate stringification, aggregate/destructured top-level globals (scalar top-level globals are implemented).
 成员/索引赋值的基座经 lvalue_base 直通 Slot/Temp
@@ -410,3 +410,9 @@ pub fn emit(tac: &TacOutput, tys: &TyArena, defs: &DefArena, interner: &Interner
 - 与全仓一致：`cargo fmt --check`、全 workspace 测试、
   `clippy -D warnings`、`syntaxgen --check`、`git diff --check`。
   每个 pass 配最小钉板测试（fold/copy/DCE/CSE 各一正一负）。
+
+## 关键字收敛（D-014，2026-11-25）
+
+grow/comptime/spawn/actor/aspect/provide/macro 声明等构造已随词表收敛
+删除（parse 级拒收）；对应 lowering 小节保留作历史记录。async/并发
+下阶段实现时按新模型重写本节。

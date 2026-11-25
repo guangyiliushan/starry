@@ -13,6 +13,8 @@
 //!   （exit 0 干净 / exit 1 有诊断，格式同 check）
 //! - `starryc build <file> [output]`：编译并调用 clang 链接 runtime，
 //!   生成可直接执行的本机程序（机器层失败 exit 1；用法错误 exit 2）
+//! - `starryc run <file> [--release]`：编译到临时路径并执行，传播退出码
+//! - `starryc --version`：打印版本与 git 短哈希
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -49,6 +51,16 @@ fn main() -> ExitCode {
         [cmd, path] if cmd == "irc" => cmd_irc(path),
         [cmd, path] if cmd == "opt" => cmd_opt(path),
         [cmd, path] if cmd == "llvme" => cmd_llvme(path),
+        [cmd] if cmd == "--version" || cmd == "version" => cmd_version(),
+        [cmd, rest @ ..] if cmd == "run" => {
+            let release = rest.iter().any(|a| a.as_str() == "--release");
+            let clean: Vec<String> = rest
+                .iter()
+                .filter(|a| a.as_str() != "--release")
+                .cloned()
+                .collect();
+            cmd_run_args(&clean, release)
+        }
         [cmd, rest @ ..] if cmd == "build" => {
             let release = rest.iter().any(|a| a.as_str() == "--release");
             let clean: Vec<String> = rest
@@ -56,7 +68,7 @@ fn main() -> ExitCode {
                 .filter(|a| a.as_str() != "--release")
                 .cloned()
                 .collect();
-            cmd_build_args(&clean, release)
+            cmd_build_args(&clean, release, false)
         }
         _ => usage(),
     }
@@ -64,7 +76,7 @@ fn main() -> ExitCode {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "用法: starryc match <regex> <input> | starryc dump-nfa <regex> | starryc tokenize <source> | starryc check <file> | starryc irc <file> | starryc opt <file> | starryc llvme <file> | starryc build <file> [output] [-- <clang 链接参数>]"
+        "用法: starryc match <regex> <input> | starryc dump-nfa <regex> | starryc tokenize <source> | starryc check <file> | starryc irc <file> | starryc opt <file> | starryc llvme <file> | starryc build <file> [output] [-- <clang 链接参数>] | starryc run <file> [--release] | starryc --version]"
     );
     ExitCode::from(2)
 }
@@ -436,14 +448,14 @@ fn llvm_tool_path(name: &str) -> PathBuf {
 
 /// `build <file> [output] [-- <clang 链接参数>...]`：`--` 之后的参数原样追加到
 /// clang 链接行（额外 .obj/.o、`-l`、`-L` 等 extern "c" FFI 用）
-fn cmd_build_args(args: &[String], release: bool) -> ExitCode {
+fn cmd_build_args(args: &[String], release: bool, quiet: bool) -> ExitCode {
     let (head, link_args) = match args.iter().position(|a| a == "--") {
         Some(i) => (&args[..i], &args[i + 1..]),
         None => (args, &[][..]),
     };
     match head {
-        [path] => cmd_build(path, None, link_args, release),
-        [path, output] => cmd_build(path, Some(output), link_args, release),
+        [path] => cmd_build(path, None, link_args, release, quiet),
+        [path, output] => cmd_build(path, Some(output), link_args, release, quiet),
         _ => usage(),
     }
 }
@@ -749,7 +761,13 @@ fn resolve_build_input(path: &str) -> Result<BuildInput, String> {
         Ok(BuildInput::Single(p.to_path_buf()))
     }
 }
-fn cmd_build(path: &str, output: Option<&str>, link_args: &[String], release: bool) -> ExitCode {
+fn cmd_build(
+    path: &str,
+    output: Option<&str>,
+    link_args: &[String],
+    release: bool,
+    quiet: bool,
+) -> ExitCode {
     let input = match resolve_build_input(path) {
         Ok(input) => input,
         Err(msg) => {
@@ -849,7 +867,9 @@ fn cmd_build(path: &str, output: Option<&str>, link_args: &[String], release: bo
     let _ = std::fs::remove_file(&platform_path);
     match status {
         Ok(status) if status.success() => {
-            println!("{}", exe.display());
+            if !quiet {
+                println!("{}", exe.display());
+            }
             ExitCode::SUCCESS
         }
         Ok(status) => {
@@ -858,6 +878,46 @@ fn cmd_build(path: &str, output: Option<&str>, link_args: &[String], release: bo
         }
         Err(e) => {
             eprintln!("starryc: 无法启动 clang（已查 PATH 与常见 LLVM 安装位）: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_version() -> ExitCode {
+    println!(
+        "starryc {} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_HASH")
+    );
+    ExitCode::SUCCESS
+}
+
+/// `starryc run <file> [--release]`：编译到临时路径并执行，传播退出码。
+fn cmd_run_args(rest: &[String], release: bool) -> ExitCode {
+    if rest.is_empty() {
+        eprintln!("starryc: run 需要一个源文件参数");
+        return usage();
+    }
+    let pid = std::process::id();
+    let exe = std::env::temp_dir().join(format!(
+        "starry_run_{pid}{}",
+        if cfg!(windows) { ".exe" } else { "" }
+    ));
+    let mut inputs: Vec<String> = vec![rest[0].clone(), exe.to_string_lossy().into_owned()];
+    inputs.extend(rest[1..].iter().cloned());
+    let built = cmd_build_args(&inputs, release, true);
+    if built != ExitCode::SUCCESS {
+        return built;
+    }
+    let status = std::process::Command::new(&exe).status();
+    let _ = std::fs::remove_file(&exe);
+    match status {
+        Ok(status) => match status.code() {
+            Some(code) => ExitCode::from((code & 0xFF) as u8),
+            None => ExitCode::FAILURE,
+        },
+        Err(e) => {
+            eprintln!("starryc: 无法启动程序: {e}");
             ExitCode::FAILURE
         }
     }

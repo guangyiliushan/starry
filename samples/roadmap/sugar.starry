@@ -50,7 +50,7 @@ fun first_positive(values: [f64; 4]) : f64 {
     return -1.0
 }
 
-// ========== 主流程：命名实参 + spawn + defer ==========
+// ========== 主流程：命名实参 + defer ==========
 
 fun format(label: String, value: f64) : String = "${label} = ${value}"
 
@@ -60,10 +60,6 @@ fun main() {
     print(format(label = "圆周率", value = 3.14))
     print(greet(user = User(name = "小明", age = 18)))
     print("grid = ${grid_demo()}")
-
-    spawn thread {
-        print("  [线程] 后台统计完成")
-    }
 
     print("pick = ${pick(Opt.Some(value = 9.0))}")
     print("首个正数 = ${first_positive([-1.0, 0.0, 7.5, 2.0])}")

@@ -3,7 +3,7 @@
 每个语言特性在编译链五层的状态：parser → sem → irc → llvme → runtime
 （外加 irc 参考解释器作语义验证层）。状态记号：**✅** 完成、**🟡** 部分
 （限制见备注）、**❌** 未实现（sem 给稳定 `SemUnsupportedConstruct` 或
-irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
+irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单；已删关键字（D-014）在 parse 级拒收）。
 
 来源：`coverage.md`（EBNF↔AST 覆盖）、`semantic-notes.md`（语义契约）、
 `opt-notes.md`（ lowering/优化契约）。本文是**状态矩阵**，不改契约；
@@ -65,7 +65,7 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | class/ARC（M4 切片 1–4b，Plan C） | ✅ | ✅ | ✅ | ✅ | ✅ | 构造/字段/方法/deinit/weak var + upgrade 读取（`?P`）/可空 class/形参 +0/返回 +1 统一/重赋值所有权/语句级 +1 临时释放（`stmt_temps`，full-expression 纪律）；type-directed drop traversal 已建，但 ARC 聚合元素/字段仍稳定拒收 |
 | 闭包捕获（P2-3b-1/2） | ✅ | ✅ | ✅ | ✅ | ✅ | 标量/class 捕获 box（tagged）+ runtime tag 分派 + 快照语义 + box ARC（meta 逐 class 捕获 release，deinit 平衡 e2e）+ C 边界拒收；可空/i128/聚合捕获归批次 3（见未实现表） |
 | 泛型单态化（M7） | ✅ | ✅ | ✅ | ✅ | — | fun/struct 单态化；显式/推断实参、类型形参默认值、bounds 兑现（`T: Show` 实例化查 impl 注册表）；泛型 enum/struct 的 trait impl 分派已落地（9d：impl 注册延后到签名 lower 后，避免缓存空壳 spec） |
-| trait/impl 静态分派（M9） | ✅ | ✅ | ✅ | ✅ | — | trait 声明/impl/bounds/泛型 impl；aspect/provide 跳过清单 |
+| trait/impl 静态分派（M9） | ✅ | ✅ | ✅ | ✅ | — | trait 声明/impl/bounds/泛型 impl；aspect/provide 已从词表移除（D-014，parse 级拒收） |
 | 指针 `*const T`/`*mut T`（T2 thin） | ✅ | ✅ | ✅ | ✅ | — | M2：类型 + FFI + `&x`/`*p` + StorePtr；raw 解引读取/写入/复合读写须 unsafe（`SemUnsafeRequired`），创建/转换安全；T2 checked pointer 后置 M10（Q7） |
 | 引用 `&T`/`&mut T`（T1） | ✅ | ✅ | ✅ | ✅ | — | M2；v1 保守借用（R6：局部名/不逃逸/全局拒借/不可变只读）；重叠 `&mut`/区间追踪后置 M10 前专项 |
 | `--release` 构建 | — | — | — | ✅ | — | clang `-O2`；Windows freestanding CRT stubs、Linux 正常 libc；语言语义不变（checked 溢出所有模式生效，D5） |
@@ -91,15 +91,15 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单）。
 | 特性 | 拒收点 | 备注 |
 |---|---|---|
 | lambda 存 struct 字段（矩阵 #5） | sem | 修正 3：Fn 字段稳定拒收（主构造头字段 + body 字段两路已接，declare 侧） |
-| union 声明 / macro 声明 / comptime / accessor（get/set） | sem | P0 trust：此前静默接受，现声明/表达式点稳定拒收 |
+| union 声明 / accessor（get/set） | sem | P0 trust：此前静默接受，现声明点稳定拒收（D-014 保留字） |
+| macro 声明 / comptime / grow / spawn / actor / aspect / provide / async / await / concurrent / detached / thread / fiber / process / variance / const / inline / infix / vararg | parse | D-014：已从词表移除，parse 级拒收（2026-11-25） |
 | protected（顶层 + class 成员） | sem | P0 trust：继承未实现，稳定拒收 |
-| open/abstract/sealed/override/const/static/inline/operator/infix/vararg | sem | P0 trust：无实现路径的 modifier，声明点稳定拒收 |
+| open/abstract/sealed/override/static/operator | sem | P0 trust：无实现路径的 modifier，声明点稳定拒收（const/inline/infix/vararg 已从词表移除） |
 | `as` 非数值/非指针转换（如 string→int） | sem | P0 trust：只允许数值↔数值、同型、Ref/Pointer 互转；其余 SemTypeMismatch |
 | impl 头 trait 充当类型实参（`impl T for L<T>`） | sem | P0 trust：lower_ty 拒收（此前静默注册成 spec） |
 | class/可空 class/Fn 存 struct 字段/tuple/array；ARC enum payload | sem | return/break/repeat ownership transfer 未完成，enum payload 需 tag-aware traversal；所有 ARC-bearing aggregate slots 稳定拒收 |
-| aspect / provide | sem | 跳过清单 |
-| variance（类型形参型变标注） | sem | **声明点不变（invariant）**：v1 无子类型关系，variance 未实现；parser 保留 `in`/`out` 词法、sem 稳定拒收（S4：待 `open` 继承或 `dyn` + ≥2 惯用样例被挡才设计） |
-| spawn/async/await、宏展开、grow | sem | 跳过清单 |
+| variance（类型形参型变标注） | parse | D-014：已从文法移除（parse 级拒收）；未来用 `+`/`-` 标注实现 |
+| 宏调用展开 `name!(...)` | sem | `SemMacroExpansion`（宏声明已删，D-014；展开后置） |
 | 聚合顶层全局 | ✅（纯值）/ irc（class/Fn/i128） | 纯值 `[n x i64]`；unsafe 组合 `IrcUnsupportedLowering` |
 | extern 程序 interp 验证 | interp | `UnknownFun` trap（已知局限） |
 | T2 checked pointer | — | 后置 M10（Q7） |
@@ -117,3 +117,11 @@ Feature Group 定义：**FG0** 标量核心（上表第一组）、**FG1** 数�
 沿用旧称，语义 = FG0 conformance）。
 - FG1+：由差分 harness（`llvme/tests/diff_native.rs`）逐层对拍担保
   （interp vs native 逐行一致）；新增类型种类时两处的用例表都要加行。
+
+## 关键字（D-014 冻结，2026-11-25）
+
+v1 预算冻结：**35 hard / 11 modifier / 9 slot = 55**，不再减少。保留待实现的
+capability 关键字：`static`（静态成员）、`operator`（运算符重载）、`namespace`
+（C++ FFI）、`union`（重叠字段值类型）、`get`/`set`（属性）、`by`（委托，
+随继承落地）、`it`/`move`（lambda 推断/捕获）。以上均有稳定拒收诊断。
+已实现新增：`alias`（类型别名）、`deinit`（析构）。

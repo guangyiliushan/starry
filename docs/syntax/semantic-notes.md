@@ -173,13 +173,10 @@ LocalBinding/Param）；`=` 赋值重置；分支/循环取两态**并集**
 > 2026-11-24 P0 校准：泛型、方法调用、impl、class/ARC、weak、deinit、
 > 闭包捕获均已落地，从本清单移除；本清单只保留真实拒收面。
 
-actor、provide、aspect（含 before/after/around/proceed）、
-union 声明、dyn/Self（trait 外）类型、spawn/async/await/concurrent、
-宏声明与展开（调用点 `SemMacroExpansion`）、grow 语句、
-accessor（get/set）、二级构造 init、protected、
-无语义 modifier（open/abstract/sealed/override/const/static/inline/
-operator/infix/vararg）、`as` 非数值/非指针转换、
-impl 头 trait 充当类型实参（`impl T for L<T>`）——均由 sem 稳定拒收。
+**parse 级拒收（D-014 已从词表删除，2026-11-25）**：actor、provide、aspect（含
+before/after/around/proceed）、spawn、async/await/concurrent、宏声明、comptime、
+grow 语句、const/inline/infix/vararg modifier、out 型变——词法/文法已移除，
+不再进入 sem。
 rest 模式与含绑定 Or 已在 sem/irc 解冻。
 lambda 内部已在 M8 slice 2 落地（期望 Fn 类型驱动的定型 + body resolve + irc lowering）。
 
@@ -195,8 +192,8 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
 - `Own<T>` 的构造入口（moveck 测试以标注绑定近似，自带一条
   `SemTypeMismatch`，断言完整诊断序列钉住这一点）
 - import 存在性核查（`import a.b.*` 空转不查目标）
-- `as`/`as?`/`as!` 不核查可转换性（`"s" as int` 亦 clean——显式转换的
-  合法对集合未定义，留给类型设计；v1 全部接受、照目标类型定型）。
+- ~~`as` 不核查可转换性~~ **已修复（P0，2026-11）**：`as`/`as?`/`as!` 现按
+  数值↔数值、同型、Ref/Pointer 互转核查，其余 `SemTypeMismatch`。
 - 内建类型名大小写敏感（`String` ≠ `string`，样例需随语法修订）
 - 间接类型别名循环（`A→B→A` 惰性 lower，仅使用时报告；
   直接循环已报 `SemTypeCycle`）
@@ -486,3 +483,14 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
 全部 `Sem*` 前缀，定义在 `crates/ast/src/syntax/node.rs::DiagCode`，
 27 个（SemUndefinedName … SemUnknownMember、SemTypeArgMismatch、SemConstOverflow、SemDivisionByZero、SemDivisionOverflow、SemUnsafeRequired）；另有 `Irc*` 2 个属 irc
 阶段（码表同址，见 opt-notes）。解析器码不受影响。
+
+## 关键字收敛（D-014，2026-11-25）
+
+- **parse 级拒收**（词已删）：actor/provide/aspect/spawn/async/await/
+  concurrent/grow/comptime/macro 声明/const/inline/infix/vararg/out。
+- **sem 级拒收**（保留字，语义待实现）：union 声明、accessor（get/set）、
+  dyn/Self（trait 外）、宏调用展开（SemMacroExpansion）、
+  open/abstract/sealed/override/static/operator、二级构造 init、protected。
+- **已实现**：alias（类型别名）、deinit（析构）、by（superitem 委托槽，
+  随继承实现）、it/move（lambda 推断/捕获）、namespace（FFI 槽，嵌套待实现）。
+- 冻结预算：35 hard / 11 modifier / 9 slot = 55，不再减少。

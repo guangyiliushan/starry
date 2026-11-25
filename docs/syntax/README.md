@@ -4,7 +4,7 @@
 generates the Rust definitions, the reserved-token fragment for the ANTLR4
 lexer reference, and the Markdown table.
 
-The frozen counts are 37 hard keywords, 14 modifier words, and 31 slot words.
+The frozen counts are 35 hard keywords, 11 modifier words, and 9 slot words (55 total; frozen 2026-11-25, see keyword-capability-plan).
 Only hard keywords are reserved by the lexer. Modifier and slot words remain
 identifiers and are recognized by parser predicates only in their listed
 grammar slots.
@@ -36,21 +36,6 @@ while val Some((key, value)) = queue.next() {
 The `val` in this condition slot is a refutable binding: the branch runs only
 when the pattern matches. There is no `let` declaration and no `let` condition.
 
-DI providers retain `->` because the right side is a lifecycle construction
-rule, not an ordinary assignment or a function type:
-
-```starry
-provide AppServices {
-    singleton Clock -> SystemClock()
-    scoped Session -> Session.open(user)
-}
-```
-
-Use `bind ... to ...` for an interface-to-implementation relationship:
-
-```starry
-bind Clock to SystemClock
-```
 
 ```bash
 cargo run -p syntaxgen

@@ -41,25 +41,21 @@
 |------|---------|
 | 插值字符串模式栈（设计缺口） | 审计行"设计缺口·归 lexer 计划" |
 | 注释跳过层（已实现：块注释嵌套、行注释） | 审计行"待决策" |
-| comptime 槽位收窄（expression_or_block → stmt-only） | coverage 行 comptime |
 | NL 前言约定（不逐产生式塞 NL） | EBNF 前言声明 |
 | mutable 模式 | pat.rs BindingPattern mutable 字段 |
 | 参数修饰符单态 | ParamModifier = None \| Mutable \| Val \| Var |
 | 参数默认值（Decl→Expr walk 边） | decl.rs Param 默认值字段 |
 | 条件绑定无 `let` | RefutableCondition = Expr \| "val" Pattern "=" Expr |
-| provider `->` 保留 | ProviderDecl lifecycle construction rule |
-| declaration 全量 | DeclKind / ClassMember / TraitMember / ProviderItem |
+| declaration 全量 | DeclKind / ClassMember / TraitMember（ProviderItem 等为 AST 遗留变体，parser 不可达，待清理） |
 | `ParameterList` 显式化 | Parameter / ParameterList 前言定义 |
 | v0.4 插值字符串（parser 子扫描） | ExprKind::StringInterp + parse_string_literal |
 | v0.4 具名实参 | CallArg { name, value } |
 | v0.4 `?.`/`!!` 后缀 | Member { safe } / ExprKind::ForceUnwrap；无 `?` 传播 |
-| v0.4 unsafe/concurrent/proceed | ExprKind::Unsafe / Concurrent / Proceed |
-| v0.4 spawn actor 构造 | SpawnExpr.actor = ActorConstruction |
+| v0.4 unsafe 块 | ExprKind::Unsafe（concurrent/proceed 已随 D-014 删除；AST 遗留变体待清理） |
 | v0.4 循环标签 `'ident` | TokenKind::Label；break/continue/loop 标签槽位 |
 | 赋值目标语法检查 | AssignmentStatement 只接受 Place（PostfixExpr）；InvalidAssignmentTarget |
 | TypeParameter 恢复 | TypeParamName::Valid/Error，非法名不再伪装为 Symbol |
-| v0.4 comptime 收窄为 Block | ComptimeExpr := «comptime» Block |
-| v0.4 宏调用 `name!(...)` | ExprKind::MacroCall + TokenTree 流 |
+| v0.4 宏调用 `name!(...)` | ExprKind::MacroCall + TokenTree 流；展开后置（调用点 `SemMacroExpansion`） |
 | v0.4 数组 `[T; N]` / `[v; N]` | TypeKind::Array / ExprKind::ArrayRepeat |
 | v0.4 module 声明移除 | SourceFile 无 package 头；模块路径为编译器 segment 元数据；`by` 降为 slot word |
 | v0.4 LoopExpr / LoopStatement 分立 | ExprKind::Loop（表达式，label 字段承块尾归一）/ StmtKind::Loop（带标签语句，块尾时归一为 LoopExpr） |
@@ -79,7 +75,7 @@
 | 19 | Bound := Type { "&" Type } | `TypeParam.bounds` / `WhereConstraint.bounds` | bounds | `&` | ✓ 内联与 where 同构 |
 | 20 | ExternBody 块形式 | `ExternBody::Block { members }` | members | `{` `}` | ✓ |
 | 21 | FunSignature / AssociatedType 可选 `;` | 同上 | — | `;` 冗余终止符，宽松接收 | ✓ |
-| 22 | TypeAliasDecl `"=" Type` | `TypeAliasDecl.ty` | ty | `=` | ✓ parser 原先漏吃 `=` |
+| 22 | TypeAliasDecl `"=" Type`（D-014：关键字改为 `alias`） | `TypeAliasDecl.ty` | ty | `=` | ✓ parser 原先漏吃 `=` |
 | 23 | `let` 非关键字 | `StmtKind::Binding`（恢复形态） | pattern, ty, init | `let` + IDENT → `LetKeyword` | ✓ 不再静默拆两句 |
 
 ### 终端审计补充
@@ -92,3 +88,13 @@
 | `!is` / `!in` | relational 层，与 `is` / `in` 同构 | ✓ |
 | `let` | 非关键字；`LetKeyword` 诊断 | ✓ |
 | `;` | 仅作 `FunSignature`/`AssociatedType` 的冗余终止符；语句位仍拒绝 | ✓ |
+
+## D-014 关键字收敛（2026-11-25）
+
+- 已从词表删除并在 **parse 级**拒收：actor/aspect/provide/macro/comptime/
+  spawn/detached/concurrent/thread/fiber/process/grow/bits/before/after/
+  around/proceed/singleton/scoped/transient/bind/to/out/async/await/
+  const/inline/infix/vararg/package。
+- 新增：`alias`（类型别名 hard keyword）、`deinit`（slot word，
+  `DeinitBlock := «deinit» Block`）。
+- AST 仍保留上述特性的遗留变体（parser 不可达），清理归 T12。

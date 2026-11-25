@@ -1,14 +1,12 @@
 //! Declaration parser for the frozen v0.4 grammar.
 
 use ast::syntax::decl::*;
-use ast::syntax::expr::ExprWrap;
 use ast::syntax::modifier::ModifierList;
 use ast::syntax::node::Path;
 use ast::syntax::node::{DiagCode, ErrorNode, Span, Symbol};
-use ast::syntax::ty::TypeWrap;
 use ast::token::{HardKeyword, LiteralKind, OperatorKind, PunctuationKind, TokenKind};
 
-use crate::expr::{parse_block, parse_expr, parse_identifier, parse_path};
+use crate::expr::{parse_block, parse_expr, parse_identifier};
 use crate::pat::parse_pattern;
 use crate::ty::{join_span, parse_type, parse_type_params};
 use crate::{MAX_PARSE_DEPTH, ParseSession, ParserError};
@@ -562,11 +560,11 @@ fn parse_top_level_inner(session: &mut ParseSession<'_>) -> Result<DeclNode, Par
                 members,
             })
         }),
-        TokenKind::Keyword(HardKeyword::Type) => complete_decl!(session, start, {
+        TokenKind::Keyword(HardKeyword::Alias) => complete_decl!(session, start, {
             session.cursor.advance();
             let name = parse_identifier(session).0;
             let type_params = parse_type_params(session)?;
-            // EBNF: TypeAliasDecl := Modifiers "type" IDENT TypeParams? "=" Type
+            // EBNF: TypeAliasDecl := Modifiers \x22alias\x22 IDENT TypeParams? "=" Type
             if !session
                 .cursor
                 .bump_if(&TokenKind::Operator(OperatorKind::Eq))
@@ -585,68 +583,6 @@ fn parse_top_level_inner(session: &mut ParseSession<'_>) -> Result<DeclNode, Par
             })
         }),
         TokenKind::Identifier => match session.token_text(session.cursor.peek()) {
-            "actor" => complete_decl!(session, start, {
-                session.cursor.advance();
-                let name = parse_identifier(session).0;
-                let primary_ctor = parse_primary_constructor(session)?;
-                let body = parse_class_body(session)?;
-                DeclKind::Actor(ActorDecl {
-                    name,
-                    primary_ctor,
-                    body,
-                })
-            }),
-            "aspect" => complete_decl!(session, start, {
-                session.cursor.advance();
-                let name = parse_identifier(session).0;
-                let type_params = parse_type_params(session)?;
-                expect_punctuation(session, PunctuationKind::LBrace, '{');
-                let mut members = Vec::new();
-                while !session
-                    .cursor
-                    .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
-                    && !session.cursor.is_eof()
-                {
-                    session.cursor.skip_nl();
-                    if session
-                        .cursor
-                        .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
-                        || session.cursor.is_eof()
-                    {
-                        break;
-                    }
-                    members.push(parse_aspect_member(session)?);
-                }
-                expect_punctuation(session, PunctuationKind::RBrace, '}');
-                DeclKind::Aspect(AspectDecl {
-                    name,
-                    type_params,
-                    members,
-                })
-            }),
-            "provide" => complete_decl!(session, start, {
-                session.cursor.advance();
-                let name = parse_identifier(session).0;
-                expect_punctuation(session, PunctuationKind::LBrace, '{');
-                let mut items = Vec::new();
-                while !session
-                    .cursor
-                    .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
-                    && !session.cursor.is_eof()
-                {
-                    session.cursor.skip_nl();
-                    if session
-                        .cursor
-                        .check(&TokenKind::Punctuation(PunctuationKind::RBrace))
-                        || session.cursor.is_eof()
-                    {
-                        break;
-                    }
-                    items.push(parse_provider_item(session)?);
-                }
-                expect_punctuation(session, PunctuationKind::RBrace, '}');
-                DeclKind::Provide(ProvideDecl { name, items })
-            }),
             "impl" => complete_decl!(session, start, {
                 session.cursor.advance();
                 // EBNF: ImplDecl := «impl» TypeParams? Type "for" Type "{" { ClassMember } "}"
@@ -663,32 +599,6 @@ fn parse_top_level_inner(session: &mut ParseSession<'_>) -> Result<DeclNode, Par
                     trait_ref,
                     members,
                 })
-            }),
-            "macro" => complete_decl!(session, start, {
-                session.cursor.advance();
-                let name = parse_identifier(session).0;
-                expect_punctuation(session, PunctuationKind::LParen, '(');
-                let mut params = Vec::new();
-                while !session
-                    .cursor
-                    .check(&TokenKind::Punctuation(PunctuationKind::RParen))
-                {
-                    params.push(parse_identifier(session).0);
-                    if !session
-                        .cursor
-                        .bump_if(&TokenKind::Punctuation(PunctuationKind::Comma))
-                    {
-                        break;
-                    }
-                }
-                expect_punctuation(session, PunctuationKind::RParen, ')');
-                let body = parse_block(session)?;
-                DeclKind::Macro(MacroDecl { name, params, body })
-            }),
-            "comptime" => complete_decl!(session, start, {
-                session.cursor.advance();
-                let block = parse_block(session)?;
-                DeclKind::Comptime(ComptimeDecl { block })
             }),
             _ => {
                 let checkpoint = session.checkpoint();
@@ -874,7 +784,8 @@ fn parse_class_members(session: &mut ParseSession<'_>) -> Result<Vec<ClassMember
         // M4 slice 2b：deinit 块（init 同款的文本槽位词——不做硬关键字，
         // 与 init 先例一致；R4 的 "deinit 拼写" 裁定由此兑现）
         if session.cursor.check(&TokenKind::Identifier)
-            && session.token_text(session.cursor.peek()) == "deinit"
+            && ast::token::lookup_slot_word(session.token_text(session.cursor.peek()))
+                == Some(ast::token::SlotWord::Deinit)
         {
             session.cursor.advance();
             members.push(ClassMember::Deinit(parse_block(session)?));
@@ -1068,137 +979,6 @@ fn parse_trait_members(session: &mut ParseSession<'_>) -> Result<Vec<TraitMember
         }
     }
     Ok(members)
-}
-
-fn parse_aspect_member(session: &mut ParseSession<'_>) -> Result<AspectMember, ParserError> {
-    if let TokenKind::Identifier = session.cursor.peek().kind {
-        let pointcut = match session.token_text(session.cursor.peek()) {
-            "before" => Some(PointcutKind::Before),
-            "after" => Some(PointcutKind::After),
-            "around" => Some(PointcutKind::Around),
-            _ => None,
-        };
-        if let Some(kind) = pointcut {
-            session.cursor.advance();
-            let target = parse_pointcut(session)?;
-            let body = parse_block(session)?;
-            let advice = AdviceDecl {
-                kind: match kind {
-                    PointcutKind::Before => AdviceKind::Before,
-                    PointcutKind::After => AdviceKind::After,
-                    PointcutKind::Around => AdviceKind::Around,
-                },
-                target,
-                body,
-            };
-            return Ok(AspectMember::Advice(advice));
-        }
-    }
-    Ok(AspectMember::Declaration(parse_top_level(session)?))
-}
-
-enum PointcutKind {
-    Before,
-    After,
-    Around,
-}
-
-fn parse_pointcut(session: &mut ParseSession<'_>) -> Result<Pointcut, ParserError> {
-    if let TokenKind::Identifier = session.cursor.peek().kind {
-        let checkpoint = session.checkpoint();
-        if let Ok(path) = parse_path(session) {
-            if !session
-                .cursor
-                .check(&TokenKind::Punctuation(PunctuationKind::Dot))
-            {
-                return Ok(Pointcut::Name(path));
-            }
-            session.rollback(&checkpoint);
-        } else {
-            session.rollback(&checkpoint);
-        }
-    }
-    let ty = parse_type(session)?;
-    expect_punctuation(session, PunctuationKind::Dot, '.');
-    let member = if session
-        .cursor
-        .check(&TokenKind::Operator(OperatorKind::Star))
-    {
-        session.cursor.advance();
-        PointcutMember::Wildcard
-    } else {
-        PointcutMember::Name(parse_identifier(session).0)
-    };
-    Ok(Pointcut::Member { ty, member })
-}
-
-fn parse_provider_item(session: &mut ParseSession<'_>) -> Result<ProviderItem, ParserError> {
-    if let TokenKind::Identifier = session.cursor.peek().kind {
-        match session.token_text(session.cursor.peek()) {
-            "singleton" | "scoped" | "transient" => {
-                let lifetime = match session.token_text(session.cursor.peek()) {
-                    "scoped" => ProviderLifetime::Scoped,
-                    "transient" => ProviderLifetime::Transient,
-                    _ => ProviderLifetime::Singleton,
-                };
-                session.cursor.advance();
-                let ty = crate::ty::parse_union_type(session)?;
-                if !session
-                    .cursor
-                    .bump_if(&TokenKind::Operator(OperatorKind::Arrow))
-                {
-                    let span = session.cursor.peek().span;
-                    session.emit_unique(DiagCode::ExpectedToken, span, || {
-                        "expected '->'".to_string()
-                    });
-                }
-                let constructor = parse_expr(session)?;
-                return Ok(ProviderItem::Decl(ProviderDecl {
-                    lifetime,
-                    ty,
-                    constructor,
-                }));
-            }
-            "bind" => {
-                session.cursor.advance();
-                let interface = parse_type(session)?;
-                if !session.cursor.check(&TokenKind::Identifier)
-                    || session.token_text(session.cursor.peek()) != "to"
-                {
-                    let span = session.cursor.peek().span;
-                    session.emit_unique(DiagCode::ExpectedToken, span, || {
-                        "expected 'to'".to_string()
-                    });
-                } else {
-                    session.cursor.advance();
-                }
-                let implementation = parse_type(session)?;
-                return Ok(ProviderItem::Binding(ProviderBinding {
-                    interface,
-                    implementation,
-                }));
-            }
-            _ => {}
-        }
-    }
-    let token = session.cursor.advance();
-    let id = session.next_node()?;
-    let diag = session.emit_unique(DiagCode::UnexpectedToken, token.span, || {
-        format!("expected provider item, found {}", token.kind)
-    });
-    Ok(ProviderItem::Decl(ProviderDecl {
-        lifetime: ProviderLifetime::Singleton,
-        ty: TypeWrap {
-            id,
-            span: token.span,
-            kind: ast::syntax::ty::TypeKind::Error(ErrorNode {
-                id,
-                span: token.span,
-                err: diag,
-            }),
-        },
-        constructor: ExprWrap::missing(id, token.span),
-    }))
 }
 
 pub(crate) fn expect_keyword(session: &mut ParseSession<'_>, expected: HardKeyword, display: &str) {

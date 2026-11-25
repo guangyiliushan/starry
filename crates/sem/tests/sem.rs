@@ -597,13 +597,13 @@ fn if_is_pattern_keeps_then_block() {
 
 #[test]
 fn alias_name_is_not_a_value() {
-    let src = "type M = int\nfun f() : M {\n    return M\n}";
+    let src = "alias M = int\nfun f() : M {\n    return M\n}";
     assert_has(src, DiagCode::SemTypeMismatch);
 }
 
 #[test]
 fn alias_constructor_reaches_target() {
-    let src = "struct P {\n    x: int\n}\ntype Q = P\nfun f() : Q {\n    return Q(1)\n}";
+    let src = "struct P {\n    x: int\n}\nalias Q = P\nfun f() : Q {\n    return Q(1)\n}";
     assert_clean(src);
 }
 
@@ -785,27 +785,23 @@ fn definite_assignment_paths_are_checked() {
 }
 
 #[test]
-fn grow_and_concurrent_report_unsupported() {
-    assert_has(
+fn grow_and_concurrent_rejected_at_parse_level() {
+    for src in [
         "fun f(x: int) {\n    grow x to 64 bits\n}",
-        DiagCode::SemUnsupportedConstruct,
-    );
-    assert_has(
         "fun main() {\n    concurrent {\n        val x = 1\n    }\n}",
-        DiagCode::SemUnsupportedConstruct,
-    );
+    ] {
+        assert!(!codes(src).is_empty(), "{src}");
+    }
 }
 
 #[test]
-fn async_and_await_report_unsupported() {
-    assert_has(
+fn async_and_await_rejected_at_parse_level() {
+    for src in [
         "fun main() {\n    val f = async {\n        1\n    }\n}",
-        DiagCode::SemUnsupportedConstruct,
-    );
-    assert_has(
         "fun main() {\n    val x = await y\n}",
-        DiagCode::SemUnsupportedConstruct,
-    );
+    ] {
+        assert!(!codes(src).is_empty(), "{src}");
+    }
 }
 
 // ---- 第七轮回归：穷尽性、聚合格、别名归一、诊断文案 ----
@@ -846,17 +842,17 @@ fn array_and_range_elementwise_assignable() {
 
 #[test]
 fn alias_normalizes_to_target_def() {
-    let src = "enum E {\n    A,\n    B\n}\ntype F = E\nfun f() : E {\n    return F.A\n}";
+    let src = "enum E {\n    A,\n    B\n}\nalias F = E\nfun f() : E {\n    return F.A\n}";
     assert_clean(src);
-    let src2 = "enum Opt {\n    Some(int),\n    None\n}\ntype O = Opt\nfun f() : Opt {\n    return O.Some(1)\n}";
+    let src2 = "enum Opt {\n    Some(int),\n    None\n}\nalias O = Opt\nfun f() : Opt {\n    return O.Some(1)\n}";
     assert_clean(src2);
     let src3 =
-        "enum E {\n    A,\n    B\n}\ntype F = E\ntype G = F\nfun f() : E {\n    return G.A\n}";
+        "enum E {\n    A,\n    B\n}\nalias F = E\nalias G = F\nfun f() : E {\n    return G.A\n}";
     assert_clean(src3);
-    let src4 = "enum E {\n    A,\n    B\n}\ntype F = E\nfun f(e: E) : int {\n    return when e {\n        F.A -> 1\n        F.B -> 2\n    }\n}";
+    let src4 = "enum E {\n    A,\n    B\n}\nalias F = E\nfun f(e: E) : int {\n    return when e {\n        F.A -> 1\n        F.B -> 2\n    }\n}";
     assert_clean(src4);
     // 类型对象同型聚合仍拒绝
-    let src5 = "struct P {\n    x: int\n}\ntype Q = P\nfun f() {\n    val a = [P, Q]\n}";
+    let src5 = "struct P {\n    x: int\n}\nalias Q = P\nfun f() {\n    val a = [P, Q]\n}";
     assert_has(src5, DiagCode::SemTypeMismatch);
 }
 
@@ -967,7 +963,7 @@ fn extern_c_i128_scalar_abi_reports() {
     );
     // 别名经 lower 归一为 Int(I128)，同样命中
     assert_has(
-        "type Big = i128\nextern \"c\" fun f(x: Big) : int",
+        "alias Big = i128\nextern \"c\" fun f(x: Big) : int",
         DiagCode::SemUnsupportedConstruct,
     );
     // i64 形参与含 i128 成员的聚合（按指针传递）不受影响
@@ -1739,16 +1735,10 @@ fn lambda_explicit_params_paren_and_named_forms() {
     );
 }
 #[test]
-fn variance_annotations_stable_rejection() {
-    // S4：v1 声明点不变——parser 保留 in/out 词法，sem 稳定拒收
-    assert_has(
-        "struct Box<in T>(val v: T)",
-        DiagCode::SemUnsupportedConstruct,
-    );
-    assert_has(
-        "struct Box<out T>(val v: T)",
-        DiagCode::SemUnsupportedConstruct,
-    );
+fn variance_markers_rejected_at_parse_level() {
+    for src in ["struct Box<in T>(val v: T)", "struct Box<out T>(val v: T)"] {
+        assert!(!codes(src).is_empty(), "{src}");
+    }
 }
 
 // ---- P0 compiler trust baseline ----
@@ -1768,15 +1758,14 @@ fn p0_rejects_static_modifier() {
 
 #[test]
 fn p0_rejects_inline_modifier() {
-    assert_has(
-        "inline fun f(): int {\n    return 1\n}",
-        DiagCode::SemUnsupportedConstruct,
-    );
+    // D-014: keyword removed from the lexicon; rejected at parse level.
+    assert!(!codes("inline fun f(): int {\n    return 1\n}").is_empty());
 }
 
 #[test]
 fn p0_rejects_const_modifier() {
-    assert_has("const val X: int = 3", DiagCode::SemUnsupportedConstruct);
+    // D-014: keyword removed from the lexicon; rejected at parse level.
+    assert!(!codes("const val X: int = 3").is_empty());
 }
 
 #[test]
@@ -1789,18 +1778,14 @@ fn p0_rejects_operator_modifier() {
 
 #[test]
 fn p0_rejects_infix_modifier() {
-    assert_has(
-        "infix fun plus(a: int, b: int): int {\n    return a + b\n}",
-        DiagCode::SemUnsupportedConstruct,
-    );
+    // D-014: keyword removed from the lexicon; rejected at parse level.
+    assert!(!codes("infix fun plus(a: int, b: int): int {\n    return a + b\n}").is_empty());
 }
 
 #[test]
 fn p0_rejects_vararg_modifier() {
-    assert_has(
-        "vararg fun h(xs: int): int {\n    return 0\n}",
-        DiagCode::SemUnsupportedConstruct,
-    );
+    // D-014: keyword removed from the lexicon; rejected at parse level.
+    assert!(!codes("vararg fun h(xs: int): int {\n    return 0\n}").is_empty());
 }
 
 #[test]
@@ -1831,23 +1816,20 @@ fn p0_rejects_union_declaration() {
 
 #[test]
 fn p0_rejects_macro_declaration() {
-    assert_has("macro repeat(name) {\n}", DiagCode::SemUnsupportedConstruct);
+    // D-014: keyword removed from the lexicon; rejected at parse level.
+    assert!(!codes("macro repeat(name) {\n}").is_empty());
 }
 
 #[test]
 fn p0_rejects_comptime_expression() {
-    assert_has(
-        "val X: int = comptime {\n    1 + 1\n}",
-        DiagCode::SemUnsupportedConstruct,
-    );
+    // D-014: keyword removed from the lexicon; rejected at parse level.
+    assert!(!codes("val X: int = comptime {\n    1 + 1\n}").is_empty());
 }
 
 #[test]
 fn p0_rejects_comptime_statement() {
-    assert_has(
-        "fun main() {\n    comptime {\n        val x = 1\n    }\n}",
-        DiagCode::SemUnsupportedConstruct,
-    );
+    // D-014: keyword removed from the lexicon; rejected at parse level.
+    assert!(!codes("fun main() {\n    comptime {\n        val x = 1\n    }\n}").is_empty());
 }
 
 #[test]

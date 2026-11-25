@@ -3,6 +3,7 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HardKeyword {
+    Alias,
     Import,
     Extern,
     Val,
@@ -24,8 +25,6 @@ pub enum HardKeyword {
     Continue,
     Return,
     Defer,
-    Async,
-    Await,
     True,
     False,
     Null,
@@ -45,6 +44,7 @@ impl HardKeyword {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Alias => "alias",
             Self::Import => "import",
             Self::Extern => "extern",
             Self::Val => "val",
@@ -66,8 +66,6 @@ impl HardKeyword {
             Self::Continue => "continue",
             Self::Return => "return",
             Self::Defer => "defer",
-            Self::Async => "async",
-            Self::Await => "await",
             Self::True => "true",
             Self::False => "false",
             Self::Null => "null",
@@ -88,6 +86,7 @@ impl HardKeyword {
 #[must_use]
 pub fn lookup_hard_keyword(word: &str) -> Option<HardKeyword> {
     match word {
+        "alias" => Some(HardKeyword::Alias),
         "import" => Some(HardKeyword::Import),
         "extern" => Some(HardKeyword::Extern),
         "val" => Some(HardKeyword::Val),
@@ -109,8 +108,6 @@ pub fn lookup_hard_keyword(word: &str) -> Option<HardKeyword> {
         "continue" => Some(HardKeyword::Continue),
         "return" => Some(HardKeyword::Return),
         "defer" => Some(HardKeyword::Defer),
-        "async" => Some(HardKeyword::Async),
-        "await" => Some(HardKeyword::Await),
         "true" => Some(HardKeyword::True),
         "false" => Some(HardKeyword::False),
         "null" => Some(HardKeyword::Null),
@@ -138,12 +135,8 @@ pub enum ModifierWord {
     Abstract,
     Sealed,
     Override,
-    Const,
     Static,
-    Inline,
     OperatorWord,
-    Infix,
-    Vararg,
     Weak,
 }
 
@@ -159,12 +152,8 @@ impl ModifierWord {
             Self::Abstract => "abstract",
             Self::Sealed => "sealed",
             Self::Override => "override",
-            Self::Const => "const",
             Self::Static => "static",
-            Self::Inline => "inline",
             Self::OperatorWord => "operator",
-            Self::Infix => "infix",
-            Self::Vararg => "vararg",
             Self::Weak => "weak",
         }
     }
@@ -181,12 +170,8 @@ pub fn lookup_modifier_word(word: &str) -> Option<ModifierWord> {
         "abstract" => Some(ModifierWord::Abstract),
         "sealed" => Some(ModifierWord::Sealed),
         "override" => Some(ModifierWord::Override),
-        "const" => Some(ModifierWord::Const),
         "static" => Some(ModifierWord::Static),
-        "inline" => Some(ModifierWord::Inline),
         "operator" => Some(ModifierWord::OperatorWord),
-        "infix" => Some(ModifierWord::Infix),
-        "vararg" => Some(ModifierWord::Vararg),
         "weak" => Some(ModifierWord::Weak),
         _ => None,
     }
@@ -194,36 +179,14 @@ pub fn lookup_modifier_word(word: &str) -> Option<ModifierWord> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SlotWord {
-    Actor,
-    Aspect,
-    Provide,
     Impl,
-    Macro,
-    Comptime,
-    Spawn,
-    Detached,
-    Concurrent,
-    Thread,
-    Fiber,
-    Process,
-    Namespace,
-    Grow,
-    Bits,
     It,
     Move,
-    Before,
-    After,
-    Around,
-    Proceed,
-    Singleton,
-    Scoped,
-    Transient,
-    Bind,
-    To,
     Init,
+    Deinit,
     Get,
     Set,
-    Out,
+    Namespace,
     By,
 }
 
@@ -231,36 +194,14 @@ impl SlotWord {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Actor => "actor",
-            Self::Aspect => "aspect",
-            Self::Provide => "provide",
             Self::Impl => "impl",
-            Self::Macro => "macro",
-            Self::Comptime => "comptime",
-            Self::Spawn => "spawn",
-            Self::Detached => "detached",
-            Self::Concurrent => "concurrent",
-            Self::Thread => "thread",
-            Self::Fiber => "fiber",
-            Self::Process => "process",
-            Self::Namespace => "namespace",
-            Self::Grow => "grow",
-            Self::Bits => "bits",
             Self::It => "it",
             Self::Move => "move",
-            Self::Before => "before",
-            Self::After => "after",
-            Self::Around => "around",
-            Self::Proceed => "proceed",
-            Self::Singleton => "singleton",
-            Self::Scoped => "scoped",
-            Self::Transient => "transient",
-            Self::Bind => "bind",
-            Self::To => "to",
             Self::Init => "init",
+            Self::Deinit => "deinit",
             Self::Get => "get",
             Self::Set => "set",
-            Self::Out => "out",
+            Self::Namespace => "namespace",
             Self::By => "by",
         }
     }
@@ -269,41 +210,19 @@ impl SlotWord {
 #[must_use]
 pub fn lookup_slot_word(word: &str) -> Option<SlotWord> {
     match word {
-        "actor" => Some(SlotWord::Actor),
-        "aspect" => Some(SlotWord::Aspect),
-        "provide" => Some(SlotWord::Provide),
         "impl" => Some(SlotWord::Impl),
-        "macro" => Some(SlotWord::Macro),
-        "comptime" => Some(SlotWord::Comptime),
-        "spawn" => Some(SlotWord::Spawn),
-        "detached" => Some(SlotWord::Detached),
-        "concurrent" => Some(SlotWord::Concurrent),
-        "thread" => Some(SlotWord::Thread),
-        "fiber" => Some(SlotWord::Fiber),
-        "process" => Some(SlotWord::Process),
-        "namespace" => Some(SlotWord::Namespace),
-        "grow" => Some(SlotWord::Grow),
-        "bits" => Some(SlotWord::Bits),
         "it" => Some(SlotWord::It),
         "move" => Some(SlotWord::Move),
-        "before" => Some(SlotWord::Before),
-        "after" => Some(SlotWord::After),
-        "around" => Some(SlotWord::Around),
-        "proceed" => Some(SlotWord::Proceed),
-        "singleton" => Some(SlotWord::Singleton),
-        "scoped" => Some(SlotWord::Scoped),
-        "transient" => Some(SlotWord::Transient),
-        "bind" => Some(SlotWord::Bind),
-        "to" => Some(SlotWord::To),
         "init" => Some(SlotWord::Init),
+        "deinit" => Some(SlotWord::Deinit),
         "get" => Some(SlotWord::Get),
         "set" => Some(SlotWord::Set),
-        "out" => Some(SlotWord::Out),
+        "namespace" => Some(SlotWord::Namespace),
         "by" => Some(SlotWord::By),
         _ => None,
     }
 }
 
-pub const HARD_KEYWORD_COUNT: usize = 36;
-pub const MODIFIER_WORD_COUNT: usize = 15;
-pub const SLOT_WORD_COUNT: usize = 31;
+pub const HARD_KEYWORD_COUNT: usize = 35;
+pub const MODIFIER_WORD_COUNT: usize = 11;
+pub const SLOT_WORD_COUNT: usize = 9;

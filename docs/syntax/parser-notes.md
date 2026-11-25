@@ -66,17 +66,17 @@ never a machine `Err`.
 | Self receiver (deferred) | No method receiver syntax yet; design during the semantic phase together with symbol tables. |
 | Nullability (v0.4, decided) | Kotlin/Swift family: `T?` with `?.` / `!!` / `??` for absence; errors dispatch via `when` on Result-style enums; lowering deferred to the semantic phase. |
 | Error propagation | No `?`-propagation operator; a Swift-style `try` marker may be added later without touching `?.`. |
-| Async (v0.4, decided) | `async`/`await` are reserved with zero semantics; `spawn thread` is the only implemented primitive; `fiber`/`process` parse legally but are unimplemented (remove the grammar if no runtime lands). |
+| Async (D-014) | async/await/spawn/concurrent grammar removed from the lexicon (2026-11-25); parse-level rejection. Concurrency is deferred to the next stage. |
 | Receiver (v0.4, decided) | Ctor params may carry `val`/`var` (grammar supported) and become properties; methods see properties with implicit self; locals shadow properties (warn-grade diagnostic recommended). |
 | Enum payload | Named declaration; construction and pattern matching bind positionally by declaration order (reordering is breaking). |
 | Struct separators (v0.4) | Fields allow optional trailing comma, matching enum entries and when-branches. |
 | Named arguments (v0.4, decided) | Call site `name = value` (Kotlin/Python style); positional-first mixing allowed; names stored in the AST. |
 | Arrays (v0.4, decided) | Fixed-size value arrays `[T; N]` with `[value; N]` literal; postfix indexing/assignment; large-array copy semantics documented; dynamic arrays deferred. |
 | Operator overloading (v0.4, decided) | Member `operator fun` with fixed mapping plus/minus/times/div (unary minus = unaryMinus); `+=` desugars to plus + rebind; `==`/`!=` deferred to structural equality. |
-| by/to (v0.4, decided) | `by` demoted to slot word (superitems); `to` was already a slot word (grow/provider); plain identifiers unblocked. |
+| by/to (D-014) | `by` kept for superitem delegation (inheritance stage); `to` removed from the lexicon (grow/provider grammar deleted). |
 | stdlib (deferred) | API shape follows semantic-phase decisions; sample APIs are proposals, not commitments. |
 | FFI (deferred) | No compatibility target; `extern`/native import stays as-is until the project needs C/C++/Rust interop. |
-| Macro call (v0.4) | `name!(token-stream)`; the EBNF `#` form is dropped; the stream is captured raw, expansion belongs to a later phase. |
+| Macro call (v0.4) | `name!(token-stream)`; the EBNF `#` form is dropped; the stream is captured raw, expansion belongs to a later phase; macro declaration removed (D-014), sem rejects calls via SemMacroExpansion. |
 | String interpolation (v0.4) | Parser sub-scan: `$IDENT` / `${Expr}` re-lexed with span rebasing; the matching `}` is found with the real sub-lexer; `\$` stays literal; a shared interner/id-gen/diag child session parses the inner expression. |
 
 ## Syntax gap closures (v0.4)
@@ -190,3 +190,15 @@ for pattern matching. The grammar needs an explicit is-pattern production
 | `rest @ ..` binding | The representation (`rest: Option<usize>`) can carry it; the EBNF has no `@` binding operator yet. |
 | `extern "c" { namespace … }` nesting | `namespace` is a sibling of the block form, not a member of it. |
 | Symbolic operator members (`a.+`) | `PostfixSuffix := "." IDENT`; operator overloading maps to named methods (`plus`, `unaryMinus`). |
+
+## Keyword convergence (D-014, 2026-11-25)
+
+Removed from the lexicon (parse-level rejection): async/await/spawn/
+detached/concurrent/thread/fiber/process/actor/aspect/provide/macro/
+comptime/grow/bits/before/after/around/proceed/singleton/scoped/
+transient/bind/to/out/vararg/const/inline/infix/package.
+
+Added: "alias" (type-alias hard keyword; "type" remains for
+associated types only) and "deinit" (slot word, parsed via
+SlotWord::Deinit). Frozen v1 budget: 35 hard / 11 modifier / 9 slot
+= 55 keywords; no further reduction (capability needs).

@@ -1,5 +1,0 @@
-fun main() {
-    spawn actor Worker(1) {
-        work()
-    }
-}

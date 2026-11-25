@@ -527,12 +527,8 @@ fn reject_unsupported_modifiers(mods: &[ast::syntax::modifier::Modifier], st: &m
             ModifierWord::Abstract => "abstract classes are not supported in v1",
             ModifierWord::Sealed => "sealed classes are not supported in v1",
             ModifierWord::Override => "override is not supported in v1",
-            ModifierWord::Const => "const declarations are not supported in v1",
             ModifierWord::Static => "static members are not supported in v1",
-            ModifierWord::Inline => "inline functions are not supported in v1",
             ModifierWord::OperatorWord => "operator declarations are not supported in v1",
-            ModifierWord::Infix => "infix declarations are not supported in v1",
-            ModifierWord::Vararg => "vararg declarations are not supported in v1",
             _ => continue,
         };
         st.diags.emit(Diagnostic::error(

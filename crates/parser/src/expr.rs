@@ -3,9 +3,8 @@
 use crate::cursor::TokenCursor;
 use ast::interner::Interner;
 use ast::syntax::expr::{
-    ActorConstruction, Block, CallArg, CastKind, ExprKind, ExprStmt, ExprWrap, LambdaParams,
-    SpawnExpr, SpawnKind, SpawnScheduler, SuperSuffix, TokenTree, WhenBody, WhenBranch,
-    WhenPattern,
+    Block, CallArg, CastKind, ExprKind, ExprStmt, ExprWrap, LambdaParams, SuperSuffix, TokenTree,
+    WhenBody, WhenBranch, WhenPattern,
 };
 use ast::syntax::node::{DiagCode, DiagCollector, ErrorNode, NodeIdGen, Span};
 use ast::syntax::stmt::{StmtKind, StmtWrap};
@@ -224,19 +223,6 @@ fn parse_unary_inner(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserE
                 },
             });
         }
-        TokenKind::Keyword(HardKeyword::Await) => {
-            session.cursor.advance();
-            let operand = parse_unary(session)?;
-            let span = join_span(token.span, operand.span);
-            let id = session.next_node()?;
-            return Ok(ExprWrap {
-                id,
-                span,
-                kind: ExprKind::Await {
-                    expr: Box::new(operand),
-                },
-            });
-        }
         _ => None,
     };
     if let Some(op) = unary {
@@ -425,21 +411,6 @@ fn parse_primary(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError
             Ok(ExprWrap::new(id, span, ExprKind::Literal(kind)))
         }
         TokenKind::Identifier => {
-            if session.token_text(&token) == "spawn" {
-                return parse_spawn(session, span);
-            }
-            if session.token_text(&token) == "comptime" {
-                session.cursor.advance();
-                let block = parse_block(session)?;
-                let end = block_tail_span(&block);
-                return Ok(ExprWrap::new(
-                    id,
-                    join_span(span, end),
-                    ExprKind::Comptime {
-                        block: Box::new(block),
-                    },
-                ));
-            }
             if session.token_text(&token) == "move"
                 && session.cursor.peek_ahead(1).is_some_and(|next| {
                     next.kind == TokenKind::Punctuation(PunctuationKind::LBrace)
@@ -447,26 +418,6 @@ fn parse_primary(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError
             {
                 session.cursor.advance();
                 return parse_lambda(session, span);
-            }
-            if session.token_text(&token) == "proceed" {
-                session.cursor.advance();
-                return Ok(ExprWrap::new(id, span, ExprKind::Proceed));
-            }
-            if session.token_text(&token) == "concurrent"
-                && session.cursor.peek_ahead(1).is_some_and(|next| {
-                    next.kind == TokenKind::Punctuation(PunctuationKind::LBrace)
-                })
-            {
-                session.cursor.advance();
-                let block = parse_block(session)?;
-                let end = block_tail_span(&block);
-                return Ok(ExprWrap::new(
-                    id,
-                    join_span(span, end),
-                    ExprKind::Concurrent {
-                        block: Box::new(block),
-                    },
-                ));
             }
             let symbol = session.interner.intern(session.token_text(&token));
             session.cursor.advance();
@@ -527,19 +478,6 @@ fn parse_primary(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError
                 ExprKind::Loop {
                     label: None,
                     body: Box::new(body),
-                },
-            ))
-        }
-        TokenKind::Keyword(HardKeyword::Async) => {
-            // EBNF AsyncExpr := "async" Block：`{` 归块不归 lambda
-            session.cursor.advance();
-            let block = parse_block(session)?;
-            let end = block_tail_span(&block);
-            Ok(ExprWrap::new(
-                id,
-                join_span(span, end),
-                ExprKind::Async {
-                    block: Box::new(block),
                 },
             ))
         }
@@ -1097,71 +1035,6 @@ fn parse_when(session: &mut ParseSession<'_>) -> Result<ExprWrap, ParserError> {
         id,
         join_span(start, close.span),
         ExprKind::When { subject, branches },
-    ))
-}
-
-fn parse_spawn(session: &mut ParseSession<'_>, start: Span) -> Result<ExprWrap, ParserError> {
-    session.cursor.advance();
-    let mut scheduler = None;
-    if let TokenKind::Identifier = session.cursor.peek().kind {
-        match session.token_text(session.cursor.peek()) {
-            "detached" => {
-                session.cursor.advance();
-                scheduler = Some(SpawnScheduler::Detached);
-            }
-            "concurrent" => {
-                session.cursor.advance();
-                scheduler = Some(SpawnScheduler::Concurrent);
-            }
-            _ => {}
-        }
-    }
-    let mut kind = None;
-    if let TokenKind::Identifier = session.cursor.peek().kind {
-        kind = match session.token_text(session.cursor.peek()) {
-            "thread" => {
-                session.cursor.advance();
-                Some(SpawnKind::Thread)
-            }
-            "fiber" => {
-                session.cursor.advance();
-                Some(SpawnKind::Fiber)
-            }
-            "process" => {
-                session.cursor.advance();
-                Some(SpawnKind::Process)
-            }
-            _ => None,
-        };
-    }
-    let mut actor = None;
-    if let TokenKind::Identifier = session.cursor.peek().kind
-        && session.token_text(session.cursor.peek()) == "actor"
-    {
-        session.cursor.advance();
-        let name = parse_path(session)?;
-        let args = if session
-            .cursor
-            .check(&TokenKind::Punctuation(PunctuationKind::LParen))
-        {
-            parse_call_args(session)?.0
-        } else {
-            Vec::new()
-        };
-        actor = Some(ActorConstruction { name, args });
-    }
-    let body = parse_block(session)?;
-    let end = block_tail_span(&body);
-    let id = session.next_node()?;
-    Ok(ExprWrap::new(
-        id,
-        join_span(start, end),
-        ExprKind::Spawn(SpawnExpr {
-            scheduler,
-            kind,
-            actor,
-            body: Box::new(body),
-        }),
     ))
 }
 

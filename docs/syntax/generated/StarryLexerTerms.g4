@@ -3,6 +3,7 @@
 // and must be recognized by parser semantic predicates in their grammar slots.
 lexer grammar StarryLexer;
 
+Alias : 'alias';
 Import : 'import';
 Extern : 'extern';
 Val : 'val';
@@ -24,8 +25,6 @@ Break : 'break';
 Continue : 'continue';
 Return : 'return';
 Defer : 'defer';
-Async : 'async';
-Await : 'await';
 True : 'true';
 False : 'false';
 Null : 'null';
@@ -51,41 +50,15 @@ IDENTIFIER : [A-Za-z_][A-Za-z0-9_]*;
 // modifier: Abstract = 'abstract' in modifier
 // modifier: Sealed = 'sealed' in modifier
 // modifier: Override = 'override' in modifier
-// modifier: Const = 'const' in modifier
 // modifier: Static = 'static' in modifier
-// modifier: Inline = 'inline' in modifier
 // modifier: OperatorWord = 'operator' in modifier
-// modifier: Infix = 'infix' in modifier
-// modifier: Vararg = 'vararg' in modifier
 // modifier: Weak = 'weak' in modifier
-// slot: Actor = 'actor' in declaration_or_spawn
-// slot: Aspect = 'aspect' in declaration
-// slot: Provide = 'provide' in declaration
 // slot: Impl = 'impl' in declaration
-// slot: Macro = 'macro' in declaration_or_call
-// slot: Comptime = 'comptime' in expression_or_block
-// slot: Spawn = 'spawn' in expression
-// slot: Detached = 'detached' in after_spawn
-// slot: Concurrent = 'concurrent' in expression
-// slot: Thread = 'thread' in after_spawn
-// slot: Fiber = 'fiber' in after_spawn
-// slot: Process = 'process' in after_spawn
-// slot: Namespace = 'namespace' in extern_cpp
-// slot: Grow = 'grow' in statement
-// slot: Bits = 'bits' in after_grow_capacity
 // slot: It = 'it' in omitted_lambda_parameter
 // slot: Move = 'move' in lambda_capture
-// slot: Before = 'before' in aspect_advice
-// slot: After = 'after' in aspect_advice
-// slot: Around = 'around' in aspect_advice
-// slot: Proceed = 'proceed' in around_advice
-// slot: Singleton = 'singleton' in provider_lifetime
-// slot: Scoped = 'scoped' in provider_lifetime
-// slot: Transient = 'transient' in provider_lifetime
-// slot: Bind = 'bind' in provider_binding
-// slot: To = 'to' in provider_binding
 // slot: Init = 'init' in class_initializer
+// slot: Deinit = 'deinit' in class_deinitializer
 // slot: Get = 'get' in accessor
 // slot: Set = 'set' in accessor
-// slot: Out = 'out' in type_variance
+// slot: Namespace = 'namespace' in extern_cpp
 // slot: By = 'by' in by_slot

@@ -9,9 +9,9 @@ pub const KEYWORD_PATH: &str = "crates/ast/src/token/keyword.rs";
 pub const ANTLR_TERMS_PATH: &str = "docs/syntax/generated/StarryLexerTerms.g4";
 pub const MARKDOWN_TABLE_PATH: &str = "docs/syntax/generated/lexicon.md";
 
-pub const HARD_KEYWORD_COUNT: usize = 36;
-pub const MODIFIER_WORD_COUNT: usize = 15;
-pub const SLOT_WORD_COUNT: usize = 31;
+pub const HARD_KEYWORD_COUNT: usize = 35;
+pub const MODIFIER_WORD_COUNT: usize = 11;
+pub const SLOT_WORD_COUNT: usize = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WordKind {
@@ -537,12 +537,11 @@ mod tests {
         assert!(antlr.contains("If : 'if';"));
         assert!(antlr.contains("IDENTIFIER : [A-Za-z_][A-Za-z0-9_]*;"));
         assert!(antlr.contains("// modifier: Public = 'public' in modifier"));
-        assert!(antlr.contains("// slot: Before = 'before' in aspect_advice"));
-
+        assert!(antlr.contains("// slot: Deinit = 'deinit' in class_deinitializer"));
         let markdown = generate_markdown(&words);
-        assert!(markdown.contains("## Hard keyword (36)"));
-        assert!(markdown.contains("## Modifier word (15)"));
-        assert!(markdown.contains("## Slot word (31)"));
+        assert!(markdown.contains("## Hard keyword (35)"));
+        assert!(markdown.contains("## Modifier word (11)"));
+        assert!(markdown.contains("## Slot word (9)"));
     }
 
     #[test]

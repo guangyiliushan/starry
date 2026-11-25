@@ -289,17 +289,7 @@ fn aggregate_declarations_parse_without_placeholders() {
             get { x }
         }
 
-        actor Worker(counter: int) { }
-        aspect Logging {
-        before Point.run { }
-        }
-        provide Services {
-            singleton Clock -> SystemClock()
-            bind Clock to SystemClock
-        }
         impl Show for Point { }
-        macro repeat(name) { }
-        comptime { 1 + 1 }
     "#;
     let output = parse_source(source).unwrap();
     for diag in output.diagnostics.clone() {
@@ -309,7 +299,7 @@ fn aggregate_declarations_parse_without_placeholders() {
     }
     assert!(output.diagnostics.is_empty(), "{:#?}", output.diagnostics);
     assert!(output.ast.package.is_none());
-    assert_eq!(output.ast.items.len(), 11);
+    assert_eq!(output.ast.items.len(), 6);
 }
 
 #[test]
@@ -322,15 +312,6 @@ fn function_generic_decl_parses() {
 fn class_decl_parses() {
     let output =
         parse_source("class Point(x: int, y: int) : Shape { init { } get { x } }").unwrap();
-    assert!(output.diagnostics.is_empty(), "{:#?}", output.diagnostics);
-}
-
-#[test]
-fn provider_decl_parses() {
-    let output = parse_source(
-        "provide Services { singleton Clock -> SystemClock() bind Clock to SystemClock }",
-    )
-    .unwrap();
     assert!(output.diagnostics.is_empty(), "{:#?}", output.diagnostics);
 }
 
@@ -498,40 +479,11 @@ fn parser_snapshot_is_stable() {
 }
 
 #[test]
-fn unsafe_proceed_concurrent_parse() {
+fn unsafe_block_parse() {
     assert!(matches!(
         binding_init("val a = unsafe { 1 }"),
         ExprKind::Unsafe { .. }
     ));
-    assert!(matches!(binding_init("val p = proceed"), ExprKind::Proceed));
-    assert!(matches!(
-        binding_init("val c = concurrent { 1 }"),
-        ExprKind::Concurrent { .. }
-    ));
-}
-
-#[test]
-fn spawn_actor_construction_parses() {
-    let output = parse_source("fun f() { spawn actor Worker(2) { work() } }").unwrap();
-    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
-    let DeclKind::Fun(fun) = &output.ast.items[0].kind else {
-        panic!("expected fun, got {:?}", output.ast.items[0].kind);
-    };
-    let Some(ast::syntax::decl::FunctionBody::Block(block)) = &fun.body else {
-        panic!("expected block body");
-    };
-    let Some(tail) = &block.tail else {
-        panic!("expected spawn tail expression");
-    };
-    let ExprKind::Spawn(spawn) = &tail.kind else {
-        panic!("expected spawn, got {:?}", tail.kind);
-    };
-    let actor = spawn.actor.as_ref().expect("actor construction");
-    assert_eq!(
-        output.interner.resolve(actor.name.segments[0].name),
-        "Worker"
-    );
-    assert_eq!(actor.args.len(), 1);
 }
 
 #[test]
@@ -801,18 +753,15 @@ fn type_parameters_validate_names_and_keep_exact_spans() {
 }
 
 #[test]
-fn variance_has_no_undeclared_in_out_state() {
-    let output = parse_source("fun f<in out>(x: out) = x").unwrap();
-    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
-    let DeclKind::Fun(fun) = &output.ast.items[0].kind else {
-        panic!("expected fun");
-    };
-    let param = fun.type_params.first().expect("type param");
-    assert_eq!(param.variance, Some(ast::syntax::ty::Variance::In));
-    let ast::syntax::ty::TypeParamName::Valid(name) = &param.name else {
-        panic!("expected valid type parameter name");
-    };
-    assert_eq!(output.interner.resolve(*name), "out");
+fn variance_markers_are_not_supported() {
+    for source in ["fun f<in T>(x: T) = x", "fun f<out T>(x: T) = x"] {
+        let output = parse_source(source).unwrap();
+        assert!(
+            !output.diagnostics.is_empty(),
+            "{source}: {:?}",
+            output.diagnostics
+        );
+    }
 }
 
 #[test]
@@ -832,21 +781,6 @@ fn malformed_when_branches_emit_diagnostics() {
             .iter()
             .any(|diag| diag.code == ast::syntax::node::DiagCode::ExpectedToken)
     );
-}
-
-#[test]
-fn unterminated_provider_and_aspect_members_reach_eof() {
-    for source in ["provide P {", "aspect A {"] {
-        let output = parse_source(source).unwrap();
-        assert!(
-            output
-                .diagnostics
-                .iter()
-                .any(|diag| diag.code == ast::syntax::node::DiagCode::ExpectedToken),
-            "{source}: {:?}",
-            output.diagnostics
-        );
-    }
 }
 
 #[test]
@@ -884,18 +818,7 @@ fn bare_super_requires_a_suffix() {
 }
 
 #[test]
-fn grow_requires_integer_bits_and_assignment_requires_place() {
-    let output = parse_source("fun f() { grow x to 64 bits }").unwrap();
-    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
-
-    let output = parse_source("fun f() { grow x to y bits }").unwrap();
-    assert!(
-        output
-            .diagnostics
-            .iter()
-            .any(|diag| diag.code == ast::syntax::node::DiagCode::ExpectedToken)
-    );
-
+fn assignment_requires_place() {
     let output = parse_source("fun f(a: [int; 1]) { a[0] += 1 }").unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
 
@@ -1078,7 +1001,7 @@ fn unit_type_parses_where_ebnf_allows_it() {
 
 #[test]
 fn type_alias_consumes_its_equals_sign() {
-    for source in ["type Alias = Point", "type Alias<T> = Point"] {
+    for source in ["alias Alias = Point", "alias Alias<T> = Point"] {
         let output = parse_source(source).unwrap();
         assert!(
             output.diagnostics.is_empty(),
@@ -1351,23 +1274,6 @@ fn let_stays_an_ordinary_identifier() {
                 .diagnostics
                 .iter()
                 .all(|diag| diag.code != DiagCode::LetKeyword),
-            "{source}: {:?}",
-            output.diagnostics
-        );
-    }
-}
-
-#[test]
-fn pointcut_accepts_the_wildcard_member() {
-    for source in [
-        "aspect A { after Type.* { } }",
-        "aspect A { around demo.P.* { } }",
-        "aspect A { before demo.P.log { } }",
-        "aspect A { before demo.Point { } }",
-    ] {
-        let output = parse_source(source).unwrap();
-        assert!(
-            output.diagnostics.is_empty(),
             "{source}: {:?}",
             output.diagnostics
         );
