@@ -484,8 +484,8 @@ pub(crate) fn read_place(ctx: &mut Ctx, place: Place, ty: TyId, span: Span) -> O
     }
 }
 
-/// 判定一个值 ABI 当前是否可按 i64 槽模型完整拷贝。class/Fn 需要
-/// 字段级 ARC；i128 聚合 payload 仍待 lo/hi split；其余纯值可逐槽。
+/// 判定一个值需要 IRC 默认 i64 槽 ABI 以外的专用路径。class/Fn 要
+/// ARC；i128 要 wide slot；未知 Named 也保守拒收。
 pub(crate) fn value_abi_unsafe<V: crate::layout::LayoutView>(ctx: &V, ty: TyId) -> bool {
     if crate::layout::is_class(ctx, ty) || matches!(ctx.tys().kind(ty), TyKind::Fn(..)) {
         return true;
@@ -539,6 +539,13 @@ pub(crate) fn contains_arc<V: crate::layout::LayoutView>(ctx: &V, ty: TyId) -> b
             .fields
             .iter()
             .any(|(_, t)| contains_arc(ctx, *t)),
+        TyKind::Named(def, _) if matches!(ctx.defs().get(*def).kind, DefKind::Enum) => ctx
+            .defs()
+            .get(*def)
+            .sig
+            .variants
+            .iter()
+            .any(|(_, params)| params.iter().any(|(_, t)| contains_arc(ctx, *t))),
         _ => false,
     }
 }
@@ -592,6 +599,75 @@ fn copy_arc_slots(
     copy_slots(ctx, (dst_base, dst_off), (v, 0), ty, ty, span);
 }
 
+fn copy_enum_slots(
+    ctx: &mut Ctx,
+    src_base: TempId,
+    def: sem::DefId,
+    ty: TyId,
+    dst: TempId,
+    ownership: CopyOwnership,
+    span: Span,
+) -> Operand {
+    let variants = ctx.sem.defs.get(def).sig.variants.clone();
+    let tag = crate::expr::load_slot(ctx, src_base, 0, ctx.i8_ty);
+    ctx.emit(Instr::Store {
+        base: dst,
+        idx: Operand::Const(Const::Int(0)),
+        src: tag.clone(),
+        ty: ctx.i8_ty,
+    });
+    // Owned transfer and scalar-only enums stay on the flat layout copy.
+    // No borrowed reference is retained, so inactive slots cannot affect ARC.
+    if ownership == CopyOwnership::Owned || !contains_arc(ctx, ty) {
+        crate::expr::copy_slots(ctx, (dst, 0), (Operand::Temp(src_base), 0), ty, ty, span);
+        return Operand::Temp(dst);
+    }
+    let first = ctx.reserve_block();
+    let done = ctx.reserve_block();
+    ctx.terminate(Term::Jmp(first));
+    let mut current = first;
+    for (idx, (_, params)) in variants.iter().enumerate() {
+        ctx.switch_to(current);
+        let is_variant = {
+            let t = ctx.temp();
+            ctx.emit(Instr::Bin {
+                dst: t,
+                op: BinOp::Eq,
+                l: tag.clone(),
+                r: Operand::Const(Const::Int(idx as i128)),
+                ty: ctx.i8_ty,
+            });
+            Operand::Temp(t)
+        };
+        let body = ctx.reserve_block();
+        let next = if idx + 1 == variants.len() {
+            done
+        } else {
+            ctx.reserve_block()
+        };
+        ctx.terminate(Term::Br {
+            cond: is_variant,
+            then_: body,
+            else_: next,
+        });
+        ctx.switch_to(body);
+        for (pi, (_, pty)) in params.iter().enumerate() {
+            let off = 1 + crate::layout::variant_param_slot(ctx, def, idx, pi);
+            let shallow = read_slots(ctx, src_base, off, *pty, span);
+            let copied = if contains_arc(ctx, *pty) {
+                emit_copy_value(ctx, shallow, *pty, ownership, span)
+            } else {
+                shallow
+            };
+            crate::expr::copy_slots(ctx, (dst, off), (copied, 0), *pty, *pty, span);
+        }
+        ctx.terminate(Term::Jmp(done));
+        current = next;
+    }
+    ctx.switch_to(done);
+    Operand::Temp(dst)
+}
+
 pub(crate) fn emit_copy_value(
     ctx: &mut Ctx,
     src: Operand,
@@ -631,6 +707,9 @@ pub(crate) fn emit_copy_value(
         return Operand::Temp(dst);
     }
     match ctx.sem.tys.kind(ty) {
+        TyKind::Named(def, _) if matches!(ctx.sem.defs.get(*def).kind, DefKind::Enum) => {
+            return copy_enum_slots(ctx, src_base, *def, ty, dst, ownership, span);
+        }
         TyKind::Named(def, _) if matches!(ctx.sem.defs.get(*def).kind, DefKind::Struct) => {
             let fields = ctx.sem.defs.get(*def).sig.fields.clone();
             for (index, (_, fty)) in fields.iter().enumerate() {
@@ -679,7 +758,7 @@ fn nullable_base(ctx: &mut Ctx, value: Operand, ty: TyId, span: Span) -> TempId 
 }
 
 /// 把一个已 lower 的值写入顶层全局的槽视图。标量保持旧单槽指令；
-/// 纯值聚合按 scalar_slots 展开。调用方先经 value_abi_unsafe 门禁。
+/// 纯值聚合按 scalar_slots 展开。全局调用方另行裁决 class/i128/Fn ABI。
 pub(crate) fn store_global_value(
     ctx: &mut Ctx,
     global: DefId,
@@ -1589,14 +1668,7 @@ fn deref_read(ctx: &mut Ctx, e: &ExprWrap, target: &ExprWrap) -> Operand {
         ctx.diag(e.span, "解引结果类型破缺（sem 契约破缺）");
         return Operand::Const(Const::Unit);
     };
-    if let TyKind::Nullable(nullable) = ctx.sem.tys.kind(inner).clone() {
-        if value_abi_unsafe(ctx, nullable) {
-            ctx.diag(
-                e.span,
-                "pointer to this nullable value needs class ARC or i128 slot ABI (not supported in this slice)",
-            );
-            return Operand::Const(Const::Unit);
-        }
+    if let TyKind::Nullable(_) = ctx.sem.tys.kind(inner).clone() {
         let ptr = match op {
             Operand::Temp(t) => t,
             Operand::Const(_) => {
@@ -2362,8 +2434,8 @@ fn primary_ctor_call(
             }
         }
     }
-    if contains_arc(ctx, ctx.sem.defs.get(def).sig.ty) {
-        ctx.note_stmt_temp(base, ctx.sem.defs.get(def).sig.ty);
+    if contains_arc(ctx, ctx.expr_ty(e)) {
+        ctx.note_stmt_temp(base, ctx.expr_ty(e));
     }
     Operand::Temp(base)
 }
@@ -2440,8 +2512,8 @@ fn struct_ctor(
             }
         }
     }
-    if contains_arc(ctx, ctx.sem.defs.get(def).sig.ty) {
-        ctx.note_stmt_temp(base, ctx.sem.defs.get(def).sig.ty);
+    if contains_arc(ctx, ctx.expr_ty(e)) {
+        ctx.note_stmt_temp(base, ctx.expr_ty(e));
     }
     Operand::Temp(base)
 }
@@ -4300,11 +4372,7 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
                 .get(target.id)
                 .copied()
                 .unwrap_or(ctx.sem.tys.unit);
-            if let TyKind::Nullable(nullable) = ctx.sem.tys.kind(ty).clone() {
-                if value_abi_unsafe(ctx, nullable) {
-                    ctx.diag(span, "write through this nullable pointer needs class ARC or i128 slot ABI (not supported in this slice)");
-                    return;
-                }
+            if let TyKind::Nullable(_) = ctx.sem.tys.kind(ty).clone() {
                 let base = nullable_base(ctx, v, ty, span);
                 for slot in 0..crate::layout::scalar_slots(ctx, ty) {
                     let sty = crate::layout::slot_ty(ctx, ty, slot);

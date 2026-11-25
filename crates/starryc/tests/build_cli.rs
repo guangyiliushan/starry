@@ -1249,6 +1249,57 @@ fn class_aggregate_arc_builds_and_runs() {
 }
 
 #[test]
+fn aggregate_struct_scope_drops_class_fields_e2e() {
+    // WP1 tail: struct constructor temps must register their aggregate type,
+    // otherwise the staged binding retains a second strong count that leaks.
+    let Some(out) = build_and_run(
+        "aggregate_arc_scope_drop",
+        "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nstruct S(val c: C)\nfun main(): int {\n    val s = S(C(1))\n    print(s.c.x)\n    val b = s\n    print(b.c.x)\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "1\n1\n1\n");
+}
+
+#[test]
+fn enum_payload_arc_tag_drop_e2e() {
+    // WP1b: tag-aware traversal retains only the active borrowed payload and
+    // releases it once when the aggregate binding leaves scope.
+    let Some(out) = build_and_run(
+        "enum_payload_arc",
+        "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nenum E {\n    Has(C)\n    Empty\n}\nfun main(): int {\n    val e = E.Has(C(1))\n    val f = e\n    print(9)\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "9\n1\n");
+}
+
+#[test]
+fn nullable_class_and_i128_pointer_e2e() {
+    // WP2: pointee ABI materializes the flag plus wide/class payload slots.
+    let Some(out) = build_and_run(
+        "nullable_pointer_abi",
+        "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun class_part(): int {\n    var x: C? = C(1)\n    val p = &x\n    val y = *p\n    print(y!!.x)\n    val q = &mut x\n    *q = C(2)\n    print(x!!.x)\n    return 0\n}\nfun i128_part(): int {\n    var x: i128? = 123456789012345678\n    val p = &x\n    val y = *p\n    print(y!!)\n    val q = &mut x\n    *q = 123456789012345679\n    print(x!!)\n    *q = null\n    if (x != null) {\n        print(1)\n    } else {\n        print(9)\n    }\n    return 0\n}\nfun main(): int {\n    class_part()\n    i128_part()\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "1\n2\n2\n123456789012345678\n123456789012345679\n9\n");
+}
+
+#[test]
+fn class_i128_and_nullable_class_globals_e2e() {
+    // WP3: class globals are process roots (no exit deinit); i128 globals
+    // keep the full wide scalar ABI; nullable class stores flag + payload.
+    let Some(out) = build_and_run(
+        "wide_and_arc_globals",
+        "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nval c = C(1)\nval nc: C? = C(2)\nval big: i128 = 123456789012345678\nfun main(): int {\n    print(c.x)\n    print(nc!!.x)\n    print(big)\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "1\n2\n123456789012345678\n");
+}
+
+#[test]
 fn fn_var_reassign_arc_e2e() {
     // P2-3b-2 收尾：Fn var 重赋值 = release 旧 box + retain/转移新值
     //（tag 分派）；class 捕获的 meta 释放照常平衡（deinit 一次）

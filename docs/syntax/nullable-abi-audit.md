@@ -1,6 +1,6 @@
 # Nullable ABI 审计（S2/P2-4 前置切片，2026-11-12）
 
-状态：实现审计（2026-11-18）。可空值槽模型已延伸到纯值全局与指针 pointee；class/可空 class 与 i128 继续走专用 ABI 门禁。
+状态：实现审计（2026-11-25）。可空值槽模型已延伸到纯值全局、可空 class、i128 与指针 pointee；boxed Fn 仍走稳定拒收。
 
 ## 1. 可空值的两种形态与 ABI 判别
 
@@ -28,13 +28,12 @@
    `[n x i64]`；`LoadGlobal` / `StoreGlobal` 带 slot。聚合初始化函数
    直接逐槽写全局并 `ret void`，不返回 callee 栈基址。
 2. **顶层标量可空全局**：走 `[2 x i64]` flag+payload；读侧物化两槽，
-   写侧逐槽 store。`i128?` 与可空 class 仍拒收。
+   写侧逐槽 store。`i128?` 使用 wide payload；可空 class 全局是进程根。
 3. **指向可空的指针**：pointee 按 `slot_ty` 逐槽 `LoadPtr` / `StorePtr`；
    slot > 0 经 8-byte `OffsetPtr` 寻址。class payload 与 i128 payload
-   拒收。
-4. **`value_abi_unsafe` 门禁**：class、可空 class、Fn、以及任意递归包含
-   i128 的值必须继续拒收，并给稳定诊断；这些类型需要字段级 ARC 或
-   专用 wide-slot ABI，不能落入 i64 槽拷贝。
+   已开启；class read/copy 走 ARC 纪律。
+4. **专用 ABI 门禁**：class/可空 class 与 i128 现已走字段级 ARC /
+   wide-slot ABI；boxed Fn 全局与真正未建模组合仍稳定拒收。
 
 ## 4. 剩余验证面
 

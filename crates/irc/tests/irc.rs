@@ -666,15 +666,20 @@ fn borrow_and_deref_lower_to_pointer_instrs() {
 }
 
 #[test]
-fn class_top_level_global_is_rejected() {
-    // M4 review fix: class/?P globals have no release site (the Global arm
-    // of the implicit drop is a silent no-op) — reject at irc, not leak.
-    let (_, codes) =
+fn class_top_level_global_is_process_root() {
+    // WP3: scalarized class globals are process roots; no exit release is
+    // emitted, so deinit is intentionally not guaranteed at process exit.
+    let (text, codes) =
         dump("class P(val x: int) {\n}\nval g = P(1)\nfun main() : int {\n    return 0\n}");
-    assert!(
-        codes.contains(&DiagCode::IrcUnsupportedLowering),
-        "class global must be rejected, got {codes:?}"
-    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(text.contains("fun main"), "{text}");
+}
+#[test]
+fn i128_top_level_global_lower_to_wide_abi() {
+    let (text, codes) =
+        dump("val big: i128 = 123456789012345678\nfun main() : int {\n    return 0\n}");
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    assert!(text.contains("fun main"), "{text}");
 }
 #[test]
 fn nullable_scalar_global_lower_to_slots() {
@@ -698,26 +703,20 @@ fn pointer_to_nullable_lower_to_slots() {
     );
 }
 #[test]
-fn unsafe_global_and_nullable_pointer_combinations_reject_stably() {
+fn unsafe_global_and_nullable_pointer_combinations_are_supported() {
     let cases = [
-        (
-            "val x: i128? = 1\nfun main(): int { return 0 }",
-            "i128 slot ABI",
-        ),
-        (
-            "class C(val x: int) {}\nfun f(): int {\n    val x: C? = C(1)\n    val p = &x\n    val y = *p\n    return y!!.x\n}",
-            "class ARC or i128 slot ABI",
-        ),
+        "val x: i128? = 1\nfun main(): int { return 0 }",
+        "class C(val x: int) {}\nfun f(): int {\n    val x: C? = C(1)\n    val p = &x\n    val y = *p\n    return y!!.x\n}",
     ];
-    for (source, needle) in cases {
+    for source in cases {
         let parsed = parser::parse_source(source).expect("machine parse");
         let mut sem_out = sem::analyze(parsed);
         let tac = irc::lower(&mut sem_out, source);
         assert!(
-            tac.diags.iter().any(|d| {
-                d.code == DiagCode::IrcUnsupportedLowering && d.message.contains(needle)
-            }),
-            "diagnostic `{needle}` missing: {:?}",
+            tac.diags
+                .iter()
+                .all(|d| d.code != DiagCode::IrcUnsupportedLowering),
+            "unexpected lowering rejection: {:?}",
             tac.diags
         );
     }

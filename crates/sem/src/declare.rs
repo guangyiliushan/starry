@@ -1412,21 +1412,7 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                         (v.name, args)
                     })
                     .collect();
-                // WP1: enum payload ARC not yet handled; reject class/Fn/?class payloads
-                for (_, params) in &variants {
-                    for (_, ty) in params {
-                        if crate::declare::is_class_ty(st, *ty)
-                            || matches!(st.tys.kind(*ty), TyKind::Fn(..))
-                            || matches!(st.tys.kind(*ty), TyKind::Nullable(inner) if crate::declare::is_class_ty(st, *inner))
-                        {
-                            st.diags.emit(Diagnostic::error(
-                                DiagCode::SemUnsupportedConstruct,
-                                item.span,
-                                "enum payload ARC is not supported in v1",
-                            ));
-                        }
-                    }
-                }
+                // WP1b: enum payload ARC is handled by tag-aware copy/drop traversal.
                 st.defs.get_mut(def).sig.variants = variants;
             }
             DeclKind::TypeAlias(_t) => {

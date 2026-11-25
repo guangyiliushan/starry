@@ -443,7 +443,7 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   稳定拒收（主构造头字段 + body 字段两路，矩阵 #5 拒绝面）；4 个
   闭包用例入选 diff_native（interp 注册表 vs native tag 位逐行对拍，
   含绑定位置推断与快照语义）。
-- **字段级 ARC traversal（2026-11-18 仍稳定拒收 ARC-bearing aggregate slots）**：`emit_copy_value`/`emit_drop_value` 已建立 type-directed 递归 retain/release，但 return/break/repeat 的 ownership transfer 尚未完整；为避免 UAF，tuple/array 直接元素的 class、可空 class、Fn、ARC enum payload 继续由 `agg_element_unsafe` 稳定拒收。后续必须补齐 CFG escape ownership transfer 和 array-repeat per-element lowering 后再开启。
+- **字段级 ARC traversal（2026-11-25 已开启）**：`emit_copy_value`/`emit_drop_value` 对 struct/tuple/array/type-directed 递归；enum payload 按 active tag 分支 retain/release。owned/borrowed 语义由语句临时表转移；struct 构造临时用结果型登记，避免第二次 retain 泄漏。e2e 钉住 scope/return/release 平衡。
 - **Fn var 重赋值（已落地，2026-11-11）**：lower_assignment 的
   classish 门扩展到 Fn——release 旧 box / retain 或转移新值（tag 分派，
   裸 fn no-op）；e2e `fn_var_reassign_arc_e2e`（deinit 平衡）。
@@ -458,15 +458,15 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   parse_lambda body 位 `{` 前瞻消歧（配对 `}` 前深度 1 的 `->` =
   嵌套 lambda，否则块；parse_lambda 期望 cursor 停在 `{`——调用侧
   不得预消费）。两个 lambda 扫描器 RBrace 深度下溢 saturating 防护。
-- **指向可空的类型（2026-11-18 已支持纯值 payload）**：D-007 契约保留；
+- **指向可空的类型（2026-11-25 已支持 WP2 payload）**：D-007 契约保留；
   `*p` / `*p = v` 按 `Nullable(T)` 的 `scalar_slots` 逐槽访问，slot > 0
-  经 `OffsetPtr` 偏移。class / 可空 class / i128 payload 由
+  经 `OffsetPtr` 偏移。class/可空 class 走 ARC，i128 用 wide payload。
   `value_abi_unsafe` 稳定拒收（需字段级 ARC 或 wide-slot ABI）。
-- **纯值顶层全局（2026-11-18 已落地）**：全局存储按 `[n x i64]` 展开；
+- **顶层全局（2026-11-25 WP3 已落地）**：纯值按 `[n x i64]` 展开；
   `LoadGlobal` / `StoreGlobal` 携带 slot。`int?` 全局是 flag+payload；
-  纯值聚合初始化函数逐槽写全局并 `ret void`。class/Fn/i128 组合由
-  `value_abi_unsafe` 稳定拒收。
-- **剩余限制（登记）**：i128 聚合捕获仍拒收（需 lo/hi split 聚合 ABI）；
+  纯值聚合初始化函数逐槽写全局并 `ret void`。class/可空 class 是
+  进程根（不保证 exit deinit）；i128 用 wide ABI；bare fn 全局允许，
+  boxed Fn/未建模 ABI 稳定拒收。
   Fn var 重赋值的可空 class 变体已有手动 ARC probe 平衡，但 targeted
   native e2e 与 ASan harness 仍待接；超大栈帧 1MB 边界 regression 待补。
 - **绑定位置 lambda（已落地，2026-11-11）**：`val f: Fn注解 = {…}` 把

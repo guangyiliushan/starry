@@ -36,7 +36,7 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单；已删关�
 | 元组 | ✅ | ✅ | ✅ | ✅ | — | 常量下标 |
 | 区间（`..`/`..=`） | ✅ | ✅ | ✅ | ✅ | — | 物化值携开闭标记槽 |
 | nullable（`?`/`??`/`!!`/`?.`） | ✅ | ✅ | ✅ | ✅ | — | 值→Nullable 显式构造（2026-11 修复） |
-| 顶层纯值全局 | ✅ | ✅ | ✅ | ✅ | — | 依赖序初始化；`[n x i64]` 槽存储；class/Fn/i128 组合稳定拒收 |
+| 顶层值全局 | ✅ | ✅ | ✅ | ✅ | — | 依赖序初始化；纯值 `[n x i64]`；class 进程根、i128 wide ABI、bare fn 全局；boxed Fn 拒收 |
 | 结构相等（==/!=） | ✅ | ✅ | ✅ | ✅ | — | 字符串走 `starry_str_eq` 内容比较 |
 
 ## 控制流与模式（Feature Group 2）
@@ -82,8 +82,8 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单；已删关�
 |---|---|---|---|---|---|---|
 | lambda 可空 class 捕获 | ✅ | ✅ | ✅ | ✅ | ✅ | 2 槽 env（flag+payload）+ flag 分支 retain/release + 间接调用 Agg 返回槽拷贝 |
 | lambda i128 捕获 | ✅ | ✅ | ✅ | ✅ | — | 2 槽 WideCell 标量经多槽 env（槽位游标按 scalar_slots 累计）；聚合捕获归后续 |
-| 顶层标量可空全局 | ✅ | ✅ | ✅ | ✅ | — | nullable-abi-audit.md §3.3：`[2 x i64]` flag+payload；`i128?`/可空 class 仍拒收 |
-| 指向可空的类型解引用（`*p` / `*p = v`） | ✅ | ✅ | ✅ | ✅ | — | D-007 类型语法契约保留；pointee 逐槽读写。**P0 审计修正（2026-11-24）**：audit §3.3 所称「class payload 拒收」实际未实现——`*const Class` 参数当前被静默放行（待 sem 补拒收或完整实现，见 P0 遗留） |
+| 顶层标量可空全局 | ✅ | ✅ | ✅ | ✅ | — | nullable-abi-audit.md §3.3：`[2 x i64]` flag+payload；`i128?` 使用 wide payload，可空 class 是进程根 |
+| 指向可空的类型解引用（`*p` / `*p = v`） | ✅ | ✅ | ✅ | ✅ | — | D-007 类型语法契约保留；pointee 逐槽读写；class/可空 class 走 ARC、i128 走 wide payload（e2e 已钉） |
 | lambda-in-lambda 字面嵌套 + 柯里化调用 | ✅ | ✅ | ✅ | ✅ | — | parser body 位 `{` 消歧（深度感知 `->` 前瞻）+ 柯里化 Fn 值链；捕获外层参数逐层正确（e2e 3/7/15） |
 
 ## 稳定拒收登记
@@ -97,10 +97,10 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单；已删关�
 | open/abstract/sealed/override/operator | sem | P0 trust：无实现路径的 modifier，声明点稳定拒收（const/inline/infix/vararg/static 已从词表移除） |
 | `as` 非数值/非指针转换（如 string→int） | sem | P0 trust：只允许数值↔数值、同型、Ref/Pointer 互转；其余 SemTypeMismatch |
 | impl 头 trait 充当类型实参（`impl T for L<T>`） | sem | P0 trust：lower_ty 拒收（此前静默注册成 spec） |
-| class/可空 class/Fn 存 struct 字段/tuple/array；ARC enum payload | sem | return/break/repeat ownership transfer 未完成，enum payload 需 tag-aware traversal；所有 ARC-bearing aggregate slots 稳定拒收 |
+| ARC aggregate payload | sem/irc/llvme | struct/tuple/array/class 字段与 enum payload 走 type-directed copy/drop；enum Borrowed copy/tag drop 按 active variant；scope/return/release 已有 e2e 回归 |
 | variance（类型形参型变标注） | parse | D-014：已从文法移除（parse 级拒收）；未来用 `+`/`-` 标注实现 |
 | 宏调用展开 `name!(...)` | sem | `SemMacroExpansion`（宏声明已删，D-014；展开后置） |
-| 聚合顶层全局 | ✅（纯值）/ irc（class/Fn/i128） | 纯值 `[n x i64]`；unsafe 组合 `IrcUnsupportedLowering` |
+| 聚合/宽值顶层全局 | ✅ | 纯值 `[n x i64]`；class 是进程根；i128 wide ABI；bare fn 全局允许；boxed Fn/未支持组合拒收 |
 | extern 程序 interp 验证 | interp | `UnknownFun` trap（已知局限） |
 | T2 checked pointer | — | 后置 M10（Q7） |
 | M10 并发（Mutex/actor、Send/Sync） | — | 模型选择待用户裁定 |

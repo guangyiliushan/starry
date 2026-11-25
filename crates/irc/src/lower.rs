@@ -170,20 +170,20 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
         // loudly instead of leaking the object and skipping deinit.
         let global_class = crate::layout::is_class(sem, ty)
             || matches!(sem.tys.kind(ty), TyKind::Nullable(inner) if crate::layout::is_class(sem, *inner));
-        if expr::value_abi_unsafe(sem, ty) && !global_class {
+        let global_i128 = matches!(sem.tys.kind(ty), TyKind::Int(sem::IntKind::I128))
+            || matches!(sem.tys.kind(ty), TyKind::Nullable(inner) if matches!(sem.tys.kind(*inner), TyKind::Int(sem::IntKind::I128)));
+        let bare_fn_global = matches!(sem.tys.kind(ty), TyKind::Fn(..))
+            && binding
+                .init
+                .as_ref()
+                .is_some_and(|init| matches!(init.kind, ast::syntax::expr::ExprKind::Ident(_)));
+        // WP3: scalarized class globals are process roots and deliberately
+        // have no exit release; i128 uses its scalar wide ABI.
+        if expr::value_abi_unsafe(sem, ty) && !global_class && !global_i128 && !bare_fn_global {
             out.diags.push(Diagnostic::error(
                 DiagCode::IrcUnsupportedLowering,
                 binding.pattern.span,
-                "this top-level value needs class ARC or i128 slot ABI (not lowered in this slice)",
-            ));
-            skipped.insert(*name);
-            continue;
-        }
-        if global_class {
-            out.diags.push(Diagnostic::error(
-                DiagCode::IrcUnsupportedLowering,
-                binding.pattern.span,
-                "class top-level globals are not lowered in this slice (no release site)",
+                "this top-level value needs an unsupported ABI (only class roots, i128, and bare fn globals are lowered)",
             ));
             skipped.insert(*name);
             continue;
@@ -2001,6 +2001,53 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 let payload = *inner;
                 let op = crate::expr::load_slot(self, base, off + 1, payload);
                 self.emit_operand_release(op, payload, weak);
+            }
+            TyKind::Named(def, _) if matches!(self.sem.defs.get(*def).kind, DefKind::Enum) => {
+                if !crate::expr::contains_arc(self, ty) {
+                    return;
+                }
+                let variants = self.sem.defs.get(*def).sig.variants.clone();
+                let tag = crate::expr::load_slot(self, base, off, self.i8_ty);
+                let first = self.reserve_block();
+                let done = self.reserve_block();
+                self.terminate(Term::Jmp(first));
+                let mut current = first;
+                for (idx, (_, params)) in variants.iter().enumerate() {
+                    self.switch_to(current);
+                    let is_variant = {
+                        let t = self.temp();
+                        self.emit(Instr::Bin {
+                            dst: t,
+                            op: crate::tac::BinOp::Eq,
+                            l: tag.clone(),
+                            r: Operand::Const(crate::tac::Const::Int(idx as i128)),
+                            ty: self.i8_ty,
+                        });
+                        Operand::Temp(t)
+                    };
+                    let body = self.reserve_block();
+                    let next = if idx + 1 == variants.len() {
+                        done
+                    } else {
+                        self.reserve_block()
+                    };
+                    self.terminate(Term::Br {
+                        cond: is_variant,
+                        then_: body,
+                        else_: next,
+                    });
+                    self.switch_to(body);
+                    for (pi, (_, fty)) in params.iter().enumerate().rev() {
+                        if crate::expr::contains_arc(self, *fty) {
+                            let poff =
+                                off + 1 + crate::layout::variant_param_slot(self, *def, idx, pi);
+                            self.emit_drop_slots(base, poff, *fty, false);
+                        }
+                    }
+                    self.terminate(Term::Jmp(done));
+                    current = next;
+                }
+                self.switch_to(done);
             }
             TyKind::Named(def, _) if matches!(self.sem.defs.get(*def).kind, DefKind::Struct) => {
                 let fields = self.sem.defs.get(*def).sig.fields.clone();
