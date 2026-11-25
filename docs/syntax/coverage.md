@@ -94,7 +94,7 @@
 - 已从词表删除并在 **parse 级**拒收：actor/aspect/provide/macro/comptime/
   spawn/detached/concurrent/thread/fiber/process/grow/bits/before/after/
   around/proceed/singleton/scoped/transient/bind/to/out/async/await/
-  const/inline/infix/vararg/package。
+  const/inline/infix/vararg/package/namespace。
 - 新增：`alias`（类型别名 hard keyword）、`deinit`（slot word，
   `DeinitBlock := «deinit» Block`）。
 - AST 仍保留上述特性的遗留变体（parser 不可达），清理归 T12。

@@ -186,7 +186,6 @@ pub enum SlotWord {
     Deinit,
     Get,
     Set,
-    Namespace,
     By,
 }
 
@@ -201,7 +200,6 @@ impl SlotWord {
             Self::Deinit => "deinit",
             Self::Get => "get",
             Self::Set => "set",
-            Self::Namespace => "namespace",
             Self::By => "by",
         }
     }
@@ -217,7 +215,6 @@ pub fn lookup_slot_word(word: &str) -> Option<SlotWord> {
         "deinit" => Some(SlotWord::Deinit),
         "get" => Some(SlotWord::Get),
         "set" => Some(SlotWord::Set),
-        "namespace" => Some(SlotWord::Namespace),
         "by" => Some(SlotWord::By),
         _ => None,
     }
@@ -225,4 +222,4 @@ pub fn lookup_slot_word(word: &str) -> Option<SlotWord> {
 
 pub const HARD_KEYWORD_COUNT: usize = 35;
 pub const MODIFIER_WORD_COUNT: usize = 11;
-pub const SLOT_WORD_COUNT: usize = 9;
+pub const SLOT_WORD_COUNT: usize = 8;

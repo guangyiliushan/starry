@@ -564,10 +564,40 @@ fn primary_constructor_properties_are_marked() {
 }
 
 #[test]
-fn extern_namespace_newlines_parse() {
-    let output =
-        parse_source("extern \"c\" namespace math {\n    fun sin(x: f64) : f64;\n}").unwrap();
+fn extern_namespace_is_rejected() {
+    // D-014: `namespace` left the lexicon. An extern body is a FunSignature or
+    // a `{ FunSignature }` block, so both spellings hit `expected fun` on the
+    // `namespace` token.
+    for source in [
+        "extern \"c\" namespace math { fun sin(x: f64) : f64; }",
+        "extern \"c\" { namespace math { fun sin(x: f64) : f64; } }",
+    ] {
+        let output = parse_source(source).unwrap();
+        let first = output.diagnostics.first().expect(source);
+        assert_eq!(
+            first.code,
+            DiagCode::ExpectedToken,
+            "{source}: {:?}",
+            output.diagnostics
+        );
+        assert_eq!(
+            first.span.start as usize,
+            source.find("namespace").expect(source),
+            "{source}: {:?}",
+            output.diagnostics
+        );
+    }
+
+    // The word itself is an ordinary identifier again.
+    let output = parse_source("extern \"c\" fun namespace(x: int) : int;").unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Extern(external) = &output.ast.items[0].kind else {
+        panic!("expected extern");
+    };
+    let ExternBody::Fun(sig) = &external.body else {
+        panic!("expected fun body, got {:?}", external.body);
+    };
+    assert_eq!(output.interner.resolve(sig.name), "namespace");
 }
 
 #[test]
@@ -1156,7 +1186,6 @@ fn extern_block_lists_multiple_functions() {
     for source in [
         "extern \"c\" fun a() : int;",
         "extern \"c\" fun a() : int",
-        "extern \"c\" namespace std { fun malloc(n: int) : int; }",
         "extern \"c\" { }",
     ] {
         let output = parse_source(source).unwrap();

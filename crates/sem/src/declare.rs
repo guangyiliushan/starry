@@ -1035,7 +1035,7 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                     st.defs.get_mut(def).external = true;
                     first = Some(def);
                 }
-                ExternBody::Block { members } | ExternBody::Namespace { members, .. } => {
+                ExternBody::Block { members } => {
                     for sig in members {
                         let def = add_def(st, scope, sig.name, decl.span, DefKind::Fun);
                         st.defs.get_mut(def).external = true;
@@ -1513,13 +1513,11 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                 let dsc = st.defs.get(ed).scope;
                 let sigs: Vec<&FunSignature> = match &e.body {
                     ExternBody::Fun(s) => vec![s],
-                    ExternBody::Block { members } | ExternBody::Namespace { members, .. } => {
-                        members.iter().collect()
-                    }
+                    ExternBody::Block { members } => members.iter().collect(),
                 };
                 for sig in sigs {
                     // Fun 体的 def = extern 声明自身（注册在包作用域）；
-                    // Block/Namespace 成员注册在同一作用域下（declare 逐名 add_def）
+                    // Block 成员注册在同一作用域下（declare 逐名 add_def）
                     if let Some(def) = st.scopes.lookup_local(dsc, sig.name) {
                         let params = lower_params(st, dsc, &sig.params, item.span);
                         let ret = match &sig.ret {

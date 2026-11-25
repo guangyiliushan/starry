@@ -81,13 +81,7 @@ pub struct FunSignature {
 #[derive(Debug, Clone)]
 pub enum ExternBody {
     Fun(FunSignature),
-    Block {
-        members: Vec<FunSignature>,
-    },
-    Namespace {
-        name: Symbol,
-        members: Vec<FunSignature>,
-    },
+    Block { members: Vec<FunSignature> },
 }
 
 #[derive(Debug, Clone)]

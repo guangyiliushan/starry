@@ -11,7 +11,7 @@ pub const MARKDOWN_TABLE_PATH: &str = "docs/syntax/generated/lexicon.md";
 
 pub const HARD_KEYWORD_COUNT: usize = 35;
 pub const MODIFIER_WORD_COUNT: usize = 11;
-pub const SLOT_WORD_COUNT: usize = 9;
+pub const SLOT_WORD_COUNT: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WordKind {
@@ -541,7 +541,7 @@ mod tests {
         let markdown = generate_markdown(&words);
         assert!(markdown.contains("## Hard keyword (35)"));
         assert!(markdown.contains("## Modifier word (11)"));
-        assert!(markdown.contains("## Slot word (9)"));
+        assert!(markdown.contains("## Slot word (8)"));
     }
 
     #[test]

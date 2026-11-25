@@ -60,5 +60,4 @@ IDENTIFIER : [A-Za-z_][A-Za-z0-9_]*;
 // slot: Deinit = 'deinit' in class_deinitializer
 // slot: Get = 'get' in accessor
 // slot: Set = 'set' in accessor
-// slot: Namespace = 'namespace' in extern_cpp
 // slot: By = 'by' in by_slot

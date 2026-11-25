@@ -188,7 +188,6 @@ for pattern matching. The grammar needs an explicit is-pattern production
 | `impl … where …` | `ImplDecl` has no `WhereClause` in the EBNF. Inline bounds (`impl<T : Show>`) already bind `T`. Needs its own decision. |
 | Unbound `T` in `impl Show for List<T>` | Whether `T` is bound is a semantic question, not a parse one. |
 | `rest @ ..` binding | The representation (`rest: Option<usize>`) can carry it; the EBNF has no `@` binding operator yet. |
-| `extern "c" { namespace … }` nesting | `namespace` is a sibling of the block form, not a member of it. |
 | Symbolic operator members (`a.+`) | `PostfixSuffix := "." IDENT`; operator overloading maps to named methods (`plus`, `unaryMinus`). |
 
 ## Keyword convergence (D-014, 2026-11-25)
@@ -196,9 +195,10 @@ for pattern matching. The grammar needs an explicit is-pattern production
 Removed from the lexicon (parse-level rejection): async/await/spawn/
 detached/concurrent/thread/fiber/process/actor/aspect/provide/macro/
 comptime/grow/bits/before/after/around/proceed/singleton/scoped/
-transient/bind/to/out/vararg/const/inline/infix/package.
+transient/bind/to/out/vararg/const/inline/infix/package/namespace.
 
 Added: "alias" (type-alias hard keyword; "type" remains for
 associated types only) and "deinit" (slot word, parsed via
-SlotWord::Deinit). Frozen v1 budget: 35 hard / 11 modifier / 9 slot
-= 55 keywords; no further reduction (capability needs).
+SlotWord::Deinit). Frozen v1 budget: 35 hard / 11 modifier / 8 slot
+= 54 keywords; `namespace` removed 2026-11-25 (parse-only, no C++ FFI
+design; re-add with a spec). No further reduction (capability needs).

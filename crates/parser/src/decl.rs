@@ -684,15 +684,6 @@ fn parse_extern(session: &mut ParseSession<'_>, start: Span) -> Result<DeclNode,
         let members = parse_fun_signatures_until_rbrace(session)?;
         expect_punctuation(session, PunctuationKind::RBrace, '}');
         ExternBody::Block { members }
-    } else if session.cursor.check(&TokenKind::Identifier)
-        && session.token_text(session.cursor.peek()) == "namespace"
-    {
-        session.cursor.advance();
-        let name = parse_identifier(session).0;
-        expect_punctuation(session, PunctuationKind::LBrace, '{');
-        let members = parse_fun_signatures_until_rbrace(session)?;
-        expect_punctuation(session, PunctuationKind::RBrace, '}');
-        ExternBody::Namespace { name, members }
     } else {
         let signature = parse_fun_signature(session)?;
         session

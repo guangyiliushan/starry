@@ -115,7 +115,6 @@ ExternDecl     := "extern" ExternLanguage ExternBody ;
 ExternLanguage := StringLiteral ;
 ExternBody     := FunSignature
                 | "{" { FunSignature } "}"
-                | «namespace»" IDENT "{" { FunSignature } "}" ;
 
 (* ---------- Generics ---------- *)
 

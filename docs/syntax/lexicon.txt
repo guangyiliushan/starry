@@ -6,6 +6,7 @@
 # concurrency stage), const/inline/infix/vararg (no-ops) and the AOP/DI/spawn/
 # grow families; added `alias` (type alias) and `deinit` (class destructor).
 # Removed words live in docs/keyword-capability-plan-2026-11-24.md (Optional).
+# 2026-11-25: removed `namespace` (parse-only extern slot; no C++ FFI design).
 
 # 35 globally reserved keywords.
 hard alias Alias global
@@ -58,7 +59,7 @@ modifier static Static modifier
 modifier operator OperatorWord modifier
 modifier weak Weak modifier
 
-# 9 slot words, recognized only in their named parser slot.
+# 8 slot words, recognized only in their named parser slot.
 slot impl Impl declaration
 slot it It omitted_lambda_parameter
 slot move Move lambda_capture
@@ -66,5 +67,4 @@ slot init Init class_initializer
 slot deinit Deinit class_deinitializer
 slot get Get accessor
 slot set Set accessor
-slot namespace Namespace extern_cpp
 slot by By by_slot

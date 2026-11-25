@@ -58,7 +58,7 @@
 | `OperatorWord` | `operator` | `modifier` |
 | `Weak` | `weak` | `modifier` |
 
-## Slot word (9)
+## Slot word (8)
 
 | Variant | Lexeme | Grammar slot |
 |---|---|---|
@@ -69,6 +69,5 @@
 | `Deinit` | `deinit` | `class_deinitializer` |
 | `Get` | `get` | `accessor` |
 | `Set` | `set` | `accessor` |
-| `Namespace` | `namespace` | `extern_cpp` |
 | `By` | `by` | `by_slot` |
 
