@@ -564,7 +564,7 @@ fn parse_top_level_inner(session: &mut ParseSession<'_>) -> Result<DeclNode, Par
             session.cursor.advance();
             let name = parse_identifier(session).0;
             let type_params = parse_type_params(session)?;
-            // EBNF: TypeAliasDecl := Modifiers \x22alias\x22 IDENT TypeParams? "=" Type
+            // EBNF: TypeAliasDecl := Modifiers "alias" IDENT TypeParams? "=" Type
             if !session
                 .cursor
                 .bump_if(&TokenKind::Operator(OperatorKind::Eq))

@@ -3,7 +3,7 @@
  *
  * Notation:
  *   "val"       hard keyword, globally reserved by the lexer
- *   «deinit»    e»   slot/modifier word; lexically IDENTIFIER and recognized
+ *   «deinit»    slot/modifier word; lexically IDENTIFIER and recognized
  *               only by a parser predicate in its named grammar slot
  *   NL          line terminator; spaces and tabs are not tokens
  *   [ X ]       optional
@@ -55,9 +55,9 @@ Modifiers := { Modifier } ;
 (* D-014: const/inline/infix/vararg removed (2026-11-25). static/operator
  * are retained but sem-rejected until static members and operator
  * overloading land. weak is the ARC-cycle modifier (D-008). *)
-Modifier  := \x22public\x22 [|] \x22private\x22 [|] \x22protected\x22 [|] \x22internal\x22
-           [|] \x22open\x22 [|] \x22abstract\x22 [|] \x22sealed\x22 [|] \x22override\x22
-           [|] \x22static\x22 [|] \x22operator\x22 | «weak» ;
+Modifier  := "public" | "private" | "protected" | "internal"
+           | "open" | "abstract" | "sealed" | "override"
+           | "static" | "operator" | «weak» ;
 
 FunDecl      := Modifiers "fun" IDENT TypeParams?
                 "(" ParameterList ")" [ ":" Type ]
@@ -105,7 +105,7 @@ TraitDecl      := Modifiers "trait" IDENT TypeParams? Supertypes? "{" { TraitMem
 TraitMember    := AssociatedType | FunSignature | FunDecl | Declaration ;
 AssociatedType := "type" IDENT [ ":" Bound ] [ "=" Type ] [ ";" ] ;
 
-TypeAliasDecl := Modifiers \x22alias\x22 IDENT TypeParams\? \x22=\x22 Type ;
+TypeAliasDecl := Modifiers "alias" IDENT TypeParams? "=" Type ;
 
 ImplDecl := «impl» TypeParams? Type "for" Type "{" { ClassMember } "}" ;
 
