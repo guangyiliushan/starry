@@ -38,6 +38,7 @@ admissible.
 At `v0.1.0-rc`, WP2-WP5 close the correctness and release boundary: ABI cases
 run end-to-end or reject with a stable diagnostic; inheritance, aggregate/enum
 ARC, nullable ABI, and reassignment paths are in the Linux sanitizer corpus;
+deterministic arithmetic programs fuzz the interpreter/native differential pair;
 TypeInfo/vtable snapshots are pinned; the CI matrix runs Windows/Linux plus the
 sanitizer job; a clean clone builds with `--locked` and the sample corpus runs;
 the quickstart tutorial covers five runnable language slices.

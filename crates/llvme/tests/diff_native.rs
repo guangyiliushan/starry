@@ -190,6 +190,48 @@ const TRAP_CASES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Deterministic bounded expression fuzzing. The generator stays reproducible,
+/// uses checked/wrapping integer forms only, and keeps i64 operands small enough
+/// that checked forms cannot trap.
+fn differential_fuzz_source(seed: u64) -> String {
+    fn next(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    let mut state = seed | 1;
+    let leaf = |state: &mut u64| ((next(state) % 19) as i64) - 9;
+    let ops = ["+", "-", "*", "+%", "-%", "*%"];
+    let mut expression = leaf(&mut state).to_string();
+    for _ in 0..5 {
+        let rhs = leaf(&mut state);
+        let op = ops[(next(&mut state) % ops.len() as u64) as usize];
+        expression = format!("({expression} {op} {rhs})");
+    }
+    format!("fun main(): int {{\n    print({expression})\n    return 0\n}}")
+}
+
+#[test]
+fn deterministic_differential_fuzz_agrees() {
+    if llvm_tool_path("clang").is_none() {
+        eprintln!("SKIP: differential fuzz requires clang");
+        return;
+    }
+    for i in 0..12u64 {
+        let source =
+            differential_fuzz_source(0x5354_4152_5259 ^ (i.wrapping_mul(0x9e37_79b9_7f4a_7c15)));
+        let Some((interp_out, native_out)) = both_outputs(CASES.len() + i as usize, &source) else {
+            unreachable!("clang presence checked above");
+        };
+        assert_eq!(
+            interp_out, native_out,
+            "differential fuzz divergence for seed {i}:\n{source}"
+        );
+    }
+}
+
 #[test]
 fn interp_and_native_agree_on_traps() {
     for (name, source) in TRAP_CASES {
