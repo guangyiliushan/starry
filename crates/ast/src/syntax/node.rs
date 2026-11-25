@@ -167,6 +167,8 @@ pub enum DiagCode {
     SemUninitializedBinding,
     /// v1 暂不支持的构造
     SemUnsupportedConstruct,
+    /// Trait cannot become a dyn object in v1 (object safety gate)
+    SemObjectUnsafe,
     /// Raw pointer dereference lacks lexical unsafe permission
     SemUnsafeRequired,
     /// 宏展开是独立前置 pass，v1 未实现

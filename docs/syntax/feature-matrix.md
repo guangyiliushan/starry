@@ -2,7 +2,7 @@
 
 每个语言特性在编译链五层的状态：parser → sem → irc → llvme → runtime
 （外加 irc 参考解释器作语义验证层）。状态记号：**✅** 完成、**🟡** 部分
-（限制见备注）、**❌** 未实现（sem 给稳定 `SemUnsupportedConstruct` 或
+（限制见备注）、**❌** 未实现（sem 给稳定 `SemUnsupportedConstruct` / `SemObjectUnsafe` 或
 irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单；已删关键字（D-014）在 parse 级拒收）。
 
 来源：`coverage.md`（EBNF↔AST 覆盖）、`semantic-notes.md`（语义契约）、

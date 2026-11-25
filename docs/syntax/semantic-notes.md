@@ -478,7 +478,7 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   编码与 native tag 对齐（裸 fn = def<<1，box = (id<<32)|1，payload
   地址 = (id<<32)+8j）；不建模 ARC（spec §4.4-6 纪律）。
 
-## 泛型 alias 与 trait 继承（WP4/WP5，2026-11-25）\n\n- 泛型 alias 在签名 lower 期保存 Param-bearing target；use-site 传实参后\n  `subst + concretize` 返回具体目标。非泛型 alias 仍急切解析，成员路径\n  行为不变。\n- trait 继承只允许单路径；diamond/cycle 稳定拒收。派生 impl 的继承方法\n  可由既有 supertrait impl 满足；派生 registry 不复制方法，静态分派仍由\n  各 trait 的最具体 impl 提供。\n- 泛型 trait 声明与签名入表，但 impl 实参核对/分派仍后置；关联类型与\n  trait default method 保持稳定拒收。\n\n## 诊断码
+## Trait object-safety 预检（WP5）\n\n- Trait 声明期对泛型方法、Self 返回值发稳定 `SemObjectUnsafe`；这是为\n  后续 dyn/ thick-pointer 切片提前建立的可实现边界，不是运行时 ABI。\n- v1 仍拒绝 trait 作为类型标注；当前诊断保持 `SemUnsupportedConstruct`。\n\n## 泛型 alias 与 trait 继承（WP4/WP5，2026-11-25）\n\n- 泛型 alias 在签名 lower 期保存 Param-bearing target；use-site 传实参后\n  `subst + concretize` 返回具体目标。非泛型 alias 仍急切解析，成员路径\n  行为不变。\n- trait 继承只允许单路径；diamond/cycle 稳定拒收。派生 impl 的继承方法\n  可由既有 supertrait impl 满足；派生 registry 不复制方法，静态分派仍由\n  各 trait 的最具体 impl 提供。\n- 泛型 trait 声明与签名入表，但 impl 实参核对/分派仍后置；关联类型与\n  trait default method 保持稳定拒收。\n\n## 诊断码
 
 全部 `Sem*` 前缀，定义在 `crates/ast/src/syntax/node.rs::DiagCode`，
 27 个（SemUndefinedName … SemUnknownMember、SemTypeArgMismatch、SemConstOverflow、SemDivisionByZero、SemDivisionOverflow、SemUnsafeRequired）；另有 `Irc*` 2 个属 irc

@@ -1199,6 +1199,23 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                             Some(r) => lower_ty(st, tscope, r),
                             None => st.tys.unit,
                         };
+                        // Precheck for a later dyn slice: only signature-only
+                        // methods with concrete return types are object safe.
+                        let ret_has_param = sig
+                            .ret
+                            .as_ref()
+                            .map(|r| lower_ty(st, tscope, r))
+                            .is_some_and(|ret| st.tys.mentions_param(ret));
+                        if !sig.type_params.is_empty() || ret_has_param {
+                            st.diags.emit(Diagnostic::error(
+                                DiagCode::SemObjectUnsafe,
+                                decl.span,
+                                format!(
+                                    "trait method `{}` is not object safe",
+                                    st.interner.resolve(sig.name)
+                                ),
+                            ));
+                        }
                         let defaults: Vec<bool> =
                             sig.params.iter().map(|p| p.default.is_some()).collect();
                         let s = &mut st.defs.get_mut(fd).sig;
