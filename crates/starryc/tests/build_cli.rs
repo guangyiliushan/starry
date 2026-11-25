@@ -1096,7 +1096,7 @@ fn fn_value_dual_form_e2e() {
     ) else {
         return;
     };
-    assert_eq!(out, "");
+    assert_eq!(out, "1042\n1042\n");
     assert_eq!(code, 2084);
 }
 

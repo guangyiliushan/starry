@@ -5209,7 +5209,19 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
                 .get(target.id)
                 .copied()
                 .unwrap_or(ctx.sem.tys.unit);
-            if let TyKind::Nullable(_) = ctx.sem.tys.kind(ty).clone() {
+            if let TyKind::Nullable(inner) = ctx.sem.tys.kind(ty).clone() {
+                if crate::layout::is_class(ctx, inner) {
+                    // Deref assignment is the nullable var ABI's write-through
+                    // path. Release the old payload, then normalize the new
+                    // +1/borrowed value before overwriting the storage slot.
+                    let old = load_slot(ctx, ptr, 1, inner);
+                    ctx.emit_operand_release(old, inner, false);
+                    if !ctx.take_stmt_temp(&v)
+                        && let Operand::Temp(new_base) = v
+                    {
+                        ctx.emit_class_retain(Place::Temp(new_base), ty);
+                    }
+                }
                 let base = nullable_base(ctx, v, ty, span);
                 for slot in 0..crate::layout::scalar_slots(ctx, ty) {
                     let sty = crate::layout::slot_ty(ctx, ty, slot);

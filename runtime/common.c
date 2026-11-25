@@ -228,18 +228,29 @@ char *starry_str_concat(const char *a, const char *b) {
     return out;
 }
 
-void starry_print_i64(long long v) { write_line(fmt_i64(v)); }
-void starry_print_i32(int v) { write_line(fmt_i64(v)); }
-void starry_print_i16(short v) { write_line(fmt_i64(v)); }
-void starry_print_i8(signed char v) { write_line(fmt_i64(v)); }
-void starry_print_i128(unsigned long long hi, unsigned long long lo) { write_line(fmt_i128(hi, lo)); }
+static void print_line_owned(char *s) {
+    write_line(s);
+    rt_free(s);
+}
+
+void starry_print_i64(long long v) { print_line_owned(fmt_i64(v)); }
+void starry_print_i32(int v) { print_line_owned(fmt_i64(v)); }
+void starry_print_i16(short v) { print_line_owned(fmt_i64(v)); }
+void starry_print_i8(signed char v) { print_line_owned(fmt_i64(v)); }
+void starry_print_i128(unsigned long long hi, unsigned long long lo) {
+    print_line_owned(fmt_i128(hi, lo));
+}
 void starry_print_i1(int v) { write_line(v ? "true" : "false"); }
 void starry_print_char(int cp) {
-    write_str(utf8_from_cp((unsigned int)cp));
+    char *s = utf8_from_cp((unsigned int)cp);
+    write_str(s);
     write_str("\n");
+    rt_free(s);
 }
-void starry_print_f64(double v) { write_line(fmt_double(v, 15)); }
-void starry_print_f32(float v) { write_line(fmt_double((double)v, 7)); }
+void starry_print_f64(double v) { print_line_owned(fmt_double(v, 15)); }
+void starry_print_f32(float v) { print_line_owned(fmt_double((double)v, 7)); }
+/* Callers may pass either an LLVM string constant or an owned string value;
+ * ownership tracking for dynamic strings is not part of this runtime ABI. */
 void starry_print_string(const char *s) { write_line(s); }
 
 /* M1（D2/D4 契约）：受检算术 trap 统一入口——llvme 的受检分支调用。

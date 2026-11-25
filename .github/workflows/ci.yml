@@ -36,8 +36,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          & "C:\Program Files\LLVM\bin\clang.exe" --version
-          & "C:\Program Files\LLVM\bin\llvm-as.exe" --version
+          Get-Command clang, llvm-as | Format-List Source,Version
+          clang --version
+          llvm-as --version
       - name: Verify native toolchain (Linux)
         if: runner.os == 'Linux'
         run: |

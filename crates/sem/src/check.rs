@@ -1974,16 +1974,20 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
                 def: lambda_def,
             });
             // M8: resolve lambda body identifiers in lambda scope
-            // S2/P2-3：捕获窗口覆盖 resolve + type（赋值拒收在 type 期）
-            st.lambda_cap_stack.push((e.id.0, scope, Vec::new()));
-            // A closure is a new function boundary; lexical unsafe permission
-            // does not leak from its creation site into its body.
-            let outer_unsafe_depth = st.unsafe_depth;
-            st.unsafe_depth = 0;
-            crate::resolve::resolve_block(body, st, scope);
-            let body_ty = type_block(body, st, true);
-            let (_, _, caps) = st.lambda_cap_stack.pop().expect("capture stack");
-            st.unsafe_depth = outer_unsafe_depth;
+            // S2/P2-3：捕获窗口覆盖 resolve + type（绑定位置 lambda 需要
+            // resolve 期捕获表；赋值拒收仍在 type 期）
+            let (body_ty, caps) = {
+                st.lambda_cap_stack.push((e.id.0, scope, Vec::new()));
+                // A closure is a new function boundary; lexical unsafe permission
+                // does not leak from its creation site into its body.
+                let outer_unsafe_depth = st.unsafe_depth;
+                st.unsafe_depth = 0;
+                crate::resolve::resolve_block(body, st, scope);
+                let body_ty = type_block(body, st, true);
+                let (_, _, caps) = st.lambda_cap_stack.pop().expect("capture stack");
+                st.unsafe_depth = outer_unsafe_depth;
+                (body_ty, caps)
+            };
             st.lambda_caps.insert(e.id.0, caps);
             st.funs.pop();
             let ret_ty = if infer_ret {
