@@ -512,6 +512,26 @@ fn dyn_class_vtable_layout_snapshot() {
 }
 
 #[test]
+fn class_typeinfo_and_vtable_snapshot() {
+    // Phase 3a: every class gets a stable TypeInfo header record and a
+    // declaration-ordered class virtual table. Virtual dispatch reads the
+    // TypeInfo from the payload-base header and calls through slot zero.
+    let (text, codes) = emit(
+        "open class Base(val x: int) {\n    open fun who(): int {\n        return self.x\n    }\n}\nfun main(): int {\n    val b = Base(7)\n    print(b.who())\n    return 0\n}",
+    );
+    assert_eq!(codes, Vec::new(), "{codes:?}");
+    if !llvm_as_ok(&text) {
+        panic!("LLVM validator rejected:\n{text}");
+    }
+    assert!(
+        text.contains("@classvtable.Base.16 = private constant [1 x ptr] [ptr @who.")
+            && text.contains("@typeinfo.Base.16 = private constant { ptr, ptr, i64, ptr } { ptr null, ptr @classvtable.Base.16, i64 16, ptr null }")
+            && text.contains("@starry_alloc_object(i64 32, ptr @typeinfo.Base.16)")
+            && text.contains("call i64 %"),
+        "{text}"
+    );
+}
+#[test]
 fn class_object_emits_alloc_retain_release() {
     // M4 slice 1：class 对象 = alloc + 复制 retain + 块出口隐式 release；
     // 字段经 24B header 偏移（offsetptr/GEP i8）

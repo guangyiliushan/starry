@@ -189,6 +189,7 @@ for pattern matching. The grammar needs an explicit is-pattern production
 | Unbound `T` in `impl Show for List<T>` | Whether `T` is bound is a semantic question, not a parse one. |
 | `rest @ ..` binding | The representation (`rest: Option<usize>`) can carry it; the EBNF has no `@` binding operator yet. |
 | Symbolic operator members (`a.+`) | `PostfixSuffix := "." IDENT`; operator overloading maps to named methods (`plus`, `unaryMinus`). |
+| Bodyless abstract class methods | Phase 3a parser gap: `parse_fun_decl` still requires a body in class members. `abstract fun f(): int;` is rejected before sem can check abstract placement. |
 
 ## Keyword convergence (D-014, 2026-11-25)
 

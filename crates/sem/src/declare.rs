@@ -656,25 +656,6 @@ fn reject_unsupported_modifiers(mods: &[ast::syntax::modifier::Modifier], st: &m
     }
 }
 
-/// P0 compiler trust：class 成员路径的 protected 拒收（vis_of 只覆盖
-/// 顶层声明；成员走这里，保证两条路径各报一次、不重复）。
-fn reject_protected_member(
-    mods: &[ast::syntax::modifier::Modifier],
-    span: Span,
-    st: &mut SemState,
-) {
-    if mods
-        .iter()
-        .any(|m| m.word == ast::token::ModifierWord::Protected)
-    {
-        st.diags.emit(Diagnostic::error(
-            DiagCode::SemUnsupportedConstruct,
-            span,
-            "`protected` is not supported until inheritance is implemented",
-        ));
-    }
-}
-
 /// P0 compiler trust：impl 头 for-类型的泛型实参里是否出现 trait
 ///（根位置 trait 已由「impl header must name a nominal type」拒收）。
 fn impl_type_arg_is_trait(st: &SemState, ty: TyId) -> bool {
@@ -1087,7 +1068,6 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                     ClassMember::Declaration(d) if matches!(&d.kind, DeclKind::Binding(_)) => {
                         if let DeclKind::Binding(b) = &d.kind {
                             reject_unsupported_modifiers(&b.modifiers.modifiers, st);
-                            reject_protected_member(&b.modifiers.modifiers, d.span, st);
                         }
                         st.diags.emit(Diagnostic::error(
                             DiagCode::SemUnsupportedConstruct,
@@ -1098,7 +1078,6 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                     ClassMember::Declaration(d) if matches!(&d.kind, DeclKind::Fun(_)) => {
                         if let DeclKind::Fun(f) = &d.kind {
                             reject_unsupported_modifiers(&f.modifiers.modifiers, st);
-                            reject_protected_member(&f.modifiers.modifiers, d.span, st);
                             if f.params.iter().any(|p| p.default.is_some()) {
                                 st.diags.emit(Diagnostic::error(
                                     DiagCode::SemUnsupportedConstruct,
@@ -1704,6 +1683,15 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                         ));
                         continue;
                     }
+                    if st.defs.get(base_def).sig.flags.sealed
+                        && !same_pkg(st, st.defs.get(base_def).scope, dsc)
+                    {
+                        st.diags.emit(Diagnostic::error(
+                            DiagCode::SemUnsupportedConstruct,
+                            super_item.ty.span,
+                            "sealed class inheritance must remain in the same package",
+                        ));
+                    }
                     if !st.defs.get(base_def).sig.flags.open {
                         st.diags.emit(Diagnostic::error(
                             DiagCode::SemUnsupportedConstruct,
@@ -1855,6 +1843,21 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                                         "cannot override non-open method `{}`",
                                         st.interner.resolve(f.name)
                                     ),
+                                ));
+                            }
+                        } else if flags.abstract_ {
+                            if f.body.is_some() {
+                                st.diags.emit(Diagnostic::error(
+                                    DiagCode::SemUnsupportedConstruct,
+                                    d.span,
+                                    "abstract method cannot have a body",
+                                ));
+                            }
+                            if !st.defs.get(class_def).sig.flags.abstract_ {
+                                st.diags.emit(Diagnostic::error(
+                                    DiagCode::SemUnsupportedConstruct,
+                                    d.span,
+                                    "abstract method requires an abstract class",
                                 ));
                             }
                         } else if base_method.is_some() {

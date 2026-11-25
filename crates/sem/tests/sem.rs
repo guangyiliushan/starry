@@ -1863,13 +1863,39 @@ fn p0_rejects_protected_on_top_level() {
 }
 
 #[test]
-fn p0_rejects_protected_on_class_member() {
+fn protected_class_methods_are_accepted() {
+    assert_clean("class C {\n    protected fun f(): int {\n        return 0\n    }\n}");
+}
+
+#[test]
+fn abstract_class_instantiation_reports() {
     assert_has(
-        "class C {\n    protected fun f(): int {\n        return 0\n    }\n}",
+        "abstract class C(val v: int)\nfun main(): int {\n    val c = C(1)\n    return 0\n}",
         DiagCode::SemUnsupportedConstruct,
     );
 }
 
+#[test]
+fn abstract_methods_are_parse_gated_until_bodyless_support() {
+    // Phase 3a parser gap: ClassMember still requires a function body, so the
+    // bodyless abstract-method shape cannot yet reach sem placement checks.
+    let got = codes("abstract class C {\n    abstract fun f(): int;\n}");
+    assert!(
+        got.contains(&DiagCode::ExpectedToken),
+        "expected parser rejection, got {got:?}"
+    );
+}
+
+#[test]
+fn protected_methods_are_subclass_visible_only() {
+    assert_has(
+        "open class C(val v: int) {\n    protected fun f(): int {\n        return self.v\n    }\n}\nfun main(): int {\n    val c = C(1)\n    print(c.f())\n    return 0\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    assert_clean(
+        "open class C(val v: int) {\n    protected fun f(): int {\n        return self.v\n    }\n}\nopen class D(val w: int): C(w) {\n    fun use(): int {\n        return self.f()\n    }\n}",
+    );
+}
 #[test]
 fn p0_protected_does_not_break_valid_visibility() {
     assert_clean("public fun f(): int {\n    return 1\n}");

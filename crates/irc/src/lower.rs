@@ -405,6 +405,21 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
             });
         }
     }
+    // Phase 3a: one class virtual table per concrete class. Empty tables are
+    // emitted for final classes so TypeInfo ABI stays uniform.
+    for (def_id, def) in sem.defs.iter().enumerate() {
+        if !matches!(def.kind, DefKind::Class) {
+            continue;
+        }
+        let class_def = DefId(def_id as u32);
+        out.class_vtables.push(crate::tac::ClassVtable {
+            class_def,
+            methods: expr::class_vtable_methods(sem, class_def)
+                .into_iter()
+                .map(|(_, def)| def)
+                .collect(),
+        });
+    }
     reorder_globals(&mut out, sem.defs);
     out
 }

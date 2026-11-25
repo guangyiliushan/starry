@@ -118,14 +118,48 @@ pub fn emit_module(
             };
             cursor = base;
         }
+        let vt = tac
+            .class_vtables
+            .iter()
+            .find(|table| table.class_def == def_id);
+        let vtable_name = format!(
+            "@classvtable.{}.{}",
+            sanitize(interner.resolve(def.name)),
+            def_id.0
+        );
+        let vtable_ptr = match vt {
+            Some(table) => {
+                let count = table.methods.len();
+                let init = if count == 0 {
+                    "zeroinitializer".to_string()
+                } else {
+                    format!(
+                        "[{}]",
+                        table
+                            .methods
+                            .iter()
+                            .map(|method| format!("ptr {}", fun_name(&lc, *method)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                let _ = writeln!(
+                    globals,
+                    "{vtable_name} = private constant [{count} x ptr] {init}"
+                );
+                format!("ptr {vtable_name}")
+            }
+            None => "ptr null".to_string(),
+        };
         let deinit_ptr = deinit
             .map(|d| format!("ptr {}", fun_name(&lc, d)))
             .unwrap_or_else(|| "ptr null".to_string());
         let _ = writeln!(
             globals,
-            "{} = private constant {{ ptr, ptr, i64, ptr }} {{ {}, ptr null, i64 {}, ptr null }}",
+            "{} = private constant {{ ptr, ptr, i64, ptr }} {{ {}, {}, i64 {}, ptr null }}",
             crate::ty::typeinfo_name(&lc, def_id),
             deinit_ptr,
+            vtable_ptr,
             def_id.0
         );
     }

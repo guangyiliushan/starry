@@ -65,7 +65,9 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单；已删关�
 | class/ARC（M4 切片 1–4b，Plan C） | ✅ | ✅ | ✅ | ✅ | ✅ | 构造/字段/方法/deinit/weak var + upgrade 读取（`?P`）/可空 class/形参 +0/返回 +1 统一/重赋值所有权/语句级 +1 临时释放（`stmt_temps`，full-expression 纪律）；type-directed drop traversal 已建，但 ARC 聚合元素/字段仍稳定拒收 |
 | 闭包捕获（P2-3b-1/2） | ✅ | ✅ | ✅ | ✅ | ✅ | 标量/class 捕获 box（tagged）+ runtime tag 分派 + 快照语义 + box ARC（meta 逐 class 捕获 release，deinit 平衡 e2e）+ C 边界拒收；可空/i128/聚合捕获归批次 3（见未实现表） |
 | 泛型单态化（M7） | ✅ | ✅ | ✅ | ✅ | — | fun/struct/enum 单态化；泛型 alias use-site 代入；显式/推断实参、类型形参默认值、bounds 兑现；泛型 trait 声明已入表（impl 参数核对后置）；impl 注册延后到签名 lower 后 |
-| trait/impl 静态分派（M9） | ✅ | ✅ | ✅ | ✅ | — | trait 声明/impl/bounds/泛型 impl/单路径继承；派生 impl 复用 supertrait impl 满足继承方法；diamond/cycle 拒收；关联类型/default method 仍拒收 || `dyn Trait` class-root 动态分发 | ✅ | ✅ | ✅ | ✅ | ✅ | Phase 2a：胖指针 data+vtable，vtable `[drop,size,align,methods...]`；`?dyn`/`?.`/`!!` 已覆盖；struct-borrowed dyn、upcast、dyn 存聚合/全局仍拒收 |
+| trait/impl 静态分派（M9） | ✅ | ✅ | ✅ | ✅ | — | trait 声明/impl/bounds/泛型 impl/单路径继承；派生 impl 复用 supertrait impl 满足继承方法；diamond/cycle 拒收；关联类型/default method 仍拒收 |
+| `dyn Trait` class-root 动态分发 | ✅ | ✅ | ✅ | ✅ | ✅ | Phase 2a：胖指针 data+vtable，vtable `[drop,size,align,methods...]`；`?dyn`/`?.`/`!!` 已覆盖；struct-borrowed dyn、upcast、dyn 存聚合/全局仍拒收 |
+| class 单继承 + 虚方法 | 🟡 | ✅ | ✅ | ✅ | ✅ | Phase 3a：`D : Base(args)`、base 字段前缀、TypeInfo/vtable、open/override 分派、super 直调、abstract class/sealed/protected；ctor/dtor 顺序有 e2e。bodyless abstract method 仍 parse 拒收 |
 | 指针 `*const T`/`*mut T`（T2 thin） | ✅ | ✅ | ✅ | ✅ | — | M2：类型 + FFI + `&x`/`*p` + StorePtr；raw 解引读取/写入/复合读写须 unsafe（`SemUnsafeRequired`），创建/转换安全；T2 checked pointer 后置 M10（Q7） |
 | 引用 `&T`/`&mut T`（T1） | ✅ | ✅ | ✅ | ✅ | — | M2；v1 保守借用（R6：局部名/不逃逸/全局拒借/不可变只读）；重叠 `&mut`/区间追踪后置 M10 前专项 |
 | `--release` 构建 | — | — | — | ✅ | — | clang `-O2`；Windows freestanding CRT stubs、Linux 正常 libc；语言语义不变（checked 溢出所有模式生效，D5） |
@@ -74,7 +76,9 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单；已删关�
 
 | 特性 | 拒收点 | 备注 |
 |---|---|---|
-| class 继承 / 二级构造（init） | sem | R4：v1 默认 final、无二级构造，稳定拒收 |
+| bodyless abstract class method | parse | `ClassMember` 仍要求函数体；sem placement 检查待 parser 解锁 |
+| 二级构造（init） | sem | R4：v1 仅主构造，稳定拒收 |
+| `by` delegation / class downcast | sem | Phase 3b 候选：`by` 转发与 `is`/`as?` 沿 TypeInfo parent 判定 |
 
 ## 近期 ABI 落地状态
 
@@ -93,8 +97,9 @@ irc 给 `IrcUnsupportedLowering`，见 semantic-notes 跳过清单；已删关�
 | lambda 存 struct 字段（矩阵 #5） | sem | 修正 3：Fn 字段稳定拒收（主构造头字段 + body 字段两路已接，declare 侧） |
 | union 声明 / accessor（get/set） | sem | P0 trust：此前静默接受，现声明点稳定拒收（D-014 保留字） |
 | macro 声明 / comptime / grow / spawn / actor / aspect / provide / async / await / concurrent / detached / thread / fiber / process / variance / const / inline / infix / vararg / namespace / static | parse | D-014：已从词表移除，parse 级拒收（2026-11-25） |
-| protected（顶层 + class 成员） | sem | P0 trust：继承未实现，稳定拒收 |
-| open/abstract/sealed/override/operator | sem | P0 trust：无实现路径的 modifier，声明点稳定拒收（const/inline/infix/vararg/static 已从词表移除） |
+| protected 顶层声明 | sem | 顶层无 receiver/子类语境，稳定拒收；class method 已支持子类可见性 |
+| operator modifier | sem | 运算符重载实现路径未排期，稳定拒收 |
+| bodyless abstract class method | parse | Phase 3a 已知 parser gap；现有 `ClassMember` 仍要求 `{ body }` |
 | `as` 非数值/非指针转换（如 string→int） | sem | P0 trust：只允许数值↔数值、同型、Ref/Pointer 互转；其余 SemTypeMismatch |
 | impl 头 trait 充当类型实参（`impl T for L<T>`） | sem | P0 trust：lower_ty 拒收（此前静默注册成 spec） |
 | ARC aggregate payload | sem/irc/llvme | struct/tuple/array/class 字段与 enum payload 走 type-directed copy/drop；enum Borrowed copy/tag drop 按 active variant；scope/return/release 已有 e2e 回归 |

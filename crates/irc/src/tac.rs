@@ -261,6 +261,13 @@ pub struct FunBody {
     pub entry: BlockId,
 }
 
+/// Phase 3a：class virtual method table, ordered base -> derived.
+#[derive(Debug)]
+pub struct ClassVtable {
+    pub class_def: DefId,
+    pub methods: Vec<DefId>,
+}
+
 /// Phase 2a：一个 (trait, type) impl 的固定方法表；
 /// 布局 `[drop, size, align, methods...]` 由 llvme 统一发射。
 #[derive(Debug)]
@@ -284,6 +291,7 @@ pub struct TacOutput {
     pub funs: Vec<FunBody>,
     pub globals: Vec<GlobalBody>,
     pub vtables: Vec<VtableBody>,
+    pub class_vtables: Vec<ClassVtable>,
     pub diags: Vec<Diagnostic>,
 }
 

@@ -267,10 +267,9 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   「不可逃逸 + 不可变借用只读」的最小安全面，区间追踪列为 M10 前专项。
 - **主构造（M3）**：✅ 已落地（见上节「字段可变性三态与主构造」）；
   剩余：泛型 struct 默认值逐实例化检查未排期。
-- **class/ARC（M4）**：稳定拒收不变；spike 已按 D-004 重写（ARC 默认、
-  arena 后置）。R3/R4 已裁定 v1 形态（线程本地非原子、`weak var`、
-  `deinit`、引用相等、默认 final、无二级构造）。class 继承语法稳定拒收
-  （`SemUnsupportedConstruct`，"v1 classes are final"；2026-11 审查修复）。
+- **class/ARC（M4）**：基础 ARC、weak、deinit 已落地；R4 的“默认 final”已被
+  Phase 3a 取代：显式 `open` 继承、vtable、override、super 与 protected 现已
+  有实现路径（见下方 class inheritance 节）。二级构造仍拒收。
 - **泛型（M7 slice 1）**：fun/struct 单态化已落地（见 generic-mono-spike.md）；
   trait bounds/形参默认值/实参推断/泛型 enum 已落地（R2 核心 exit
   承诺边界仅约束工期，不约束能力清单）。
@@ -497,6 +496,25 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   dyn 存聚合字段/数组/全局、weak dyn、`impl Trait`、泛型 dyn。
 
 ## 泛型 alias 与 trait 继承（WP4/WP5，2026-11-25）
+## Class inheritance（Phase 3a，2026-11-25）
+
+- **声明与布局**：单继承 `class D(...) : Base(args)`；base 字段前缀，派生引用
+  与基类引用共享同一 payload 指针，derived→base 是 no-op。菱形/多父类/循环/
+  final base 在 sem 拒收。
+- **TypeInfo ABI**：对象头 `meta` 现指向 `TypeInfo = { deinit, vtable, type_id,
+  parent }`（IR `{ ptr, ptr, i64, ptr }`）。payload-base 保持不变：C 分配返回
+  `h + 1`，字段从 payload +24 开始，`TypeInfo*` 在 payload -8。
+- **vtable**：class vtable 为声明序 base→derived 的 `open` 方法槽；`override`
+  复用基类槽。虚调用加载 `TypeInfo.vtable[slot]` 后用当前 receiver 间接调用；
+  `super.method` 解析最近继承实现并静态直调，避免运行期父链搜索。
+- **构造/析构**：先求值并构造 base，再初始化派生字段和 `init`/body；析构按
+  派生用户 `deinit` → base `deinit` → 字段逆序 drop → release 执行。e2e 钉死
+  `99\n4\n40\n3\n30\n` 序列。
+- **访问控制**：`protected` class method 仅 owner/subclass 方法语境可见；顶层
+  `protected` 仍拒收。`abstract class` 不可实例化；`sealed` 仅同 package 继承。
+- **Phase 3a gap**：bodyless abstract method 在 parser 被拒收，因此 sem 的
+  abstract method placement 检查尚未被全链路测试触达。`by` 委托与
+  downcast 仍列为 Phase 3b 候选。
 ## 诊断码
 
 全部 `Sem*` 前缀，定义在 `crates/ast/src/syntax/node.rs::DiagCode`，
@@ -509,7 +527,9 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
   concurrent/grow/comptime/macro 声明/const/inline/infix/vararg/out/namespace/static。
 - **sem 级拒收**（保留字，语义待实现）：union 声明、accessor（get/set）、
   dyn/Self（trait 外）、宏调用展开（SemMacroExpansion）、
-  open/abstract/sealed/override/operator、二级构造 init、protected。
+  operator、二级构造 init、顶层 protected。Phase 3a 已实现 class
+  open/abstract/sealed/override/protected 的主语义；bodyless abstract method
+  仍被 parser 拒收。
 - **已实现**：alias（类型别名）、deinit（析构）、by（superitem 委托槽，
   随继承实现）、it/move 形式（WP6 e2e；move 当前是捕获形式标记）。
 - 冻结预算：35 hard / 10 modifier / 8 slot = 53，不再减少（2026-11-25 删 `namespace`、`static`）。

@@ -3,7 +3,7 @@
 //! （操作数类型均匀不变量，opt-notes）。
 
 use ast::interner::Symbol;
-use ast::syntax::expr::{Block, CallArg, CastKind, ExprKind, ExprWrap, LambdaParams};
+use ast::syntax::expr::{Block, CallArg, CastKind, ExprKind, ExprWrap, LambdaParams, SuperSuffix};
 use ast::syntax::node::{DiagCode, NodeId, Span};
 use ast::syntax::pat::PatKind;
 use ast::token::{LiteralKind, OperatorKind};
@@ -409,6 +409,44 @@ pub(crate) fn trait_method_table(
             }
         }
     }
+    out
+}
+
+/// D-019 class virtual table: base slots first, overrides reuse the slot.
+pub(crate) fn class_vtable_methods(
+    sem: &crate::lower::SemRef<'_>,
+    class_def: sem::DefId,
+) -> Vec<(ast::interner::Symbol, sem::DefId)> {
+    fn walk(
+        sem: &crate::lower::SemRef<'_>,
+        def: sem::DefId,
+        out: &mut Vec<(ast::interner::Symbol, sem::DefId)>,
+    ) {
+        if let Some(base) = sem.defs.get(def).sig.supertypes.first().copied()
+            && matches!(sem.defs.get(base).kind, DefKind::Class)
+        {
+            walk(sem, base, out);
+        }
+        let Some(ms) = sem.defs.get(def).member_scope else {
+            return;
+        };
+        for (name, method) in sem.scopes.entries(ms) {
+            if !matches!(sem.defs.get(method).kind, DefKind::Fun) {
+                continue;
+            }
+            let flags = sem.defs.get(method).sig.flags;
+            if !flags.open && !flags.overrides {
+                continue;
+            }
+            if let Some(slot) = out.iter().position(|(existing, _)| *existing == name) {
+                out[slot].1 = method;
+            } else if flags.open {
+                out.push((name, method));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(sem, class_def, &mut out);
     out
 }
 
@@ -1133,13 +1171,6 @@ fn class_ctor(ctx: &mut Ctx, e: &ExprWrap, def: DefId, args: &[CallArg]) -> Oper
             .unwrap_or_default();
         let base_params = ctx.sem.defs.get(base_def).sig.params.clone();
         let base_fields = ctx.sem.defs.get(base_def).sig.fields.clone();
-        eprintln!(
-            "DEBUG name0={:?} kind0={:?}",
-            base_params
-                .first()
-                .map(|(s, _)| ctx.sem.interner.resolve(*s)),
-            base_params.first().map(|(_, t)| ctx.sem.tys.kind(*t))
-        );
         let mut base_slots: Vec<Option<Operand>> = vec![None; base_params.len()];
         for (i, arg) in super_args.iter().enumerate() {
             let idx = match arg.name {
@@ -2594,6 +2625,179 @@ fn dyn_method_call(
     }
     Operand::Temp(out)
 }
+/// Load `(TypeInfo*, vtable, method)` and invoke a class virtual method.
+fn virtual_class_call(
+    ctx: &mut Ctx,
+    e: &ExprWrap,
+    callee: &ExprWrap,
+    args: &[ast::syntax::expr::CallArg],
+    slot: usize,
+    def: sem::DefId,
+) -> Operand {
+    let ExprKind::Member { base, .. } = &callee.kind else {
+        ctx.diag(
+            callee.span,
+            "virtual target is not a member (sem invariant)",
+        );
+        return Operand::Const(Const::Unit);
+    };
+    let obj_op = lower_expr(ctx, base);
+    let obj = as_base(ctx, obj_op, e.span);
+    let typeinfo_addr = ctx.temp();
+    // Object pointers use the payload-base ARC ABI: the 24B header begins at
+    // -24, so TypeInfo* is the third word at -8.
+    ctx.emit(Instr::OffsetPtr {
+        dst: typeinfo_addr,
+        base: obj,
+        bytes: -8,
+        ty: ctx.sem.tys.unit,
+    });
+    let typeinfo = ctx.temp();
+    ctx.emit(Instr::LoadPtr {
+        dst: typeinfo,
+        ptr: typeinfo_addr,
+        ty: ctx.sem.tys.ptr,
+    });
+    let vtable_addr = ctx.temp();
+    ctx.emit(Instr::OffsetPtr {
+        dst: vtable_addr,
+        base: typeinfo,
+        bytes: 8,
+        ty: ctx.sem.tys.unit,
+    });
+    let vtable = ctx.temp();
+    ctx.emit(Instr::LoadPtr {
+        dst: vtable,
+        ptr: vtable_addr,
+        ty: ctx.sem.tys.ptr,
+    });
+    let method_addr = ctx.temp();
+    ctx.emit(Instr::OffsetPtr {
+        dst: method_addr,
+        base: vtable,
+        bytes: (slot * 8) as i64,
+        ty: ctx.sem.tys.unit,
+    });
+    let fptr = ctx.temp();
+    ctx.emit(Instr::LoadPtr {
+        dst: fptr,
+        ptr: method_addr,
+        ty: ctx.sem.tys.ptr,
+    });
+    let (param_tys, ret) = {
+        let sig = &ctx.sem.defs.get(def).sig;
+        (sig.params.clone(), sig.ret)
+    };
+    if args.len() != param_tys.len() {
+        ctx.diag(e.span, "virtual call arity mismatch (sem invariant)");
+    }
+    let arg_vals: Vec<(Operand, TyId)> = args
+        .iter()
+        .enumerate()
+        .map(|(i, arg)| {
+            let to = param_tys
+                .get(i)
+                .map(|(_, ty)| *ty)
+                .unwrap_or(ctx.sem.tys.unit);
+            (lower_expr_as(ctx, &arg.value, to), to)
+        })
+        .collect();
+    let self_ty = ctx.expr_ty(base);
+    ctx.emit(Instr::Param {
+        a: Operand::Temp(fptr),
+        ty: ctx.sem.tys.ptr,
+    });
+    ctx.emit(Instr::Param {
+        a: Operand::Temp(obj),
+        ty: self_ty,
+    });
+    for (value, ty) in arg_vals {
+        ctx.emit(Instr::Param { a: value, ty });
+    }
+    let dst = if ctx.is_unit(ret) {
+        None
+    } else {
+        Some(ctx.temp())
+    };
+    if let Some(dst) = dst
+        && classish_ty(ctx, ret)
+    {
+        ctx.note_stmt_temp(dst, ret);
+    }
+    ctx.emit(Instr::Call {
+        dst,
+        callee: Callee::Indirect,
+        ty: ret,
+    });
+    match dst {
+        Some(dst) => Operand::Temp(dst),
+        None => Operand::Const(Const::Unit),
+    }
+}
+
+/// `super.method` is a static direct call to the nearest inherited impl,
+/// passing the current receiver without changing its vtable.
+fn super_method_call(
+    ctx: &mut Ctx,
+    e: &ExprWrap,
+    args: &[ast::syntax::expr::CallArg],
+    def: sem::DefId,
+) -> Operand {
+    let self_name = ctx.sem.interner.intern("self");
+    let Some((place, self_ty)) = ctx.lookup(self_name) else {
+        ctx.diag(
+            e.span,
+            "`super.method` requires a class receiver (sem invariant)",
+        );
+        return Operand::Const(Const::Unit);
+    };
+    let self_op = read_place(ctx, place, self_ty, e.span);
+    let (param_tys, ret) = {
+        let sig = &ctx.sem.defs.get(def).sig;
+        (sig.params.clone(), sig.ret)
+    };
+    if args.len() != param_tys.len() {
+        ctx.diag(e.span, "super call arity mismatch (sem invariant)");
+    }
+    let arg_vals: Vec<(Operand, TyId)> = args
+        .iter()
+        .enumerate()
+        .map(|(i, arg)| {
+            let to = param_tys
+                .get(i)
+                .map(|(_, ty)| *ty)
+                .unwrap_or(ctx.sem.tys.unit);
+            (lower_expr_as(ctx, &arg.value, to), to)
+        })
+        .collect();
+    ctx.emit(Instr::Param {
+        a: self_op,
+        ty: self_ty,
+    });
+    for (value, ty) in arg_vals {
+        ctx.emit(Instr::Param { a: value, ty });
+    }
+    let dst = if ctx.is_unit(ret) {
+        None
+    } else {
+        Some(ctx.temp())
+    };
+    if let Some(dst) = dst
+        && classish_ty(ctx, ret)
+    {
+        ctx.note_stmt_temp(dst, ret);
+    }
+    ctx.emit(Instr::Call {
+        dst,
+        callee: Callee::Def(def),
+        ty: ret,
+    });
+    match dst {
+        Some(dst) => Operand::Temp(dst),
+        None => Operand::Const(Const::Unit),
+    }
+}
+
 fn call(
     ctx: &mut Ctx,
     e: &ExprWrap,
@@ -2634,10 +2838,40 @@ fn call(
         ctx.diag(e.span, "调用目标无 expr_def（sem 契约破缺）");
         return Operand::Const(Const::Unit);
     };
+    if let ExprKind::Super {
+        suffix: SuperSuffix::Member(_),
+    } = &callee.kind
+    {
+        return super_method_call(ctx, e, args, def);
+    }
     if let ExprKind::Member { base, .. } = &callee.kind
         && dyn_shape(ctx, ctx.expr_ty(base)).is_some()
     {
         return dyn_method_call(ctx, e, callee, args, def);
+    }
+    let method_def_for_diag = ctx
+        .sem
+        .expr_def
+        .get(e.id)
+        .or_else(|| ctx.sem.expr_def.get(callee.id))
+        .copied();
+    if method_def_for_diag != Some(def) {
+        ctx.diag(e.span, "class method expr_def mismatch (sem invariant)");
+        return Operand::Const(Const::Unit);
+    }
+    if let ExprKind::Member { base, name, .. } = &callee.kind
+        && let TyKind::Named(class_def, _) = ctx.sem.tys.kind(ctx.expr_ty(base))
+        && matches!(ctx.sem.defs.get(*class_def).kind, DefKind::Class)
+    {
+        let table = class_vtable_methods(ctx.sem, *class_def);
+        if let Some(slot) = table.iter().position(|(method, _)| method == name) {
+            let vdef = table[slot].1;
+            if vdef == def {
+                return virtual_class_call(ctx, e, callee, args, slot, def);
+            }
+            ctx.diag(e.span, "virtual slot mismatch (sem invariant)");
+            return Operand::Const(Const::Unit);
+        }
     }
     if let DefKind::TypeAlias = ctx.sem.defs.get(def).kind {
         def = match ctx.sem.defs.get(def).alias_resolved {
@@ -3195,6 +3429,7 @@ fn lower_member(ctx: &mut Ctx, e: &ExprWrap, base: &ExprWrap, safe: bool) -> Ope
                     parent: *parent,
                     index: *index,
                 },
+
                 _ => crate::layout::MemberRes::Field {
                     parent: def,
                     index: usize::MAX,

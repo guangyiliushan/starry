@@ -1313,6 +1313,32 @@ fn trait_default_methods_e2e() {
 }
 
 #[test]
+fn class_inheritance_virtual_super_e2e() {
+    // Phase 3a: base references dispatch to overrides; super.method calls
+    // the inherited implementation without changing the receiver.
+    let Some(out) = build_and_run(
+        "class_virtual_super",
+        "open class Base(val x: int) {\n    open fun who(): int {\n        return self.x\n    }\n}\nopen class Derived(val y: int): Base(y * 10) {\n    override fun who(): int {\n        return super.who() + self.y\n    }\n}\nfun main(): int {\n    val b: Base = Derived(3)\n    print(b.who())\n    val d: Derived = Derived(4)\n    print(d.who())\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "33\n44\n");
+}
+
+#[test]
+fn class_inheritance_ctor_dtor_order_e2e() {
+    // Derived user deinit runs first, then the inherited/base deinit;
+    // live objects release in reverse construction order.
+    let Some(out) = build_and_run(
+        "class_ctor_dtor_order",
+        "open class Base(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nopen class Derived(val y: int): Base(y * 10) {\n    deinit {\n        print(self.y)\n    }\n}\nfun main(): int {\n    val b: Base = Derived(3)\n    val d: Base = Derived(4)\n    print(99)\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "99\n4\n40\n3\n30\n");
+}
+
+#[test]
 fn dyn_class_dispatch_and_reassign_e2e() {
     // Phase 2a: class-root dyn receivers dispatch through the trait vtable;
     // fat-pointer reassignment releases the old payload exactly once.

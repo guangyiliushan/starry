@@ -196,7 +196,49 @@ fn self_scope(class_def: DefId, self_name: Symbol, self_ty: TyId, st: &mut SemSt
         decl: None,
     });
     st.scopes.insert(sscope, self_name, self_def);
-    let _ = class_def;
+    // D-019: inherited fields are visible through `self` in derived methods.
+    // Primary-constructor parameters must not leak into method bodies.
+    let mut cursor = class_def;
+    loop {
+        let fields = st.defs.get(cursor).sig.fields.clone();
+        for (index, (name, ty)) in fields.iter().enumerate() {
+            let field_def = st.defs.push(Def {
+                kind: DefKind::StructField {
+                    parent: cursor,
+                    index,
+                    mutable: None,
+                },
+                name: *name,
+                scope: sscope,
+                span: zero_span(),
+                sig: {
+                    let mut sig = DefSig::new(unit, st.tys.unknown);
+                    sig.ty = *ty;
+                    sig
+                },
+                resolving: false,
+                alias_of: None,
+                alias_resolved: None,
+                member_scope: None,
+                external: false,
+                ty_params: 0,
+                decl: None,
+            });
+            st.scopes.insert(sscope, *name, field_def);
+        }
+        let Some(base) = st
+            .defs
+            .get(cursor)
+            .sig
+            .supertypes
+            .first()
+            .copied()
+            .filter(|base| matches!(st.defs.get(*base).kind, DefKind::Class))
+        else {
+            break;
+        };
+        cursor = base;
+    }
     sscope
 }
 

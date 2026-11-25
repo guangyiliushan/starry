@@ -1112,7 +1112,42 @@ fn mismatch(st: &mut SemState, span: Span) {
 }
 
 /// 表达式定型入口：总是写 expr_ty（含 Error），树遍历每节点恰好一次
-pub(crate) fn type_expr(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
+fn protected_method_visible(st: &SemState, method: DefId) -> bool {
+    if !st.defs.get(method).sig.flags.protected {
+        return true;
+    }
+    let Some(owner) = st
+        .defs
+        .iter()
+        .enumerate()
+        .find(|(_, def)| {
+            matches!(def.kind, DefKind::Class)
+                && def.member_scope == Some(st.defs.get(method).scope)
+        })
+        .map(|(id, _)| DefId(id as u32))
+    else {
+        return false;
+    };
+    let Some(current_method) = st.funs.last().map(|frame| frame.def) else {
+        return false;
+    };
+    let current_ty = st.defs.get(current_method).sig.ty;
+    let TyKind::Named(current_class, _) = st.tys.kind(current_ty) else {
+        return false;
+    };
+    let mut cursor = *current_class;
+    loop {
+        if cursor == owner {
+            return true;
+        }
+        let Some(base) = st.defs.get(cursor).sig.supertypes.first().copied() else {
+            return false;
+        };
+        cursor = base;
+    }
+}
+
+fn type_expr(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
     #[cfg(debug_assertions)]
     debug_assert!(
         st.expr_ty.get(e.id).is_none(),
@@ -1588,7 +1623,16 @@ fn type_expr_inner(e: &ExprWrap, st: &mut SemState, in_value: bool) -> TyId {
             callee,
             type_args,
             args,
-        } => type_call(callee, type_args, args, e.span, st),
+        } => {
+            let ty = type_call(callee, type_args, args, e.span, st);
+            if matches!(callee.kind, ExprKind::Member { .. })
+                && let Some(method) = st.expr_def.get(callee.id).copied()
+                && matches!(st.defs.get(method).kind, DefKind::Fun)
+            {
+                st.expr_def.set(e.id, method);
+            }
+            ty
+        }
         ExprKind::Index {
             base,
             index,
@@ -2325,6 +2369,58 @@ fn type_call(
     {
         return type_print_call(callee, args, span, st);
     }
+    // D-019: `super.method(args)` statically selects the nearest inherited
+    // implementation while passing the current receiver unchanged.
+    if let ExprKind::Super {
+        suffix: SuperSuffix::Member(name),
+    } = &callee.kind
+    {
+        let Some(current) = st.funs.last().map(|frame| frame.def) else {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                span,
+                "`super.method` is only available inside class methods",
+            ));
+            type_all_args(args, st);
+            return st.tys.error;
+        };
+        let current_ty = st.defs.get(current).sig.ty;
+        let TyKind::Named(class_def, _) = st.tys.kind(current_ty) else {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                span,
+                "`super.method` is only available inside class methods",
+            ));
+            type_all_args(args, st);
+            return st.tys.error;
+        };
+        let Some(base_def) = st.defs.get(*class_def).sig.supertypes.first().copied() else {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                span,
+                "`super.method` requires a class supertype",
+            ));
+            type_all_args(args, st);
+            return st.tys.error;
+        };
+        let Some(base_method) = member_lookup(st, base_def, *name)
+            .filter(|method| matches!(st.defs.get(*method).kind, DefKind::Fun))
+        else {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnknownMember,
+                span,
+                format!("unknown inherited method `{}`", st.interner.resolve(*name)),
+            ));
+            type_all_args(args, st);
+            return st.tys.error;
+        };
+        let params = st.defs.get(base_method).sig.params.clone();
+        let defaults = st.defs.get(base_method).sig.param_defaults.clone();
+        check_call_args(args, &params, &defaults, span, st);
+        let ret = st.defs.get(base_method).sig.ret;
+        st.expr_def.set(callee.id, base_method);
+        return ret;
+    }
     // M5 slice 2b：命名空间限定调用（`import util` 后 `util.Helper(...)`）——
     // base 解析为 PackageNs 时按成员解析并写 expr_def，类型走 def_value_ty
     //（class 构造器 = TypeObject，落到下游统一 ctor 核查）
@@ -2471,6 +2567,18 @@ fn type_call(
                         };
                         match method {
                             Some(m) => {
+                                if !protected_method_visible(st, m) {
+                                    st.diags.emit(Diagnostic::error(
+                                        DiagCode::SemUnsupportedConstruct,
+                                        callee.span,
+                                        format!(
+                                            "protected method `{}` is only visible to subclasses",
+                                            st.interner.resolve(*name)
+                                        ),
+                                    ));
+                                    type_all_args(args, st);
+                                    return st.tys.error;
+                                }
                                 let params = st.defs.get(m).sig.params.clone();
                                 let defaults = st.defs.get(m).sig.param_defaults.clone();
                                 check_call_args(args, &params, &defaults, span, st);
@@ -2640,6 +2748,17 @@ fn type_call(
             // M4 slice 1：class 构造——槽机核查同 struct；expr_def 指向
             // class def（irc 构造者判定免 retain 的依据）
             DefKind::Class => {
+                // D-019: abstract classes have no runtime representation and
+                // must never be constructed, even through an alias.
+                if st.defs.get(named).sig.flags.abstract_ {
+                    st.diags.emit(Diagnostic::error(
+                        DiagCode::SemUnsupportedConstruct,
+                        span,
+                        "abstract class cannot be instantiated",
+                    ));
+                    type_all_args(args, st);
+                    return st.tys.error;
+                }
                 // 主构造：sig.params（含仅构造参数）优先，无头构造退 fields
                 let sig = &st.defs.get(named).sig;
                 if !sig.params.is_empty() {
