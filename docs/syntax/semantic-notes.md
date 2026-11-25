@@ -504,17 +504,20 @@ concat，或运行时 extern call）归 IR 阶段，运行时入口命名属 IR 
 - **TypeInfo ABI**：对象头 `meta` 现指向 `TypeInfo = { deinit, vtable, type_id,
   parent }`（IR `{ ptr, ptr, i64, ptr }`）。payload-base 保持不变：C 分配返回
   `h + 1`，字段从 payload +24 开始，`TypeInfo*` 在 payload -8。
-- **vtable**：class vtable 为声明序 base→derived 的 `open` 方法槽；`override`
+- **vtable**：class vtable 为声明序 base→derived 的 `open`/`abstract` 方法槽；`override`
   复用基类槽。虚调用加载 `TypeInfo.vtable[slot]` 后用当前 receiver 间接调用；
-  `super.method` 解析最近继承实现并静态直调，避免运行期父链搜索。
+  `super.method` 解析最近继承实现并静态直调，避免运行期父链搜索。abstract class
+  不发射 TypeInfo/vtable。
+- **abstract methods**：`abstract fun f(): int;` 在 class body 可省 body；abstract
+  method 必须位于 abstract class 且本身无 body。abstract 基类可继承；具体子类
+  必须沿链 override 每个遗留 abstract method，否则声明点拒收。
 - **构造/析构**：先求值并构造 base，再初始化派生字段和 `init`/body；析构按
   派生用户 `deinit` → base `deinit` → 字段逆序 drop → release 执行。e2e 钉死
   `99\n4\n40\n3\n30\n` 序列。
 - **访问控制**：`protected` class method 仅 owner/subclass 方法语境可见；顶层
   `protected` 仍拒收。`abstract class` 不可实例化；`sealed` 仅同 package 继承。
-- **Phase 3a gap**：bodyless abstract method 在 parser 被拒收，因此 sem 的
-  abstract method placement 检查尚未被全链路测试触达。`by` 委托与
-  downcast 仍列为 Phase 3b 候选。
+  非 abstract class method 和 impl method 仍必须带 body（Phase 4 拒收面）。
+`by` 委托与 downcast 仍列为 Phase 3b 候选。
 ## 诊断码
 
 全部 `Sem*` 前缀，定义在 `crates/ast/src/syntax/node.rs::DiagCode`，

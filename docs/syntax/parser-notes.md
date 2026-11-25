@@ -96,6 +96,7 @@ precedent it rests on. `starry.ebnf` is the source of truth for the shapes.
 | Intersection bounds | `Bound := Type { "&" Type }`, shared by inline and `where` slots | Swift protocol composition `A & B`; `+` is the addition operator here |
 | Extern blocks | `extern "c" { … }` lists multiple `FunSignature`s | Rust `ExternBlock → … { InnerAttribute* ExternalItem* }` |
 | Signature terminators | `;` is optional on `FunSignature` and `AssociatedType`; a redundant `;` is accepted without a diagnostic | Rust needs `;` because Rust statements are not newline-terminated; Starry's are, and `AssociatedType` already omitted it |
+| Class bodyless functions | `ClassFunDecl := ... WhereClause? [FunctionBody]`; sem restricts the missing body to abstract methods in abstract classes | Kotlin `abstract fun f()` declarations have no body and sem fills the implementation contract in subclasses |
 | Import members | comma-separated per the EBNF, with `;` and newline accepted as redundant terminators | EBNF `ImportMember { "," ImportMember } [ "," ]` |
 | `let` is not a keyword | a statement starting with bare `let` + identifier is `DiagCode::LetKeyword`, recovered as **one** binding statement | Deleting the keyword left `let x = 1` silently parsing as an ignored expression statement plus an assignment — Rust calls the former an expression statement whose "result is ignored" |
 
@@ -189,7 +190,6 @@ for pattern matching. The grammar needs an explicit is-pattern production
 | Unbound `T` in `impl Show for List<T>` | Whether `T` is bound is a semantic question, not a parse one. |
 | `rest @ ..` binding | The representation (`rest: Option<usize>`) can carry it; the EBNF has no `@` binding operator yet. |
 | Symbolic operator members (`a.+`) | `PostfixSuffix := "." IDENT`; operator overloading maps to named methods (`plus`, `unaryMinus`). |
-| Bodyless abstract class methods | Phase 3a parser gap: `parse_fun_decl` still requires a body in class members. `abstract fun f(): int;` is rejected before sem can check abstract placement. |
 
 ## Keyword convergence (D-014, 2026-11-25)
 

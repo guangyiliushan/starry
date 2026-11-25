@@ -828,6 +828,21 @@ fn parse_class_members(session: &mut ParseSession<'_>) -> Result<Vec<ClassMember
             })));
             continue;
         }
+        let fun_checkpoint = session.checkpoint();
+        let fun_start = session.cursor.peek().span;
+        if at_fun_signature(session)
+            && let Ok(fun) = parse_class_fun_decl(session)
+        {
+            let id = session.next_node()?;
+            let span = join_span(fun_start, session.cursor.previous_span());
+            members.push(ClassMember::Declaration(Box::new(DeclNode {
+                id,
+                span,
+                kind: DeclKind::Fun(fun),
+            })));
+            continue;
+        }
+        session.rollback(&fun_checkpoint);
         members.push(ClassMember::Declaration(Box::new(parse_top_level(
             session,
         )?)));
@@ -835,6 +850,39 @@ fn parse_class_members(session: &mut ParseSession<'_>) -> Result<Vec<ClassMember
     Ok(members)
 }
 
+/// Class-member `FunDecl` allows an absent body. Semantic analysis owns the
+/// rule that only abstract methods may omit it, so the parser produces one
+/// recoverable `FunDecl` node for both normal and abstract members.
+fn parse_class_fun_decl(session: &mut ParseSession<'_>) -> Result<FunDecl, ParserError> {
+    let signature = parse_fun_signature(session)?;
+    let where_clause = parse_where_clause(session)?;
+    let body = if session
+        .cursor
+        .check(&TokenKind::Punctuation(PunctuationKind::LBrace))
+    {
+        Some(FunctionBody::Block(parse_block(session)?))
+    } else if session
+        .cursor
+        .bump_if(&TokenKind::Operator(OperatorKind::Eq))
+    {
+        session.cursor.skip_nl();
+        Some(FunctionBody::Expr(parse_expr(session)?))
+    } else {
+        session
+            .cursor
+            .bump_if(&TokenKind::Punctuation(PunctuationKind::Semicolon));
+        None
+    };
+    Ok(FunDecl {
+        modifiers: signature.modifiers,
+        name: signature.name,
+        type_params: signature.type_params,
+        params: signature.params,
+        ret: signature.ret,
+        where_clause,
+        body,
+    })
+}
 fn parse_struct_fields(session: &mut ParseSession<'_>) -> Result<Vec<StructField>, ParserError> {
     let mut fields = Vec::new();
     loop {

@@ -1339,6 +1339,18 @@ fn class_inheritance_ctor_dtor_order_e2e() {
 }
 
 #[test]
+fn bodyless_abstract_method_override_e2e() {
+    // Phase 4 WP1: abstract declarations parse without bodies, and a concrete
+    // subclass override supplies the vtable implementation.
+    let Some(out) = build_and_run(
+        "abstract_override",
+        "abstract class Shape(val name: int) {\n    abstract fun area(): int;\n}\nopen class Square(val side: int): Shape(side) {\n    override fun area(): int {\n        return self.side * self.side\n    }\n}\nfun main(): int {\n    val shape: Shape = Square(4)\n    print(shape.area())\n    return 0\n}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(out, "16\n");
+}
+#[test]
 fn dyn_class_dispatch_and_reassign_e2e() {
     // Phase 2a: class-root dyn receivers dispatch through the trait vtable;
     // fat-pointer reassignment releases the old payload exactly once.

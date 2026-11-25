@@ -329,6 +329,14 @@ fn register_impl(
             ));
             continue;
         };
+        if f.body.is_none() {
+            st.diags.emit(Diagnostic::error(
+                DiagCode::SemUnsupportedConstruct,
+                d.span,
+                "impl methods must have bodies",
+            ));
+            continue;
+        }
         let fd = add_def(st, ims, f.name, d.span, DefKind::Fun);
         let params = lower_params(st, iscope, &f.params, d.span);
         let ret = match &f.ret {
@@ -1085,6 +1093,19 @@ fn declare_decl(decl: &DeclNode, index: usize, scope: ScopeId, st: &mut SemState
                                     "method default parameters are not supported in this slice",
                                 ));
                             }
+                            if f.body.is_none()
+                                && !f
+                                    .modifiers
+                                    .modifiers
+                                    .iter()
+                                    .any(|m| m.word == ast::token::ModifierWord::Abstract)
+                            {
+                                st.diags.emit(Diagnostic::error(
+                                    DiagCode::SemUnsupportedConstruct,
+                                    d.span,
+                                    "non-abstract class method requires a body",
+                                ));
+                            }
                             add_def(st, ms, f.name, d.span, DefKind::Fun);
                         }
                     }
@@ -1692,11 +1713,13 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                             "sealed class inheritance must remain in the same package",
                         ));
                     }
-                    if !st.defs.get(base_def).sig.flags.open {
+                    if !st.defs.get(base_def).sig.flags.open
+                        && !st.defs.get(base_def).sig.flags.abstract_
+                    {
                         st.diags.emit(Diagnostic::error(
                             DiagCode::SemUnsupportedConstruct,
                             super_item.ty.span,
-                            "cannot inherit a final class; mark the base `open`",
+                            "cannot inherit a final class; mark the base `open` or `abstract`",
                         ));
                     }
                     if super_item.args.is_none() {
@@ -1835,7 +1858,7 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                                     ),
                                 ));
                             }
-                            if !base_sig.flags.open {
+                            if !base_sig.flags.open && !base_sig.flags.abstract_ {
                                 st.diags.emit(Diagnostic::error(
                                     DiagCode::SemUnsupportedConstruct,
                                     d.span,
@@ -1875,6 +1898,45 @@ fn lower_top_level_sigs(ast: &SourceFile, st: &mut SemState) {
                         sig.ret = ret;
                         sig.param_defaults = defaults;
                         sig.flags = flags;
+                    }
+                }
+                // A concrete class is complete only when every abstract method
+                // inherited along the single base chain has a local override.
+                if !st.defs.get(class_def).sig.flags.abstract_ {
+                    let mut seen = vec![class_def];
+                    let mut cursor = class_def;
+                    while let Some(base) = st.defs.get(cursor).sig.supertypes.first().copied() {
+                        if !matches!(st.defs.get(base).kind, DefKind::Class) || seen.contains(&base)
+                        {
+                            break;
+                        }
+                        seen.push(base);
+                        cursor = base;
+                        let Some(base_ms) = st.defs.get(base).member_scope else {
+                            continue;
+                        };
+                        let Some(current_ms) = st.defs.get(class_def).member_scope else {
+                            continue;
+                        };
+                        for (name, method) in st.scopes.entries(base_ms) {
+                            if !st.defs.get(method).sig.flags.abstract_ {
+                                continue;
+                            }
+                            let overridden = st
+                                .scopes
+                                .lookup_local(current_ms, name)
+                                .is_some_and(|local| st.defs.get(local).sig.flags.overrides);
+                            if !overridden {
+                                st.diags.emit(Diagnostic::error(
+                                    DiagCode::SemUnsupportedConstruct,
+                                    item.span,
+                                    format!(
+                                        "concrete class does not implement inherited abstract method `{}`",
+                                        st.interner.resolve(name)
+                                    ),
+                                ));
+                            }
+                        }
                     }
                 }
             }

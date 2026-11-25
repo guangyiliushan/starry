@@ -1876,13 +1876,34 @@ fn abstract_class_instantiation_reports() {
 }
 
 #[test]
-fn abstract_methods_are_parse_gated_until_bodyless_support() {
-    // Phase 3a parser gap: ClassMember still requires a function body, so the
-    // bodyless abstract-method shape cannot yet reach sem placement checks.
-    let got = codes("abstract class C {\n    abstract fun f(): int;\n}");
-    assert!(
-        got.contains(&DiagCode::ExpectedToken),
-        "expected parser rejection, got {got:?}"
+fn bodyless_abstract_methods_and_override_completion() {
+    assert_clean("abstract class Shape {\n    abstract fun area(): int;\n}");
+    assert_clean(
+        "abstract class Shape(val v: int) {\n    abstract fun area(): int;\n}\nopen class Square(val side: int): Shape(side) {\n    override fun area(): int {\n        return self.side * self.side\n    }\n}",
+    );
+}
+
+#[test]
+fn concrete_subclass_missing_abstract_override_reports() {
+    assert_has(
+        "abstract class Shape {\n    abstract fun area(): int;\n}\nopen class Square(val side: int): Shape(side) {\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+}
+
+#[test]
+fn abstract_and_bodyless_class_methods_are_placement_checked() {
+    assert_has(
+        "abstract class Shape {\n    abstract fun area(): int {\n        return 0\n    }\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    assert_has(
+        "class Shape {\n    abstract fun area(): int;\n}",
+        DiagCode::SemUnsupportedConstruct,
+    );
+    assert_has(
+        "class Shape {\n    fun area(): int;\n}",
+        DiagCode::SemUnsupportedConstruct,
     );
 }
 

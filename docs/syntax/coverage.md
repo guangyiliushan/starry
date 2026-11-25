@@ -77,6 +77,7 @@
 | 21 | FunSignature / AssociatedType 可选 `;` | 同上 | — | `;` 冗余终止符，宽松接收 | ✓ |
 | 22 | TypeAliasDecl `"=" Type`（D-014：关键字改为 `alias`） | `TypeAliasDecl.ty` | ty | `=` | ✓ parser 原先漏吃 `=` |
 | 23 | `let` 非关键字 | `StmtKind::Binding`（恢复形态） | pattern, ty, init | `let` + IDENT → `LetKeyword` | ✓ 不再静默拆两句 |
+| 24 | ClassFunDecl 可省 body | `DeclKind::Fun` + `FunctionBody` | modifiers, name, params, ret, body | `;`/newline 冗余终止符；sem 仅允许 abstract | ✓ impl / 非 abstract 稳定拒收 |
 
 ### 终端审计补充
 

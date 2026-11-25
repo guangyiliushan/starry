@@ -313,6 +313,11 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
                         let Some(mdef) = sem.scopes.lookup_local(ms, f.name) else {
                             continue;
                         };
+                        // Abstract methods have no body and no function symbol;
+                        // concrete overrides lower from their own class members.
+                        if f.body.is_none() {
+                            continue;
+                        }
                         let mut ctx = Ctx::new(sem, source, i8_ty, &globals, &skipped);
                         ctx.lower_member_fun(f, mdef);
                         out.diags.append(&mut ctx.diags);
@@ -406,9 +411,10 @@ pub(crate) fn run<'x>(sem: &mut SemRef<'x>, source: &'x str, i8_ty: TyId) -> Tac
         }
     }
     // Phase 3a: one class virtual table per concrete class. Empty tables are
-    // emitted for final classes so TypeInfo ABI stays uniform.
+    // emitted for final classes so TypeInfo ABI stays uniform. Abstract classes
+    // have no runtime representation, so their unimplemented slots are omitted.
     for (def_id, def) in sem.defs.iter().enumerate() {
-        if !matches!(def.kind, DefKind::Class) {
+        if !matches!(def.kind, DefKind::Class) || def.sig.flags.abstract_ {
             continue;
         }
         let class_def = DefId(def_id as u32);

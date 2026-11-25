@@ -836,6 +836,22 @@ fn function_body_is_required_and_class_body_is_optional() {
 }
 
 #[test]
+fn bodyless_class_fun_parses_without_body_diagnostic() {
+    let output = parse_source("abstract class C { abstract fun f(): int; }").unwrap();
+    assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+    let DeclKind::Class(class) = &output.ast.items[0].kind else {
+        panic!("expected class");
+    };
+    let Some(ast::syntax::decl::ClassMember::Declaration(declaration)) = class.members.first()
+    else {
+        panic!("expected declaration");
+    };
+    let DeclKind::Fun(fun) = &declaration.kind else {
+        panic!("expected fun");
+    };
+    assert!(fun.body.is_none());
+}
+#[test]
 fn bare_super_requires_a_suffix() {
     let output = parse_source("val x = super").unwrap();
     assert!(matches!(output.ast.items[0].kind, DeclKind::Binding(_)));

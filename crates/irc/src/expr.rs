@@ -435,12 +435,12 @@ pub(crate) fn class_vtable_methods(
                 continue;
             }
             let flags = sem.defs.get(method).sig.flags;
-            if !flags.open && !flags.overrides {
+            if !flags.open && !flags.abstract_ && !flags.overrides {
                 continue;
             }
             if let Some(slot) = out.iter().position(|(existing, _)| *existing == name) {
                 out[slot].1 = method;
-            } else if flags.open {
+            } else if flags.open || flags.abstract_ {
                 out.push((name, method));
             }
         }
