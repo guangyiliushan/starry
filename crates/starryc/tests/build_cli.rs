@@ -60,12 +60,12 @@ fn build_and_exec(name: &str, source: &str) -> Option<(String, String, i32)> {
     let run = if cfg!(target_os = "linux") && name == "nullable_pointer_abi" {
         // Temporary Phase 4 Linux diagnosis; remove after nullable deref ABI fix.
         Command::new("gdb")
-            .arg("--batch")
-            .arg("--return-child-result")
+            .arg("--eval-command=break starry_release_class")
             .arg("--eval-command=run")
-            .arg("--eval-command=info registers rdi rsi rax")
+            .arg("--eval-command=printf \"release_arg=%p\\n\", $rdi")
             .arg("--eval-command=x/4gx $rdi-24")
             .arg("--eval-command=x/4gx $rdi")
+            .arg("--eval-command=info registers rdi rsi rax")
             .arg("--eval-command=bt")
             .arg("--args")
             .arg(&exe_path)
