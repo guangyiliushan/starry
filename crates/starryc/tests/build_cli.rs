@@ -1279,14 +1279,16 @@ fn nullable_class_and_i128_pointer_e2e() {
     // WP2: pointee ABI materializes the flag plus wide/class payload slots.
     let Some((out, err, code)) = build_and_exec(
         "nullable_pointer_abi",
-        "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun class_part(): int {\n    var x: C? = C(1)\n    val p = &x\n    val y = *p\n    print(y!!.x)\n    val q = &mut x\n    *q = C(2)\n    print(x!!.x)\n    return 0\n}\nfun i128_part(): int {\n    var x: i128? = 123456789012345678\n    val p = &x\n    val y = *p\n    print(y!!)\n    val q = &mut x\n    *q = 123456789012345679\n    print(x!!)\n    *q = null\n    if (x != null) {\n        print(1)\n    } else {\n        print(9)\n    }\n    return 0\n}\nfun main(): int {\n    class_part()\n    i128_part()\n    return 0\n}\n",
+        "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun class_part(): int {\n    var x: C? = C(1)\n    val p = &x\n    val y = *p\n    print(y!!.x)\n    print(901)\n    val q = &mut x\n    print(902)\n    *q = C(2)\n    print(903)\n    print(x!!.x)\n    return 0\n}\nfun i128_part(): int {\n    var x: i128? = 123456789012345678\n    val p = &x\n    val y = *p\n    print(y!!)\n    val q = &mut x\n    *q = 123456789012345679\n    print(x!!)\n    *q = null\n    if (x != null) {\n        print(1)\n    } else {\n        print(9)\n    }\n    return 0\n}\nfun main(): int {\n    class_part()\n    i128_part()\n    return 0\n}\n",
     ) else {
         return;
     };
     assert_eq!(code, 0, "code={code}\nstdout: {out}\nstderr: {err}");
-    assert_eq!(out, "1\n2\n2\n123456789012345678\n123456789012345679\n9\n");
+    assert_eq!(
+        out,
+        "1\n901\n902\n903\n2\n2\n123456789012345678\n123456789012345679\n9\n"
+    );
 }
-
 #[test]
 fn class_i128_and_nullable_class_globals_e2e() {
     // WP3: class globals are process roots (no exit deinit); i128 globals
