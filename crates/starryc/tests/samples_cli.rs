@@ -123,7 +123,8 @@ fn sample_corpus_matches_implementation_state() {
             path.file_stem().unwrap().to_string_lossy()
         ));
         let expected = std::fs::read_to_string(&golden)
-            .unwrap_or_else(|e| panic!("missing golden stdout {}: {e}", golden.display()));
+            .unwrap_or_else(|e| panic!("missing golden stdout {}: {e}", golden.display()))
+            .replace("\r\n", "\n");
         let Some(actual) = build_and_run(path) else {
             eprintln!("SKIP: run-pass for {} (no clang toolchain)", path.display());
             continue;

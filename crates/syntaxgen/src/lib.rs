@@ -480,7 +480,8 @@ pub fn check(root: &Path) -> Result<(), CheckError> {
 
     for (path, expected) in paths(root).into_iter().zip(generated) {
         let actual = fs::read_to_string(&path)
-            .map_err(|error| CheckError::Io(format!("{}: {error}", path.display())))?;
+            .map_err(|error| CheckError::Io(format!("{}: {error}", path.display())))?
+            .replace("\r\n", "\n");
         if actual != expected {
             return Err(CheckError::Stale(path));
         }

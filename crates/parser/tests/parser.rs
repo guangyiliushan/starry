@@ -41,6 +41,7 @@ fn check_snapshot(name: &str, source: &str) {
     }
     let expected = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("missing snapshot {path}: {error}"))
+        .replace("\r\n", "\n")
         .trim_end()
         .to_string();
     assert_eq!(snapshot, expected, "snapshot {name} drifted");
