@@ -5266,8 +5266,23 @@ pub(crate) fn assign_to(ctx: &mut Ctx, target: &ExprWrap, v: Operand, span: Span
                     // Deref assignment is the nullable var ABI's write-through
                     // path. Release the old payload, then normalize the new
                     // +1/borrowed value before overwriting the storage slot.
-                    let old = load_slot(ctx, ptr, 1, inner);
-                    ctx.emit_operand_release(old, inner, false);
+                    // q is a pointer *to* the nullable aggregate. Load that
+                    // address first; reading base slot 1 directly would read
+                    // uninitialized storage behind the pointer.
+                    let old_addr = ctx.temp();
+                    ctx.emit(Instr::OffsetPtr {
+                        dst: old_addr,
+                        base: ptr,
+                        bytes: 8,
+                        ty: ctx.sem.tys.unit,
+                    });
+                    let old = ctx.temp();
+                    ctx.emit(Instr::LoadPtr {
+                        dst: old,
+                        ptr: old_addr,
+                        ty: inner,
+                    });
+                    ctx.emit_operand_release(Operand::Temp(old), inner, false);
                     if !ctx.take_stmt_temp(&v)
                         && let Operand::Temp(new_base) = v
                     {

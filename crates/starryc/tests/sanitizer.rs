@@ -156,7 +156,7 @@ fn sanitizer_nullable_abi_corpus() {
     assert_sanitizer_clean(
         "san_nullable_abi",
         "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun class_part(): int {\n    var x: C? = C(1)\n    val p = &x\n    val y = *p\n    print(y!!.x)\n    val q = &mut x\n    *q = C(2)\n    print(x!!.x)\n    return 0\n}\nfun i128_part(): int {\n    var x: i128? = 123456789012345678\n    val p = &x\n    val y = *p\n    print(y!!)\n    val q = &mut x\n    *q = 123456789012345679\n    print(x!!)\n    *q = null\n    if (x != null) {\n        print(1)\n    } else {\n        print(9)\n    }\n    return 0\n}\nfun main(): int {\n    class_part()\n    i128_part()\n    return 0\n}\n",
-        "1\n2\n2\n123456789012345678\n123456789012345679\n9\n",
+        "1\n2\n1\n2\n123456789012345678\n123456789012345679\n9\n",
     );
 }
 
