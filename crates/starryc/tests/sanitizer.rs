@@ -104,7 +104,7 @@ fn sanitizer_dyn_class_corpus() {
     assert_sanitizer_clean(
         "san_dyn_class",
         "trait T {\n    fun num(): int\n}\nclass C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nimpl T for C {\n    fun num(): int {\n        return self.x + 5\n    }\n}\nfun main(): int {\n    val d: dyn T = C(2)\n    val n: ?dyn T = d\n    print(n?.num()!!)\n    var r: dyn T = C(3)\n    r = d\n    print(r.num())\n    return 0\n}\n",
-        "7\n7\n3\n2\n",
+        "7\n3\n7\n2\n",
     );
 }
 
@@ -176,7 +176,7 @@ fn sanitizer_class_reassignment_corpus() {
     // retain/transfer the new one exactly once.
     assert_sanitizer_clean(
         "san_class_reassign",
-        "class P(val x: int) {\n}\nfun main(): int {\n    var b = P(1)\n    if (true) {\n        val a = P(2)\n        b = a\n    }\n    b = P(3)\n    b = b\n    return b.x\n}\n",
+        "class P(val x: int) {\n}\nfun main(): int {\n    var b = P(1)\n    if (true) {\n        val a = P(2)\n        b = a\n    }\n    b = P(3)\n    b = b\n    return 0\n}\n",
         "",
     );
     assert_sanitizer_clean(

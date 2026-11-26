@@ -212,8 +212,8 @@ and/or 操作数常量短路在发射期折叠。
 
 **M3（2026-10-27）运行时契约与赋值补全**：`Callee` 枚举修正案——
 调用目标分 `Def(DefId)`（用户函数）与 `Runtime(RuntimeFn)`（运行时
-extern 入口：v1 = StrConv/StrConvChar/StrConcat/StrEq/Print/PrintChar，名字由 llvme 映射
-`starry_str_conv_*`/`starry_str_conv_char`/`starry_str_concat`/`starry_str_eq`/`starry_print_*`/`starry_print_char` 并 declare；std-only 红线下
+extern 入口：v1 = StrConv/StrConvChar/StrConcat/StrEq/Print/PrintChar/PrintOwnedString/FreeString，名字由 llvme 映射
+`starry_str_conv_*`/`starry_str_conv_char`/`starry_str_concat`/`starry_str_eq`/`starry_print_*`/`starry_print_char`/`starry_print_owned_string`/`starry_free_string` 并 declare；std-only 红线下
 运行时以符号存在不进 crate。opt 侧影响：五个 pass 对 Call 均按
 "有副作用"处理，callee 形状不可见，零改动成立）。StringInterp
 lowering：逐 part StrConv（源类型由前置 Param 的 ty 携带）+ 左结合
@@ -386,7 +386,7 @@ pub fn emit(tac: &TacOutput, tys: &TyArena, defs: &DefArena, interner: &Interner
 - **extern "c"**：sem 在 `Def.external` 标记；irc 发 `Callee::Extern`；
   llvme 以 `declare <ret> @symbol(<params>)` 发射并按符号名调用。
 - **runtime 入口**：`starry_print_{i1,i8,i16,i32,i64,i128,f32,f64,string,
-  char}`、`starry_str_conv_*`、`starry_str_concat`、`starry_str_eq`。
+  char}`、`starry_str_conv_*`、`starry_str_concat`、`starry_str_eq`；direct concat/interpolation prints use `starry_print_owned_string`, and intermediates use `starry_free_string`。
   i1 实参先 `zext` 到 i32（C 形参是 `int`，高位不干净会把 false 打成
   true）；i4 先 `sext` 到 i8；i128 拆成 `(hi, lo)` 两个 i64（MSVC ABI
   的 `__int128` 与 LLVM `i128` 传参不一致，实测段错误）。

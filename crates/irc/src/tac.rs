@@ -118,6 +118,10 @@ pub enum RuntimeFn {
     Print,
     /// print(char)：按字符编码写出
     PrintChar,
+    /// print(dynamic string): write the line and free the owned allocation
+    PrintOwnedString,
+    /// free a compiler-owned dynamic string allocation
+    FreeString,
 }
 
 /// 三地址指令（终止符除外）
@@ -586,6 +590,10 @@ impl TacOutput {
                     Callee::Runtime(RuntimeFn::StrEq) => "starry_str_eq".to_string(),
                     Callee::Runtime(RuntimeFn::Print) => "starry_print".to_string(),
                     Callee::Runtime(RuntimeFn::PrintChar) => "starry_print_char".to_string(),
+                    Callee::Runtime(RuntimeFn::FreeString) => "starry_free_string".to_string(),
+                    Callee::Runtime(RuntimeFn::PrintOwnedString) => {
+                        "starry_print_owned_string".to_string()
+                    }
                     Callee::Runtime(RuntimeFn::Retain) => "starry_retain".to_string(),
                     Callee::Runtime(RuntimeFn::ReleaseClass) => "starry_release_class".to_string(),
                     Callee::Runtime(RuntimeFn::Release) => "starry_release".to_string(),

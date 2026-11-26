@@ -252,6 +252,16 @@ void starry_print_f32(float v) { print_line_owned(fmt_double((double)v, 7)); }
 /* Callers may pass either an LLVM string constant or an owned string value;
  * ownership tracking for dynamic strings is not part of this runtime ABI. */
 void starry_print_string(const char *s) { write_line(s); }
+/* Owned strings are compiler allocations from StrConv/StrConcat; static IR
+ * string constants remain borrowed and continue through starry_print_string. */
+void starry_free_string(char *s) {
+    rt_free(s);
+}
+
+void starry_print_owned_string(char *s) {
+    write_line(s);
+    rt_free(s);
+}
 
 /* M1（D2/D4 契约）：受检算术 trap 统一入口——llvme 的受检分支调用。
  * noreturn；向 stderr 打印区分后的原因 + 函数名（源位置近似）。

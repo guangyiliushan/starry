@@ -947,7 +947,11 @@ impl<'a> Machine<'a> {
                         let sb = &self.strings[(b.max(1) - 1) as usize];
                         u128::from(sa == sb)
                     }
-                    Callee::Runtime(RuntimeFn::Print) | Callee::Runtime(RuntimeFn::PrintChar) => {
+                    // Interp strings live in a side table, so owned-string free is a no-op.
+                    Callee::Runtime(RuntimeFn::FreeString) => 0,
+                    Callee::Runtime(RuntimeFn::Print)
+                    | Callee::Runtime(RuntimeFn::PrintChar)
+                    | Callee::Runtime(RuntimeFn::PrintOwnedString) => {
                         // 差分验证（P1-8）：print 文本形态收集进 printed，
                         // 由 diff harness 与 native stdout 逐行对拍
                         let (v, pty) = args.first().copied().unwrap_or((0, *ty));

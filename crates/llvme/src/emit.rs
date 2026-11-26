@@ -1669,6 +1669,18 @@ fn emit_instr(
                         .or_insert(("void".into(), "i32".into()));
                     ("@starry_print_char".to_string(), "void".to_string())
                 }
+                Callee::Runtime(RuntimeFn::PrintOwnedString) => {
+                    e.g.runtime_decls
+                        .entry("starry_print_owned_string".into())
+                        .or_insert(("void".into(), "i8*".into()));
+                    ("@starry_print_owned_string".to_string(), "void".to_string())
+                }
+                Callee::Runtime(RuntimeFn::FreeString) => {
+                    e.g.runtime_decls
+                        .entry("starry_free_string".into())
+                        .or_insert(("void".into(), "i8*".into()));
+                    ("@starry_free_string".to_string(), "void".to_string())
+                }
             };
             if ret == "void" {
                 let _ = writeln!(e.out, "  call void {}({})", callee_name, args.join(", "));

@@ -1090,14 +1090,14 @@ fn fn_value_dual_form_e2e() {
     // lambda 三种来源经同一 Fn 形参调用（裸 fn 直调 / box tag 分派）；
     // 具名 fn 绑定 `val g = add` 回归钉（cb6fcd5 首次实施曾把具名 fn
     // 装箱导致参数错位）
-    let Some((out, _err, code)) = build_and_exec(
+    let Some((out, err, code)) = build_and_exec(
         "fn_dual_form",
-        "fun add(a: int, b: int): int {\n    return a + b\n}\nfun apply2(f: (int, int) -> int, x: int, y: int): int {\n    return f(x, y) + 1000\n}\nfun main(): int {\n    val g = add\n    val a = apply2(g, 20, 22)\n    val b = apply2({ (x: int, y: int) -> x * y }, 3, 14)\n    return a + b\n}\n",
+        "fun add(a: int, b: int): int {\n    return a + b\n}\nfun apply2(f: (int, int) -> int, x: int, y: int): int {\n    return f(x, y) + 1000\n}\nfun main(): int {\n    val g = add\n    val a = apply2(g, 20, 22)\n    val b = apply2({ (x: int, y: int) -> x * y }, 3, 14)\n    print(a)\n    print(b)\n    return 0\n}\n",
     ) else {
         return;
     };
+    assert_eq!(code, 0, "code={code}\nstdout: {out}\nstderr: {err}");
     assert_eq!(out, "1042\n1042\n");
-    assert_eq!(code, 2084);
 }
 
 #[test]
@@ -1277,12 +1277,13 @@ fn enum_payload_arc_tag_drop_e2e() {
 #[test]
 fn nullable_class_and_i128_pointer_e2e() {
     // WP2: pointee ABI materializes the flag plus wide/class payload slots.
-    let Some(out) = build_and_run(
+    let Some((out, err, code)) = build_and_exec(
         "nullable_pointer_abi",
         "class C(val x: int) {\n    deinit {\n        print(self.x)\n    }\n}\nfun class_part(): int {\n    var x: C? = C(1)\n    val p = &x\n    val y = *p\n    print(y!!.x)\n    val q = &mut x\n    *q = C(2)\n    print(x!!.x)\n    return 0\n}\nfun i128_part(): int {\n    var x: i128? = 123456789012345678\n    val p = &x\n    val y = *p\n    print(y!!)\n    val q = &mut x\n    *q = 123456789012345679\n    print(x!!)\n    *q = null\n    if (x != null) {\n        print(1)\n    } else {\n        print(9)\n    }\n    return 0\n}\nfun main(): int {\n    class_part()\n    i128_part()\n    return 0\n}\n",
     ) else {
         return;
     };
+    assert_eq!(code, 0, "code={code}\nstdout: {out}\nstderr: {err}");
     assert_eq!(out, "1\n2\n2\n123456789012345678\n123456789012345679\n9\n");
 }
 

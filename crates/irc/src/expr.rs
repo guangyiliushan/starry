@@ -1592,18 +1592,57 @@ fn materialize_logic(ctx: &mut Ctx, op: OperatorKind, lhs: &ExprWrap, rhs: &Expr
     Operand::Temp(result)
 }
 
+/// A string expression the compiler allocated through the runtime ABI.
+/// Only these direct full-expression values are safe to free; borrowed
+/// literals and values returned from user functions keep borrowed ownership.
+fn owned_dynamic_string(ctx: &Ctx, e: &ExprWrap, ty: TyId) -> bool {
+    if !matches!(ctx.sem.tys.kind(ty), TyKind::String) {
+        return false;
+    }
+    match &e.kind {
+        ExprKind::StringInterp { .. } => true,
+        ExprKind::Binary { op, .. } => *op == OperatorKind::Plus,
+        _ => false,
+    }
+}
+
+/// Free a compiler-owned dynamic string after it has been consumed.
+fn free_string_operand(ctx: &mut Ctx, op: Operand, ty: TyId) {
+    let Operand::Temp(_) = op else { return };
+    ctx.emit(Instr::Param { a: op, ty });
+    ctx.emit(Instr::Call {
+        dst: None,
+        callee: Callee::Runtime(RuntimeFn::FreeString),
+        ty: ctx.sem.tys.unit,
+    });
+}
+
 fn string_concat(ctx: &mut Ctx, lhs: &ExprWrap, rhs: &ExprWrap) -> Operand {
     let str_ty = ctx.expr_ty(lhs);
+    let l_owned = owned_dynamic_string(ctx, lhs, str_ty);
+    let r_owned = owned_dynamic_string(ctx, rhs, str_ty);
     let l = lower_expr(ctx, lhs);
     let r = lower_expr(ctx, rhs);
-    ctx.emit(Instr::Param { a: l, ty: str_ty });
-    ctx.emit(Instr::Param { a: r, ty: str_ty });
+    ctx.emit(Instr::Param {
+        a: l.clone(),
+        ty: str_ty,
+    });
+    ctx.emit(Instr::Param {
+        a: r.clone(),
+        ty: str_ty,
+    });
     let dst = ctx.temp();
     ctx.emit(Instr::Call {
         dst: Some(dst),
         callee: Callee::Runtime(RuntimeFn::StrConcat),
         ty: str_ty,
     });
+    if l_owned {
+        free_string_operand(ctx, l, str_ty);
+    }
+    if r_owned {
+        free_string_operand(ctx, r, str_ty);
+    }
     Operand::Temp(dst)
 }
 
@@ -3026,6 +3065,8 @@ fn runtime_print(ctx: &mut Ctx, e: &ExprWrap, args: &[ast::syntax::expr::CallArg
     ctx.emit(Instr::Param { a: v, ty });
     let runtime = if matches!(ctx.sem.tys.kind(ty), TyKind::Char) {
         RuntimeFn::PrintChar
+    } else if owned_dynamic_string(ctx, &args[0].value, ty) {
+        RuntimeFn::PrintOwnedString
     } else {
         RuntimeFn::Print
     };
@@ -5082,6 +5123,8 @@ fn string_interp(ctx: &mut Ctx, e: &ExprWrap, parts: &[ExprWrap]) -> Operand {
                     callee: Callee::Runtime(RuntimeFn::StrConcat),
                     ty: str_ty,
                 });
+                free_string_operand(ctx, Operand::Temp(prev), str_ty);
+                free_string_operand(ctx, Operand::Temp(conv), str_ty);
                 d
             }
         });

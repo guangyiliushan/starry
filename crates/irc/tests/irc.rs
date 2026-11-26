@@ -304,7 +304,7 @@ fn for_iterable_hoisted_out_of_loop() {
 fn string_interpolation_runtime_chain() {
     assert_tac(
         "fun f(x: int): string {\n    return \"a${x}b\"\n}",
-        "fun f(%t0: i64) -> str:\n  b0:\n    param \"a\" : str\n    %t1 = call starry_str_conv : str\n    param %t0 : i64\n    %t2 = call starry_str_conv : str\n    param %t1 : str\n    param %t2 : str\n    %t3 = call starry_str_concat : str\n    param \"b\" : str\n    %t4 = call starry_str_conv : str\n    param %t3 : str\n    param %t4 : str\n    %t5 = call starry_str_concat : str\n    ret %t5 : str\n",
+        "fun f(%t0: i64) -> str:\n  b0:\n    param \"a\" : str\n    %t1 = call starry_str_conv : str\n    param %t0 : i64\n    %t2 = call starry_str_conv : str\n    param %t1 : str\n    param %t2 : str\n    %t3 = call starry_str_concat : str\n    param %t1 : str\n    call starry_free_string : unit\n    param %t2 : str\n    call starry_free_string : unit\n    param \"b\" : str\n    %t4 = call starry_str_conv : str\n    param %t3 : str\n    param %t4 : str\n    %t5 = call starry_str_concat : str\n    param %t3 : str\n    call starry_free_string : unit\n    param %t4 : str\n    call starry_free_string : unit\n    ret %t5 : str\n",
     );
 }
 

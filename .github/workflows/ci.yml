@@ -45,9 +45,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Get-Command clang, llvm-as | Format-List Source,Version
+          Get-Command clang | Format-List Source,Version
           clang --version
-          llvm-as --version
+          # llvm-as is preferred but optional: compiler verification falls back to clang -x ir -c.
+          $llvmAs = Get-Command llvm-as -ErrorAction SilentlyContinue
+          if ($llvmAs) { & $llvmAs.Source --version } else { Write-Host 'llvm-as unavailable; using clang IR fallback' }
       - name: Verify native toolchain (Linux)
         if: runner.os == 'Linux'
         run: |
