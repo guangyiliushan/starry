@@ -57,7 +57,22 @@ fn build_and_exec(name: &str, source: &str) -> Option<(String, String, i32)> {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let run = Command::new(&exe_path).output().unwrap();
+    let run = if cfg!(target_os = "linux") && name == "nullable_pointer_abi" {
+        // Temporary Phase 4 Linux diagnosis; remove after nullable deref ABI fix.
+        Command::new("gdb")
+            .arg("--batch")
+            .arg("--return-child-result")
+            .arg("-ex")
+            .arg("run")
+            .arg("-ex")
+            .arg("bt")
+            .arg("--args")
+            .arg(&exe_path)
+            .output()
+            .unwrap()
+    } else {
+        Command::new(&exe_path).output().unwrap()
+    };
     let code = run.status.code().unwrap_or(-1);
     let out = String::from_utf8_lossy(&run.stdout).into_owned();
     let err = String::from_utf8_lossy(&run.stderr).into_owned();

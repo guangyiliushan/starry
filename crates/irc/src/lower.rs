@@ -1142,7 +1142,9 @@ impl<'r, 'a> Ctx<'r, 'a> {
         // M4 slice 4b (Plan C): +1-origin inits (call/??/if/null) and
         // registered +1 temps (weak upgrade) transfer to the binding
         // (take => skip the retain arms); borrowed inits retain below.
-        let taken = if class_binding || crate::layout::is_aggregate(self, to) {
+        let owned_string = matches!(self.sem.tys.kind(to), TyKind::String)
+            && expr::owned_dynamic_string(self, init, to);
+        let taken = if class_binding || crate::layout::is_aggregate(self, to) || owned_string {
             self.take_stmt_temp(&op)
         } else {
             false
@@ -1194,6 +1196,14 @@ impl<'r, 'a> Ctx<'r, 'a> {
                         .expect("class drop stack in sync with defers")
                         .push((Place::Temp(t), to, false));
                 }
+                return;
+            }
+            if owned_string && let Operand::Temp(t) = op {
+                self.env_top().insert(*name, (Place::Temp(t), to));
+                self.class_drops
+                    .last_mut()
+                    .expect("class drop stack in sync with defers")
+                    .push((Place::Temp(t), to, false));
                 return;
             }
             let t = self.temp();
@@ -2133,6 +2143,12 @@ impl<'r, 'a> Ctx<'r, 'a> {
         e: &ast::syntax::expr::ExprWrap,
         ty: TyId,
     ) {
+        if matches!(self.sem.tys.kind(ty), TyKind::String)
+            && crate::expr::owned_dynamic_string(self, e, ty)
+        {
+            let _ = self.take_stmt_temp(op);
+            return;
+        }
         if !crate::expr::classish_ty(self, ty) && !matches!(self.sem.tys.kind(ty), TyKind::Fn(..)) {
             return;
         }
@@ -2245,6 +2261,15 @@ impl<'r, 'a> Ctx<'r, 'a> {
                 for i in (0..*len as usize).rev() {
                     self.emit_drop_slots(base, off + i * es, elem, false);
                 }
+            }
+            TyKind::String => {
+                let op = crate::expr::load_slot(self, base, off, ty);
+                self.emit(Instr::Param { a: op, ty });
+                self.emit(Instr::Call {
+                    dst: None,
+                    callee: Callee::Runtime(crate::tac::RuntimeFn::FreeString),
+                    ty: self.sem.tys.unit,
+                });
             }
             _ => {
                 if crate::layout::is_class(self, ty)

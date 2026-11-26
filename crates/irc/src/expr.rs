@@ -1595,7 +1595,7 @@ fn materialize_logic(ctx: &mut Ctx, op: OperatorKind, lhs: &ExprWrap, rhs: &Expr
 /// A string expression the compiler allocated through the runtime ABI.
 /// Only these direct full-expression values are safe to free; borrowed
 /// literals and values returned from user functions keep borrowed ownership.
-fn owned_dynamic_string(ctx: &Ctx, e: &ExprWrap, ty: TyId) -> bool {
+pub(crate) fn owned_dynamic_string(ctx: &Ctx, e: &ExprWrap, ty: TyId) -> bool {
     if !matches!(ctx.sem.tys.kind(ty), TyKind::String) {
         return false;
     }
@@ -1608,7 +1608,9 @@ fn owned_dynamic_string(ctx: &Ctx, e: &ExprWrap, ty: TyId) -> bool {
 
 /// Free a compiler-owned dynamic string after it has been consumed.
 fn free_string_operand(ctx: &mut Ctx, op: Operand, ty: TyId) {
-    let Operand::Temp(_) = op else { return };
+    if !ctx.take_stmt_temp(&op) {
+        return;
+    }
     ctx.emit(Instr::Param { a: op, ty });
     ctx.emit(Instr::Call {
         dst: None,
@@ -1643,6 +1645,7 @@ fn string_concat(ctx: &mut Ctx, lhs: &ExprWrap, rhs: &ExprWrap) -> Operand {
     if r_owned {
         free_string_operand(ctx, r, str_ty);
     }
+    ctx.note_stmt_temp(dst, str_ty);
     Operand::Temp(dst)
 }
 
@@ -3061,7 +3064,11 @@ fn runtime_print(ctx: &mut Ctx, e: &ExprWrap, args: &[ast::syntax::expr::CallArg
         );
         return Operand::Const(Const::Unit);
     }
+    let owned_string = owned_dynamic_string(ctx, &args[0].value, ty);
     let v = lower_expr(ctx, &args[0].value);
+    if owned_string {
+        ctx.take_stmt_temp(&v);
+    }
     ctx.emit(Instr::Param { a: v, ty });
     let runtime = if matches!(ctx.sem.tys.kind(ty), TyKind::Char) {
         RuntimeFn::PrintChar
@@ -5106,6 +5113,7 @@ fn string_interp(ctx: &mut Ctx, e: &ExprWrap, parts: &[ExprWrap]) -> Operand {
             callee: Callee::Runtime(runtime),
             ty: str_ty,
         });
+        ctx.note_stmt_temp(conv, str_ty);
         acc = Some(match acc {
             None => conv,
             Some(prev) => {
@@ -5125,6 +5133,7 @@ fn string_interp(ctx: &mut Ctx, e: &ExprWrap, parts: &[ExprWrap]) -> Operand {
                 });
                 free_string_operand(ctx, Operand::Temp(prev), str_ty);
                 free_string_operand(ctx, Operand::Temp(conv), str_ty);
+                ctx.note_stmt_temp(d, str_ty);
                 d
             }
         });
