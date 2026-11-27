@@ -1,0 +1,467 @@
+//! 类型 arena：结构去重 + 提升格
+//!
+//! v0.3 两类类型：固定型需显式 `as`，自动提升型按格提升（龙书 6.5
+//! 的类型检查框架；Kotlin 风格整型加宽教学化简，见 semantic-notes）。
+//! `Error` 为投毒类型：出错子树统一为 Error，抑制级联诊断。
+
+use std::collections::BTreeMap;
+
+use crate::def::DefId;
+
+/// 类型 ID（arena 索引；`Copy`，跨 pass 稳定）。
+///
+/// 字段公开是下游（`irc`）直接构造所需；sem **不假设**外部传来的 id 合法，
+/// 受控路径用 `TyArena::try_kind`（越界 `None`），`TyArena::kind` 的索引
+/// panic 属不变量破缺（见其文档）。sem 内部的 id 全部由 `TyArena` 铸出。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TyId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum IntKind {
+    I4,
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FloatKind {
+    F32,
+    F64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TyKind {
+    Int(IntKind),
+    Float(FloatKind),
+    Bool,
+    Char,
+    String,
+    Unit,
+    Null,
+    /// 借用引用（D-007 / M2）：&T / &mut T（T1）。非空（null 不可提升），
+    /// 可空形式是 ?&T。v1 只有类型层。
+    Ref {
+        mutable: bool,
+        inner: TyId,
+    },
+    /// 裸指针（D-007 / M2）：*const T / *mut T（T2）。1 槽，槽值 = 地址
+    ///（null = 0）。只有类型+FFI 传参语义；取址/解引表达式未排期。
+    Pointer {
+        mutable: bool,
+        inner: TyId,
+    },
+    /// 命名类型（泛型实参已代入）；DefId 指向 struct/enum/class/alias/builtin
+    Named(DefId, Vec<TyId>),
+    Nullable(TyId),
+    Array(TyId, u32),
+    Tuple(Vec<TyId>),
+    Range(TyId),
+    Fn(Vec<TyId>, TyId),
+    /// 类型形参（M7 泛型）：泛型 def 签名 eager lower 的占位；
+    /// 调用点经 subst 代入具体类型。只在泛型原件签名与未检查体里出现，
+    /// 实例化产物（克隆/spec def）永远是具体类型。
+    Param(u32),
+    /// trait 对象（Phase 2a class-only）：胖指针 data + vtable，2 槽聚合
+    Dyn(DefId, Vec<TyId>),
+    /// 类型对象（类型名在值位置出现）：仅允许作构造器 callee，
+    /// 其余使用点一律诊断（见 semantic-notes「类型名与值分立」）
+    TypeObject(DefId),
+    /// 「类型尚不可推定」哨兵（如顶层绑定依赖顺序）：不投毒，使用点照常诊断。
+    /// 与 `Error`（真错误、投毒抑制级联）区分——见 semantic-notes。
+    Unknown,
+    /// 投毒类型
+    Error,
+}
+
+/// 类型 arena（结构去重：相等类型只存一份）
+#[derive(Debug)]
+pub struct TyArena {
+    kinds: Vec<TyKind>,
+    dedup: BTreeMap<TyKind, TyId>,
+    named_cache: BTreeMap<DefId, TyId>,
+    pub unit: TyId,
+    pub ptr: TyId,
+    pub bool_: TyId,
+    pub string: TyId,
+    pub char_: TyId,
+    pub null: TyId,
+    pub unknown: TyId,
+    pub error: TyId,
+    pub default_int: TyId,
+    pub default_float: TyId,
+}
+
+impl Default for TyArena {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn int_rank(k: IntKind) -> u8 {
+    match k {
+        IntKind::I4 => 0,
+        IntKind::I8 => 1,
+        IntKind::I16 => 2,
+        IntKind::I32 => 3,
+        IntKind::I64 => 4,
+        IntKind::I128 => 5,
+    }
+}
+
+impl TyArena {
+    pub fn new() -> Self {
+        let mut arena = Self {
+            kinds: Vec::new(),
+            dedup: BTreeMap::new(),
+            named_cache: BTreeMap::new(),
+            unit: TyId(0),
+            ptr: TyId(0),
+            bool_: TyId(0),
+            string: TyId(0),
+            char_: TyId(0),
+            null: TyId(0),
+            unknown: TyId(0),
+            error: TyId(0),
+            default_int: TyId(0),
+            default_float: TyId(0),
+        };
+        arena.unit = arena.intern(TyKind::Unit);
+        arena.ptr = arena.intern(TyKind::Pointer {
+            mutable: false,
+            inner: arena.unit,
+        });
+        arena.bool_ = arena.intern(TyKind::Bool);
+        arena.string = arena.intern(TyKind::String);
+        arena.char_ = arena.intern(TyKind::Char);
+        arena.null = arena.intern(TyKind::Null);
+        arena.unknown = arena.intern(TyKind::Unknown);
+        arena.error = arena.intern(TyKind::Error);
+        arena.default_int = arena.intern(TyKind::Int(IntKind::I32));
+        arena.default_float = arena.intern(TyKind::Float(FloatKind::F64));
+        arena
+    }
+
+    /// 结构去重入池；返回的 TyId 跨 pass 稳定（IR 阶段构造类型用同一入口）
+    ///
+    /// 成本：未命中时恰一次 `TyKind` 克隆（`kinds` 与 `dedup` 各持一份所有权；
+    /// 要压到零次需要把 `kinds` 换成 `Rc<TyKind>`，会给热路径 `kind()` 加一层
+    /// 间接寻址，未测量前不做）。
+    pub fn intern(&mut self, kind: TyKind) -> TyId {
+        if let Some(&id) = self.dedup.get(&kind) {
+            return id;
+        }
+        let id = TyId(self.kinds.len() as u32);
+        self.dedup.insert(kind.clone(), id);
+        self.kinds.push(kind);
+        id
+    }
+
+    /// 取类型结构。
+    ///
+    /// # Panics
+    ///
+    /// `TyId` 的字段是公开的（下游 `irc` 直接构造），因此越界 id 理论上可达；
+    /// 此处与 `SideTable` 的「越界返回 None」姿态对齐，用 `try_kind` 做受控访问。
+    /// `kind` 只接受 arena 自己铸出的 id（sem 内部所有 TyId 都来自
+    /// `intern`/预置槽），越界 = 不变量破缺，按索引 panic 而非静默。
+    pub fn kind(&self, id: TyId) -> &TyKind {
+        &self.kinds[id.0 as usize]
+    }
+
+    /// 受控访问：越界返回 None（与 `SideTable::get` 同姿态，不 panic）
+    pub fn try_kind(&self, id: TyId) -> Option<&TyKind> {
+        self.kinds.get(id.0 as usize)
+    }
+
+    /// builtin 命名类型（无泛型实参）的缓存 Named 类型
+    pub fn builtin_named(&mut self, def: DefId) -> TyId {
+        if let Some(&id) = self.named_cache.get(&def) {
+            return id;
+        }
+        let id = self.intern(TyKind::Named(def, Vec::new()));
+        self.named_cache.insert(def, id);
+        id
+    }
+
+    pub fn nullable(&mut self, inner: TyId) -> TyId {
+        self.intern(TyKind::Nullable(inner))
+    }
+
+    /// M7 泛型代入：把 `ty` 里的 Param(i) 替换为 `args[i]`（结构递归，
+    /// 经 intern 去重回池）。索引越界保留 Param（防御，不 panic）。
+    pub fn subst(&mut self, ty: TyId, args: &[TyId]) -> TyId {
+        match self.kind(ty).clone() {
+            TyKind::Param(i) => args.get(i as usize).copied().unwrap_or(ty),
+            TyKind::Ref { mutable, inner } => {
+                let i = self.subst(inner, args);
+                self.intern(TyKind::Ref { mutable, inner: i })
+            }
+            TyKind::Pointer { mutable, inner } => {
+                let i = self.subst(inner, args);
+                self.intern(TyKind::Pointer { mutable, inner: i })
+            }
+            TyKind::Named(def, targs) => {
+                let ts = targs.iter().map(|t| self.subst(*t, args)).collect();
+                self.intern(TyKind::Named(def, ts))
+            }
+            TyKind::Dyn(def, targs) => {
+                let ts = targs.iter().map(|t| self.subst(*t, args)).collect();
+                self.intern(TyKind::Dyn(def, ts))
+            }
+            TyKind::Nullable(inner) => {
+                let i = self.subst(inner, args);
+                self.nullable(i)
+            }
+            TyKind::Array(elem, len) => {
+                let e = self.subst(elem, args);
+                self.intern(TyKind::Array(e, len))
+            }
+            TyKind::Tuple(elems) => {
+                let ts = elems.iter().map(|t| self.subst(*t, args)).collect();
+                self.intern(TyKind::Tuple(ts))
+            }
+            TyKind::Range(inner) => {
+                let i = self.subst(inner, args);
+                self.intern(TyKind::Range(i))
+            }
+            TyKind::Fn(ps, ret) => {
+                let params = ps.iter().map(|t| self.subst(*t, args)).collect();
+                let r = self.subst(ret, args);
+                self.intern(TyKind::Fn(params, r))
+            }
+            _ => ty,
+        }
+    }
+    pub fn is_error(&self, id: TyId) -> bool {
+        matches!(self.kind(id), TyKind::Error)
+    }
+
+    pub fn is_unknown(&self, id: TyId) -> bool {
+        matches!(self.kind(id), TyKind::Unknown)
+    }
+
+    /// 「尚未推定」哨兵判定：绑定注解槽的默认值既可能是 Unknown（未推定）
+    /// 也可能是 Error（推定失败）；两者都需要被推断值覆盖
+    pub fn needs_infer(&self, id: TyId) -> bool {
+        self.is_error(id) || self.is_unknown(id)
+    }
+
+    /// 可序比较（< 族）限定：数值与字符；等值比较仍按 join 判定
+    pub fn is_orderable(&self, id: TyId) -> bool {
+        matches!(
+            self.kind(id),
+            TyKind::Int(_) | TyKind::Float(_) | TyKind::Char
+        )
+    }
+
+    fn is_integral_kind(&self, id: TyId) -> bool {
+        matches!(self.kind(id), TyKind::Int(_))
+    }
+
+    pub fn is_numeric(&self, id: TyId) -> bool {
+        matches!(self.kind(id), TyKind::Int(_) | TyKind::Float(_))
+    }
+
+    /// 提升格：`from` 可隐式赋值给 `to`
+    pub fn assignable(&self, from: TyId, to: TyId) -> bool {
+        if from == to {
+            return true;
+        }
+        // 可空目标：Null 与任意 T 均可提升入 Nullable(T)（逐层剥离，变度不变）
+        if let TyKind::Nullable(inner) = self.kind(to) {
+            let inner = *inner;
+            return matches!(self.kind(from), TyKind::Null) || self.assignable(from, inner);
+        }
+        match (self.kind(from), self.kind(to)) {
+            // Unknown 不投毒：不可指派（使用点应已诊断）
+            (TyKind::Unknown, TyKind::Unknown) => from == to,
+            (TyKind::Unknown, _) | (_, TyKind::Unknown) => false,
+            (TyKind::Error, _) | (_, TyKind::Error) => true,
+            (TyKind::Int(f), TyKind::Int(t)) => int_rank(*f) <= int_rank(*t),
+            (TyKind::Int(_), TyKind::Float(_)) => true,
+            (TyKind::Float(f), TyKind::Float(t)) => f <= t,
+            // null 提升入裸指针（null = 地址 0；表示层单槽容得下）
+            (TyKind::Null, TyKind::Pointer { .. }) => true,
+            // 引用/指针同 mutability + 内层可指派（v1 不做协变放宽）
+            (
+                TyKind::Ref {
+                    mutable: fm,
+                    inner: fi,
+                },
+                TyKind::Ref {
+                    mutable: tm,
+                    inner: ti,
+                },
+            ) => fm == tm && self.assignable(*fi, *ti),
+            (
+                TyKind::Pointer {
+                    mutable: fm,
+                    inner: fi,
+                },
+                TyKind::Pointer {
+                    mutable: tm,
+                    inner: ti,
+                },
+            ) => fm == tm && self.assignable(*fi, *ti),
+            (TyKind::Param(f), TyKind::Param(t)) => f == t,
+            (TyKind::Named(fd, fa), TyKind::Named(td, ta)) => fd == td && fa == ta,
+            // 聚合逐元素走格（对齐 Tuple 臂）：`[int; 3] = [1, 2, 3]` 经 i32→int 加宽成立
+            (TyKind::Array(fe, fl), TyKind::Array(te, tl)) => fl == tl && self.assignable(*fe, *te),
+            (TyKind::Range(f), TyKind::Range(t)) => self.assignable(*f, *t),
+            (TyKind::Tuple(fs), TyKind::Tuple(ts)) => {
+                fs.len() == ts.len() && fs.iter().zip(ts).all(|(f, t)| self.assignable(*f, *t))
+            }
+            _ => false,
+        }
+    }
+
+    /// 汇合：二元运算 / 分支汇合的公共类型；`None` = 不可比（调用方诊断）
+    pub fn join(&mut self, a: TyId, b: TyId) -> Option<TyId> {
+        // 类型对象不与任何类型汇合（先于相等短路，否则 [P, P] 漏网）
+        if matches!(self.kind(a), TyKind::TypeObject(_))
+            || matches!(self.kind(b), TyKind::TypeObject(_))
+        {
+            return None;
+        }
+        if a == b {
+            return Some(a);
+        }
+        let ka = self.kind(a).clone();
+        let kb = self.kind(b).clone();
+        match (&ka, &kb) {
+            (TyKind::Error, _) => Some(a),
+            (_, TyKind::Error) => Some(b),
+            (TyKind::Unknown, TyKind::Unknown) => Some(a),
+            (TyKind::Unknown, _) | (_, TyKind::Unknown) => None,
+            (TyKind::Null, TyKind::Nullable(_)) => Some(b),
+            (TyKind::Nullable(_), TyKind::Null) => Some(a),
+            // null ∨ T = T?；Nullable(S) ∨ T = Nullable(S ∨ T)
+            (TyKind::Null, TyKind::Pointer { .. }) => Some(b),
+            (TyKind::Pointer { .. }, TyKind::Null) => Some(a),
+            (TyKind::Null, _) => Some(self.nullable(b)),
+            (_, TyKind::Null) => Some(self.nullable(a)),
+            (TyKind::Nullable(x), _) => self.join(*x, b).map(|j| self.nullable(j)),
+            (_, TyKind::Nullable(y)) => self.join(a, *y).map(|j| self.nullable(j)),
+            (TyKind::Int(f), TyKind::Int(t)) => {
+                let rank = int_rank(*f).max(int_rank(*t));
+                let kind = match rank {
+                    0 => IntKind::I4,
+                    1 => IntKind::I8,
+                    2 => IntKind::I16,
+                    3 => IntKind::I32,
+                    4 => IntKind::I64,
+                    _ => IntKind::I128,
+                };
+                Some(self.intern(TyKind::Int(kind)))
+            }
+            (TyKind::Float(_), TyKind::Float(_)) => {
+                Some(self.intern(TyKind::Float(FloatKind::F64)))
+            }
+            (TyKind::Int(_), TyKind::Float(t)) => Some(self.intern(TyKind::Float(*t))),
+            (TyKind::Float(f), TyKind::Int(_)) => Some(self.intern(TyKind::Float(*f))),
+            // 裸指针汇合仍是裸指针（历史 bug：此处曾误写成 Ref，把
+            // `*const T ∨ *const U` 静默降级为借用引用，且下述同守卫
+            // Pointer 臂因此不可达）——见 join_pointer_stays_pointer
+            (
+                TyKind::Pointer {
+                    mutable: fm,
+                    inner: fi,
+                },
+                TyKind::Pointer {
+                    mutable: tm,
+                    inner: ti,
+                },
+            ) if fm == tm => {
+                let j = self.join(*fi, *ti)?;
+                Some(self.intern(TyKind::Pointer {
+                    mutable: *fm,
+                    inner: j,
+                }))
+            }
+            (TyKind::Param(f), TyKind::Param(t)) if f == t => Some(a),
+            (TyKind::Named(fd, fa), TyKind::Named(td, ta)) if fd == td && fa == ta => Some(a),
+            // 数组/区间逐元素汇合（长度不变）
+            (TyKind::Array(fe, fl), TyKind::Array(te, tl)) if fl == tl => {
+                let j = self.join(*fe, *te)?;
+                Some(self.intern(TyKind::Array(j, *fl)))
+            }
+            (TyKind::Range(f), TyKind::Range(t)) => {
+                let j = self.join(*f, *t)?;
+                Some(self.intern(TyKind::Range(j)))
+            }
+            (TyKind::Tuple(fs), TyKind::Tuple(ts)) if fs.len() == ts.len() => {
+                let mut out = Vec::with_capacity(fs.len());
+                for (f, t) in fs.iter().zip(ts) {
+                    out.push(self.join(*f, *t)?);
+                }
+                Some(self.intern(TyKind::Tuple(out)))
+            }
+            _ => None,
+        }
+    }
+
+    /// M7：类型是否提及类型形参（深度）。泛型签名 lower 期
+    /// （`B<T>` 字段）不实例化——实例化发生在调用点代入后
+    pub fn mentions_param(&self, ty: TyId) -> bool {
+        match self.kind(ty) {
+            TyKind::Param(_) => true,
+            TyKind::Ref { inner, .. } | TyKind::Pointer { inner, .. } => {
+                self.mentions_param(*inner)
+            }
+            TyKind::Named(_, args) => args.iter().any(|a| self.mentions_param(*a)),
+            TyKind::Dyn(_, args) => args.iter().any(|a| self.mentions_param(*a)),
+            TyKind::Nullable(inner) | TyKind::Range(inner) => self.mentions_param(*inner),
+            TyKind::Array(elem, _) => self.mentions_param(*elem),
+            TyKind::Tuple(elems) => elems.iter().any(|e| self.mentions_param(*e)),
+            TyKind::Fn(ps, ret) => {
+                ps.iter().any(|p| self.mentions_param(*p)) || self.mentions_param(*ret)
+            }
+            _ => false,
+        }
+    }
+    /// P0 compiler trust：收集类型里出现的 Param 下标（深度递归，同
+    /// `mentions_param` 的遍历面）。impl 头用它判定类型实参是否被
+    /// `impl<T>` 绑定；未绑定 Param 在声明点稳定拒收。
+    pub fn collect_param_indices(&self, ty: TyId, out: &mut Vec<u32>) {
+        match self.kind(ty) {
+            TyKind::Param(i) => out.push(*i),
+            TyKind::Ref { inner, .. } | TyKind::Pointer { inner, .. } => {
+                self.collect_param_indices(*inner, out)
+            }
+            TyKind::Named(_, args) => {
+                for a in args {
+                    self.collect_param_indices(*a, out);
+                }
+            }
+            TyKind::Dyn(_, args) => {
+                for a in args {
+                    self.collect_param_indices(*a, out);
+                }
+            }
+            TyKind::Nullable(inner) | TyKind::Range(inner) => {
+                self.collect_param_indices(*inner, out)
+            }
+            TyKind::Array(elem, _) => self.collect_param_indices(*elem, out),
+            TyKind::Tuple(elems) => {
+                for e in elems {
+                    self.collect_param_indices(*e, out);
+                }
+            }
+            TyKind::Fn(ps, ret) => {
+                for p in ps {
+                    self.collect_param_indices(*p, out);
+                }
+                self.collect_param_indices(*ret, out);
+            }
+            _ => {}
+        }
+    }
+
+    /// 便捷：整型字面量默认类型核查（测试用）
+    pub fn is_integral(&self, id: TyId) -> bool {
+        self.is_integral_kind(id)
+    }
+}

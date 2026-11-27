@@ -1,0 +1,14 @@
+[package]
+name = "opt"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+irc = { path = "../irc" }
+sem = { path = "../sem" }
+
+[dev-dependencies]
+parser = { path = "../parser" }
+sem = { path = "../sem" }
+

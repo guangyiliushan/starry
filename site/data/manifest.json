@@ -1,0 +1,139 @@
+{
+  "schema": 1,
+  "locales": [
+    "en",
+    "zh-cn"
+  ],
+  "defaultLocale": "en",
+  "versions": [],
+  "pages": [
+    {
+      "id": "index",
+      "path": "index",
+      "type": "overview",
+      "roles": [
+        "all"
+      ]
+    },
+    {
+      "id": "start/install",
+      "path": "start/install",
+      "type": "tutorial",
+      "roles": [
+        "newcomer"
+      ]
+    },
+    {
+      "id": "start/tutorial",
+      "path": "start/tutorial",
+      "type": "tutorial",
+      "roles": [
+        "newcomer"
+      ]
+    },
+    {
+      "id": "language/syntax",
+      "path": "language/syntax",
+      "type": "reference",
+      "roles": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "language/types",
+      "path": "language/types",
+      "type": "reference",
+      "roles": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "language/control-flow-and-patterns",
+      "path": "language/control-flow-and-patterns",
+      "type": "reference",
+      "roles": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "language/functions-and-closures",
+      "path": "language/functions-and-closures",
+      "type": "reference",
+      "roles": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "language/classes-and-arc",
+      "path": "language/classes-and-arc",
+      "type": "reference",
+      "roles": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "language/traits-and-generics",
+      "path": "language/traits-and-generics",
+      "type": "reference",
+      "roles": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "language/modules-and-packages",
+      "path": "language/modules-and-packages",
+      "type": "reference",
+      "roles": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "reference/cli",
+      "path": "reference/cli",
+      "type": "reference",
+      "roles": [
+        "builder"
+      ]
+    },
+    {
+      "id": "reference/diagnostics",
+      "path": "reference/diagnostics",
+      "type": "reference",
+      "roles": [
+        "debugger"
+      ]
+    },
+    {
+      "id": "reference/packages",
+      "path": "reference/packages",
+      "type": "reference",
+      "roles": [
+        "builder"
+      ]
+    },
+    {
+      "id": "spec/grammar",
+      "path": "spec/grammar",
+      "type": "spec",
+      "roles": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "spec/lexicon",
+      "path": "spec/lexicon",
+      "type": "spec",
+      "roles": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "glossary",
+      "path": "glossary",
+      "type": "glossary",
+      "roles": [
+        "all"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+fun find(xs: int) : int {
+    'outer: loop {
+        break 'outer 42
+    }
+}
+
+fun pick(flag: bool) : int {
+    loop {
+        break 7
+    }
+}
+
+fun main() {
+    print(find(0))
+    print(pick(true))
+}

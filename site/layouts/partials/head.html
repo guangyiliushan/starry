@@ -1,0 +1,10 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ .Title }} | {{ site.Title }}</title>
+<meta name="description" content="{{ .Description | default site.Params.description }}">
+<link rel="canonical" href="{{ .Permalink }}">
+{{ range .AllTranslations }}
+<link rel="alternate" hreflang="{{ .Language.Locale | default .Language.Lang }}" href="{{ .Permalink }}">
+{{ end }}
+{{ $style := resources.Get "css/main.css" | minify }}
+<link rel="stylesheet" href="{{ $style.RelPermalink }}">

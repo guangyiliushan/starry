@@ -1,0 +1,37 @@
+class Counter(var count: int) {
+    fun bump(): int {
+        self.count += 1
+        return self.count
+    }
+    deinit {
+        print(self.count)
+    }
+}
+
+fun make(start: int): Counter {
+    return Counter(start)
+}
+
+fun read(c: Counter?): int {
+    if (c != null) {
+        return c!!.count
+    }
+    return -1
+}
+
+fun main(): int {
+    val a = make(10)
+    val b = a
+    print(a.bump())
+    print(b.bump())
+    weak var w = a
+    var slot: Counter? = null
+    slot = a
+    print(read(slot))
+    slot = make(20)
+    print(read(slot))
+    var c = Counter(1)
+    c = a
+    print(c.count)
+    return 0
+}

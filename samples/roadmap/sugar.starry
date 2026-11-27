@@ -1,0 +1,67 @@
+import std.text.*
+
+// ========== 可空类型与空安全链 ==========
+
+struct User {
+    name: String
+    age: int
+}
+
+fun greet(user: User?) : String {
+    val name = user?.name ?? "陌生人"
+    val age = user!!.age
+    return "${name}（${age} 岁）"
+}
+
+// ========== 定长数组：填充与索引赋值 ==========
+
+fun grid_demo() : f64 {
+    val grid = [0.0; 9]
+    grid[4] = 1.5
+    grid[0] += 2.0
+    return grid[0] + grid[4]
+}
+
+// ========== 函数类型与 lambda ==========
+
+fun apply(value: f64, f: (f64) -> f64) : f64 = f(value)
+
+// ========== 枚举 + 守卫模式 ==========
+
+enum Opt {
+    Some(value: f64)
+    None
+}
+
+fun pick(opt: Opt) : f64 = when opt {
+    Some(v) if v > 5.0 -> v
+    Some(v) -> v * 0.5
+    None -> 0.0
+}
+
+// ========== 'label 跳转带值 ==========
+
+fun first_positive(values: [f64; 4]) : f64 {
+    'search: for v in values {
+        if v > 0.0 {
+            break 'search v
+        }
+    }
+    return -1.0
+}
+
+// ========== 主流程：命名实参 + defer ==========
+
+fun format(label: String, value: f64) : String = "${label} = ${value}"
+
+fun main() {
+    defer { print("sugar 结束") }
+
+    print(format(label = "圆周率", value = 3.14))
+    print(greet(user = User(name = "小明", age = 18)))
+    print("grid = ${grid_demo()}")
+
+    print("pick = ${pick(Opt.Some(value = 9.0))}")
+    print("首个正数 = ${first_positive([-1.0, 0.0, 7.5, 2.0])}")
+    print("lambda = ${apply(21.0, { it * 2 })}")
+}

@@ -1,0 +1,3 @@
+impl<T> Show for List<T> {
+
+}

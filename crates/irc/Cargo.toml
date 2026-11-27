@@ -1,0 +1,14 @@
+[package]
+name = "irc"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+ast = { path = "../ast" }
+sem = { path = "../sem" }
+
+[dev-dependencies]
+parser = { path = "../parser" }
+opt = { path = "../opt" }
+llvme = { path = "../llvme" }

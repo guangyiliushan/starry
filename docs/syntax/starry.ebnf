@@ -1,0 +1,360 @@
+(* ==================================================================
+ * Starry v0.4 canonical grammar
+ *
+ * Notation:
+ *   "val"       hard keyword, globally reserved by the lexer
+ *   «deinit»    slot/modifier word; lexically IDENTIFIER and recognized
+ *               only by a parser predicate in its named grammar slot
+ *   NL          line terminator; spaces and tabs are not tokens
+ *   [ X ]       optional
+ *   { X }       repetition
+ *   ( X | Y )   grouping
+ *
+ * Truth hierarchy:
+ *   integration tests > starry.ebnf > ANTLR4 reference grammar
+ *
+ * Namespace decisions (v0.4):
+ *   no per-file package header; module paths are compiler metadata
+ *   derived from the manifest package name + file path; qualified
+ *   names use "." only; import suffixes are ".*" and "as" IDENT.
+ * ================================================================== *)
+
+(* ---------- Compilation unit ---------- *)
+
+CompilationUnit := { ImportDecl } { TopLevelDecl } ;
+
+ImportDecl    := QualifiedImport | NativeImport ;
+QualifiedImport := "import" QualifiedName [ ImportSuffix ] ;
+ImportSuffix := ".*" | "as" IDENT ;
+
+NativeImport  := "import" NativeLanguage StringLiteral
+                 [ "as" IDENT ] [ "{" ImportMember { "," ImportMember } [ "," ] "}" ] ;
+(* NativeLanguage is a StringLiteral whose value is "c" or "cpp". *)
+NativeLanguage := StringLiteral ;
+ImportMember  := FunSignature ;
+
+TopLevelDecl  := Declaration
+               | ImplDecl
+               | ExternDecl ;
+
+(* ---------- Declarations ---------- *)
+
+ParameterList  := [ Parameter { "," Parameter } [ "," ] ] ;
+Parameter      := [ "mut" | "val" | "var" ] IDENT [ ":" Type ] [ "=" Expr ] ;
+
+Declaration := FunDecl
+             | BindingDecl
+             | ClassDecl
+             | StructDecl
+             | EnumDecl
+             | UnionDecl
+             | TraitDecl
+             | TypeAliasDecl ;
+
+Modifiers := { Modifier } ;
+(* D-014: const/inline/infix/vararg/static removed (2026-11-25). static is
+ * covered by top-level fun/val/var and package namespaces (re-add with a
+ * spec if type-scoped members are designed). operator is retained: the
+ * operator-overloading decision (parser-notes) uses it as syntax.
+ * weak is the ARC-cycle modifier (D-008). *)
+Modifier  := "public" | "private" | "protected" | "internal"
+           | "open" | "abstract" | "sealed" | "override"
+           | "operator" | «weak» ;
+
+FunDecl      := Modifiers "fun" IDENT TypeParams?
+                "(" ParameterList ")" [ ":" Type ]
+                WhereClause? FunctionBody ;
+FunctionBody := Block | "=" Expr ;
+WhereClause  := "where" WhereConstraint { "," WhereConstraint } ;
+WhereConstraint := Type ":" Bound ;
+
+(* A signature has no body. The `;` terminator is accepted but optional: a
+ * newline also ends it, matching AssociatedType and every other NL-terminated
+ * member. Where a FunSignature is legal, so is a redundant `;`. *)
+FunSignature := Modifiers "fun" IDENT TypeParams?
+                 "(" ParameterList ")" [ ":" Type ] [ ";" ] ;
+
+BindingDecl := Modifiers ( "val" | "var" ) Binding ;
+Binding     := Pattern [ ":" Type ] [ "=" Expr ] ;
+
+ClassDecl    := Modifiers "class" IDENT TypeParams?
+                PrimaryConstructor? Supertypes? ClassBody? ;
+PrimaryConstructor := "(" ParameterList ")" ;
+Supertypes   := ":" SuperItem { "," SuperItem } ;
+SuperItem    := Type [ "(" ArgumentList? ")" ] [ «by» Expr ] ;
+ClassBody    := "{" { ClassMember } "}" ;
+(* Class-member functions permit a missing body. Semantic analysis restricts
+   that omission to abstract methods in abstract classes; impl members reject
+   it. *)
+ClassFunDecl := Modifiers "fun" IDENT TypeParams?
+                "(" ParameterList ")" [ ":" Type ]
+                WhereClause? [ FunctionBody ] ;
+ClassMember  := ClassFunDecl | Declaration | ConstructorDecl | AccessorDecl | InitBlock | DeinitBlock ;
+DeinitBlock  := «deinit» Block ;
+
+ConstructorDecl := Modifiers «init» "(" ParameterList ")" Block ;
+InitBlock       := «init» Block ;
+AccessorDecl    := «get» Block [ «set» Block ] | «set» Block [ «get» Block ] ;
+
+(* M3 主构造：头参数 val/var 声明字段（槽布局序 = 参数序 ++ body 序）；
+   无修饰符参数仅构造期使用不存字段；body 可省略或与头构造共存。 *)
+StructDecl  := Modifiers "struct" IDENT TypeParams? [ PrimaryCtorParams ]
+              [ "{" { StructField [ "," ] } "}" ] ;
+PrimaryCtorParams := "(" [ Parameter { "," Parameter } ] ")" ;
+StructField := Modifiers IDENT ":" Type ;
+
+EnumDecl        := Modifiers "enum" IDENT TypeParams? "{" EnumVariantList "}" ;
+EnumVariantList := [ EnumVariant { "," EnumVariant } [ "," ] ] ;
+EnumVariant     := IDENT [ "(" ParameterList ")" ] ;
+
+UnionDecl := Modifiers "union" IDENT TypeParams? "{" { StructField } "}" ;
+
+TraitDecl      := Modifiers "trait" IDENT TypeParams? Supertypes? "{" { TraitMember } "}" ;
+TraitMember    := AssociatedType | FunSignature | FunDecl | Declaration ;
+AssociatedType := "type" IDENT [ ":" Bound ] [ "=" Type ] [ ";" ] ;
+
+TypeAliasDecl := Modifiers "alias" IDENT TypeParams? "=" Type ;
+
+ImplDecl := «impl» TypeParams? Type "for" Type "{" { ClassMember } "}" ;
+
+(* ---------- External interfaces ---------- *)
+
+ExternDecl     := "extern" ExternLanguage ExternBody ;
+ExternLanguage := StringLiteral ;
+ExternBody     := FunSignature
+                | "{" { FunSignature } "}"
+
+(* ---------- Generics ---------- *)
+
+TypeParams    := "<" TypeParameter { "," TypeParameter } ">" ;
+TypeParameter := IDENT [ ":" Bound ] [ "=" Type ] ;
+(* D-014: variance markers removed (deferred). in is membership-only;
+ * future variance will use +/- signs instead of keywords. *)
+(* An intersection bound. Used in both the inline `T : A & B` slot and the
+ * `where` slot, so the two spell the same constraint. `+` is avoided: it is
+ * already the addition operator. *)
+Bound         := Type { "&" Type } ;
+TypeArgs      := "<" TypeArgument { "," TypeArgument } ">" ;
+TypeArgument  := Type | IDENT "=" Type ;
+
+(* ---------- Types ---------- *)
+
+Type         := FunctionType ;
+FunctionType := UnionType [ "->" FunctionType ] ;
+UnionType    := PrefixType { "|" PrefixType } ;
+(* D-007 / M2：类型构造子固定前缀，正交组合无外层特殊规则。 *)
+PrefixType   := NullableType | RefType | PointerType | AtomicType ;
+NullableType := "?" PrefixType ;
+RefType      := "&" [ "mut" ] PrefixType ;
+(* 裸指针 bare `*T` 拒绝（诊断：只允许 *const/*mut）。 *)
+PointerType  := "*" ( "const" | "mut" ) PrefixType ;
+(* 原子后缀糖：NamedType? = ?NamedType（只限原子/命名/内建）。复合类型
+   可空必须前缀（?[T; N]、?(T, U)、?*const T、?&T）；[T; N]? 与
+   (T, U)? 拒绝并提示前缀形态。*const T? = *const (?T)（? 归内层）。 *)
+AtomicType   := NamedType { "?" } | TupleType | UnitType | "Self" | "dyn" Bound
+              | ArrayType | "(" Type ")" ;
+ArrayType    := "[" Type ";" INTEGER "]" ;
+NamedType    := QualifiedName [ TypeArgs ] ;
+TupleType    := "(" Type "," Type { "," Type } [ "," ] ")" ;
+UnitType     := "(" ")" ;
+QualifiedName := IDENT { "." IDENT } ;
+
+(* ---------- Statements ---------- *)
+
+Block := "{" [ NL ] { Statement } [ NL ] [ Expr ] [ NL ] "}" ;
+
+Statement := ExpressionStatement
+           | AssignmentStatement
+           | BindingDecl
+           | IfExpr
+           | WhenExpr
+           | ForStatement
+           | WhileStatement
+           | LoopStatement
+           | JumpStatement
+           | DeferStatement ;
+
+ExpressionStatement := Expr ;
+AssignmentStatement := Place AssignmentOperator Expr ;
+AssignmentOperator  := "=" | "+=" | "-=" | "*=" | "/=" | "%="
+                     | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
+Place := PostfixExpr ;
+
+(* A refutable condition is either an expression, often using `is`, or the
+ * binding form formed from the existing hard keyword `val`. Starry has no
+ * `let` keyword and no `let` condition. `let` is an ordinary identifier: a
+ * statement that starts with bare `let` followed by an identifier is a
+ * diagnostic (`LetKeyword`), not two statements. *)
+RefutableCondition := Expr | RefutableBinding ;
+RefutableBinding   := "val" Pattern "=" Expr ;
+
+IfExpr := "if" RefutableCondition Block
+          { "else" "if" RefutableCondition Block }
+          [ "else" Block ] ;
+
+(* Decision: `for` has no parenthesized header form. Unlike `while`,
+ * whose RefutableCondition may be an arbitrary parenthesized Expr,
+ * `for (v in arr)` is a syntax error; the iterable stays outside Expr
+ * grouping so the header cannot be mistaken for a tuple condition. *)
+ForStatement   := [ Label ":" ] "for" Pattern "in" Expr Block ;
+WhileStatement := [ Label ":" ] "while" RefutableCondition Block ;
+LoopStatement  := [ Label ":" ] "loop" Block ;
+
+JumpStatement  := "break" [ Label ] [ Expr ] | "continue" [ Label ] | "return" [ Expr ] ;
+DeferStatement := "defer" Block ;
+Label          := "'" IDENT ;
+
+(* ---------- Expressions ---------- *)
+
+Expr := LambdaExpr
+       | LoopExpr
+       | WhenExpr
+       | IfExpr
+       | UnsafeBlock
+       | MacroCall
+       | BinaryExpr ;
+
+LambdaExpr       := [ «move» ] "{" [ LambdaParameters "->" ] Block "}" ;
+(* Unlabelled loop is an expression whose value is a labelled or unlabelled
+ * `break Expr`. Labelled loops remain statements (their value is discarded). *)
+LoopExpr         := "loop" Block ;
+LambdaParameters := ParameterPattern { "," ParameterPattern } ;
+ParameterPattern := [ "mut" ] IDENT [ ":" Type ] | «it» ;
+
+WhenExpr    := "when" [ "(" Expr ")" ] "{" { WhenBranch [ "," ] } "}" ;
+WhenBranch  := WhenPattern "->" ( Expr | Block | JumpStatement ) ;
+WhenPattern := Pattern [ "if" Expr ] | Expr | "else" ;
+(* A when branch ends in "->", which is also the function-type arrow. So a
+ * top-level binding annotation here is a NoArrowType: `a: int -> 1` reads the
+ * branch arrow as part of the type otherwise. Parenthesise a function type:
+ * `a: ((int) -> int) -> 1`. Nested annotations (inside `Some(…)`, `Point { … }`)
+ * are ordinary types. *)
+NoArrowType  := ? Type with no "->" at its top level ? ;
+
+UnsafeBlock     := "unsafe" Block ;
+
+MacroCall    := IDENT "!" "(" MacroTokenStream ")" ;
+MacroTokenStream := ? balanced raw token groups until the matching ")" ? ;
+
+(* Pratt precedence, high to low:
+ *   postfix:  . [] () ?. !!
+ *   unary:    await ! - ~ & *
+ *   cast:     as as? as!
+ *   multiplicative: * / %
+ *   additive: + -
+ *   shift:    << >>
+ *   range:    .. ..=
+ *   relational: < > <= >= is in
+ *   equality: == !=
+ *   bitwise:  & ^ |
+ *   logical:  && ||
+ *   nullish:  ??
+ *)
+BinaryExpr := NullishExpr ;
+NullishExpr := LogicalOrExpr { "??" LogicalOrExpr } ;
+LogicalOrExpr := LogicalAndExpr { "||" LogicalAndExpr } ;
+LogicalAndExpr := BitOrExpr { "&&" BitOrExpr } ;
+BitOrExpr := BitXorExpr { "|" BitXorExpr } ;
+BitXorExpr := BitAndExpr { "^" BitAndExpr } ;
+BitAndExpr := EqualityExpr { "&" EqualityExpr } ;
+EqualityExpr := RelationalExpr { ( "==" | "!=" ) RelationalExpr } ;
+RelationalExpr := RangeExpr { ( "<" | ">" | "<=" | ">=" | "in" | "!in" ) RangeExpr
+                | ( "is" | "!is" ) IsOperand } ;
+(* `is` 的操作数是模式，但结构体尾被抑制：操作数后必接强制语句块，
+   `{` 归块不归 StructPattern（决议见 parser-notes）。因此 IsOperand
+   列出除 StructPattern 外的全部 PrimaryPattern 选择。 *)
+IsOperand := WildcardPattern | BindingPattern | LiteralPattern | RangePattern
+           | TuplePattern | ArrayPattern | ConstructorPattern ;
+
+RangeExpr := ShiftExpr [ ( ".." | "..=" ) ShiftExpr ] ;
+ShiftExpr := AddExpr { ( "<<" | ">>" ) AddExpr } ;
+AddExpr := MultiplicativeExpr { ( "+" | "-" | "+%" | "-%" ) MultiplicativeExpr } ;
+MultiplicativeExpr := CastExpr { ( "*" | "/" | "%" | "*%" ) CastExpr } ;
+
+CastExpr := UnaryExpr { ( "as" | "as?" | "as!" ) Type } ;
+UnaryExpr := { UnaryOperator } PostfixExpr ;
+UnaryOperator := "await" | "!" | "-" | "~" ;
+(* M2：&x / &mut x 取址与 *p 解引是独立表达式构造（借用检查/指针 lowering），
+   不再走通用 Unary。`&` 后可跟硬关键字 mut。as 比前缀 & 绑定松：`&x as T`
+   读作 &(x as T)，取址后转换须加括号。*)
+AddrOfExpr := ( "&" [ "mut" ] | "*" ) UnaryExpr ;
+
+PostfixExpr := Primary { PostfixSuffix } ;
+PostfixSuffix := "." IDENT
+               | "[" Expr "]"
+               | CallSuffix
+               | "?." IDENT
+               | "!!" ;
+(* A tuple base requires an integer literal index; dynamic indices are array-only in v1. *)
+CallSuffix   := TypeArgs? "(" ArgumentList? ")" ;
+ArgumentList := Argument { "," Argument } [ "," ] ;
+Argument     := [ IDENT "=" ] Expr ;
+
+Primary := Literal
+         | "true" | "false" | "null"
+         | "self" | SuperExpression
+         | "Self" [ CallSuffix ]
+         | QualifiedName
+         | TupleExpression
+         | ArrayExpression
+         | LambdaExpr
+         | "(" Expr ")" ;
+
+SuperExpression := "super" ( "." IDENT | CallSuffix ) ;
+TupleExpression := "(" [ Expr { "," Expr } [ "," ] ] ")" ;
+ArrayExpression := "[" [ ( Expr { "," Expr } [ "," ] ) | ( Expr ";" INTEGER ) ] "]" ;
+
+(* ---------- Patterns ---------- *)
+
+Pattern := OrPattern ;
+OrPattern := PrimaryPattern { "|" PrimaryPattern } ;
+
+PrimaryPattern := WildcardPattern
+                | BindingPattern
+                | LiteralPattern
+                | RangePattern
+                | TuplePattern
+                | ArrayPattern
+                | ConstructorPattern
+                | StructPattern ;
+
+WildcardPattern := "_" ;
+(* The annotation is an ordinary Type here. At the top level of a WhenPattern it
+ * is a NoArrowType instead — see the note on WhenExpr. *)
+BindingPattern := [ "mut" ] IDENT [ ":" Type ] ;
+LiteralPattern := INTEGER | FLOAT | STRING | CHAR | "true" | "false" | "null" ;
+RangePattern := LiteralPattern ( ".." | "..=" ) LiteralPattern ;
+(* `..` is the rest element: it may appear at most once among the elements, in
+ * any position — `[a, .., b]`, `[.., b]`, `[a, ..]`, `[..]`, `(1, .., 3)`. *)
+TuplePattern := "(" [ TuplePatternElement { "," TuplePatternElement } [ "," ] ] ")" ;
+TuplePatternElement := Pattern | ".." ;
+
+ArrayPattern := "[" [ ArrayPatternElement { "," ArrayPatternElement } [ "," ] ] "]" ;
+ArrayPatternElement := Pattern | ".." ;
+
+ConstructorPattern := QualifiedName [ "(" [ PatternList ] ")" ] ;
+StructPattern := QualifiedName "{" [ StructPatternFieldList ] "}" ;
+StructPatternFieldList := StructPatternField { "," StructPatternField } [ "," ] ;
+StructPatternField := IDENT [ ":" Pattern ] ;
+PatternList := Pattern { "," Pattern } [ "," ] ;
+
+(* ---------- Lexical terminals ---------- *)
+
+Literal := INTEGER | FLOAT | STRING | CHAR ;
+INTEGER := ? decimal | "0x" hexadecimal | "0o" octal | "0b" binary ? ;
+FLOAT   := ? decimal with fraction or exponent; a leading "." is invalid ? ;
+STRING  := ? raw string token; $IDENT and ${Expr} interpolation and the \$ escape
+             are decoded by a parser sub-scan ? ;
+CHAR    := ? Unicode character literal with escapes ? ;
+IDENT   := ? [A-Za-z_][A-Za-z0-9_]* ? ;
+
+(* The lexer emits one or more newlines as a single NL token. Spaces, tabs,
+* and comments do not become tokens. Newlines are suppressed inside ( and [
+* only; inside {} a newline terminates the statement. An expression continues
+* across a newline only when the line ends with a binary operator or the next
+* line starts with a binary-only operator or ".". *)
+NL := ? one or more line terminators ? ;
+
+(* Hard-keyword terminals are generated from docs/syntax/lexicon.txt into
+ * docs/syntax/generated/StarryLexerTerms.g4. Modifier and slot words shown
+ * as «word» remain identifiers to the lexer and are parser-slot predicates. *)

@@ -1,0 +1,96 @@
+# Starry 编译器 CI：五道门禁全量跑，不允许静默 SKIP。
+# 工具链：stable Rust 2024（1.85+）+ LLVM 15+（不透明指针是槽模型硬前提；
+# llvm-as/clang 验证层与 build e2e 依赖它，探测 PATH 与常见安装位）。
+# LLVM source：Windows = current Chocolatey package；Linux = apt clang/llvm 18
+# （ubuntu-24.04 默认源）。低于 15 的行为不受支持。
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  gates:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install LLVM (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          if (-not (Get-Command llvm-as -ErrorAction SilentlyContinue)) {
+            choco install llvm -y --no-progress
+          }
+          if (Test-Path 'C:\Program Files\LLVM\bin') {
+            Add-Content $env:GITHUB_PATH 'C:\Program Files\LLVM\bin'
+            RefreshEnv
+          } elseif (Test-Path 'C:\Program Files\LLVM') {
+            Add-Content $env:GITHUB_PATH 'C:\Program Files\LLVM'
+            RefreshEnv
+          }
+      - name: Install LLVM (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/llvm-as llvm-as /usr/bin/llvm-as-18 100
+      - name: Verify native toolchain (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-Command clang | Format-List Source,Version
+          clang --version
+          # llvm-as is preferred but optional: compiler verification falls back to clang -x ir -c.
+          $llvmAs = Get-Command llvm-as -ErrorAction SilentlyContinue
+          if ($llvmAs) { & $llvmAs.Source --version } else { Write-Host 'llvm-as unavailable; using clang IR fallback' }
+      - name: Verify native toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          clang --version
+          llvm-as --version
+      - name: cargo build
+        run: cargo build --workspace --locked
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo test --workspace --no-fail-fast
+        # 显式 SKIP 打印到日志（无工具链时），但 LLVM 已装——
+        # 验证层与 build e2e 必须真跑，不允许静默变绿
+        run: cargo test --workspace --no-fail-fast -- --nocapture
+      - name: cargo test --workspace --release
+        # M1 D5：算术 checked 在所有 build mode 生效；release 只关 T2
+        # generation（未实现）。debug/release 双跑断言 trap 行为一致。
+        run: cargo test --workspace --release
+      - name: syntaxgen --check
+        run: cargo run -p syntaxgen -- --check
+      - name: git diff --check
+        run: git diff --check
+  sanitizer:
+    # P0 Task 8：生成的 Starry 程序在 Linux 上的 ASan/UBSan 门禁
+    #（编译器本体不 sanitize；Windows freestanding 不支持，显式跳过）
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install LLVM (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/llvm-as llvm-as /usr/bin/llvm-as-18 100
+      - name: Verify native toolchain
+        run: |
+          clang --version
+          llvm-as --version
+      - name: ASan/UBSan corpus
+        run: cargo test -p starryc --test sanitizer --target-dir target/codex-check -- --nocapture

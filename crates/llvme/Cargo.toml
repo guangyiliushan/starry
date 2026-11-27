@@ -1,0 +1,13 @@
+[package]
+name = "llvme"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+irc = { path = "../irc" }
+sem = { path = "../sem" }
+ast = { path = "../ast" }
+
+[dev-dependencies]
+parser = { path = "../parser" }

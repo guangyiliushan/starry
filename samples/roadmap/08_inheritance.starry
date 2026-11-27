@@ -1,0 +1,19 @@
+// Phase 3 roadmap：单继承 + trait 组合（open/override/super/by 尚未实现，
+// 预期以 SemUnsupportedConstruct 稳定拒收；实现后移入顶层样例）
+
+open class Base(val x: int) {
+    open fun f(): int {
+        return self.x
+    }
+}
+
+class Derived(x: int) : Base(x) {
+    override fun f(): int {
+        return self.x + 1
+    }
+}
+
+fun main(): int {
+    val d = Derived(1)
+    print(d.f())
+}

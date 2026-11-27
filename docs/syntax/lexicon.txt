@@ -1,0 +1,70 @@
+# Starry v0.4 lexical source of truth.
+# Format: <kind> <lexeme> <rust-variant> <grammar-slot>
+# Only HARD keywords are lexer-reserved. MODIFIER and SLOT words remain
+# identifiers lexically and are classified by the parser in grammar slots.
+# 2026-11-24 D-014 keyword convergence: removed async/await (deferred to the
+# concurrency stage), const/inline/infix/vararg (no-ops) and the AOP/DI/spawn/
+# grow families; added `alias` (type alias) and `deinit` (class destructor).
+# Removed words live in docs/keyword-capability-plan-2026-11-24.md (Optional).
+# 2026-11-25: removed `namespace` (parse-only extern slot; no C++ FFI design).
+# 2026-11-25: removed `static` (top-level fun/val/var and package namespaces cover static members).
+
+# 35 globally reserved keywords.
+hard alias Alias global
+hard import Import global
+hard extern Extern global
+hard val Val global
+hard var Var global
+hard fun Fun global
+hard type Type global
+hard class Class global
+hard struct Struct global
+hard enum Enum global
+hard union Union global
+hard trait Trait global
+hard if If global
+hard else Else global
+hard when When global
+hard for For global
+hard while While global
+hard loop Loop global
+hard break Break global
+hard continue Continue global
+hard return Return global
+hard defer Defer global
+hard true True global
+hard false False global
+hard null Null global
+hard self Self_ global
+hard super Super global
+hard Self SelfType global
+hard unsafe Unsafe global
+hard dyn Dyn global
+hard as As global
+hard is Is global
+hard in In global
+
+hard where Where global
+hard mut Mut global
+
+# 10 modifier words, recognized only in a modifier list.
+modifier public Public modifier
+modifier private Private modifier
+modifier protected Protected modifier
+modifier internal Internal modifier
+modifier open Open modifier
+modifier abstract Abstract modifier
+modifier sealed Sealed modifier
+modifier override Override modifier
+modifier operator OperatorWord modifier
+modifier weak Weak modifier
+
+# 8 slot words, recognized only in their named parser slot.
+slot impl Impl declaration
+slot it It omitted_lambda_parameter
+slot move Move lambda_capture
+slot init Init class_initializer
+slot deinit Deinit class_deinitializer
+slot get Get accessor
+slot set Set accessor
+slot by By by_slot

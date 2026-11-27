@@ -1,0 +1,81 @@
+name: docs
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "site/**"
+      - "scripts/docs/**"
+      - ".github/workflows/docs.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "site/**"
+      - "scripts/docs/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: docs-pages
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/llvm-as llvm-as /usr/bin/llvm-as-18 100
+      - name: Build compiler
+        run: cargo build -p starryc --locked
+      - name: Check documentation
+        run: python3 scripts/docs/check.py all --starryc target/debug/starryc
+      - id: hugo-version
+        run: echo "version=$(cat site/.hugo-version)" >> "$GITHUB_OUTPUT"
+      - uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: ${{ steps.hugo-version.outputs.version }}
+          extended: true
+      - name: Build site
+        run: hugo --source site --destination site/public --cleanDestinationDir --minify
+      - name: Generate llms.txt
+        run: python3 scripts/docs/generate_llms.py --root . --out site/public/llms.txt
+      - name: Check llms.txt
+        run: python3 scripts/docs/check.py llms --root .
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: docs
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: hugo-version
+        run: echo "version=$(cat site/.hugo-version)" >> "$GITHUB_OUTPUT"
+      - uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: ${{ steps.hugo-version.outputs.version }}
+          extended: true
+      - name: Build Pages artifact
+        run: hugo --source site --destination site/public --cleanDestinationDir --minify --baseURL "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+      - name: Generate llms.txt
+        run: python3 scripts/docs/generate_llms.py --root . --out site/public/llms.txt
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/public
+      - id: deployment
+        uses: actions/deploy-pages@v4

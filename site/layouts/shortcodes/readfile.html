@@ -1,0 +1,4 @@
+{{ $resource := resources.Get (.Get "path") }}
+{{ if not $resource }}{{ errorf "missing mounted docs resource %q" (.Get "path") }}{{ end }}
+{{ $content := replaceRE `\(\*[\s\S]*?\*\)` "" $resource.Content }}
+<pre><code class="language-{{ .Get "lang" | default "text" }}">{{ $content | htmlEscape }}</code></pre>

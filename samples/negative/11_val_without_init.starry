@@ -1,0 +1,6 @@
+val x
+
+fun main() {
+    var y: int
+    y = 1
+}

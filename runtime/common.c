@@ -1,0 +1,370 @@
+#include "starry_runtime.h"
+
+static void fatal_alloc(void) {
+    rt_write_stderr("starry runtime: allocation failed\n", 35);
+    rt_fatal_exit(134u);
+}
+
+static SIZE_T cstr_len(const char *s) {
+    const char *p = s;
+    while (*p) p++;
+    return (SIZE_T)(p - s);
+}
+
+static void cstr_copy(char *dst, const char *src, SIZE_T n) {
+    for (SIZE_T i = 0; i < n; i++) dst[i] = src[i];
+}
+
+static char *from_buf(const char *buf, SIZE_T n) {
+    char *out = rt_alloc(n + 1);
+    cstr_copy(out, buf, n);
+    out[n] = 0;
+    return out;
+}
+
+static void write_str(const char *s) {
+    rt_write_stdout(s, cstr_len(s));
+}
+
+static void write_err(const char *s) {
+    rt_write_stderr(s, cstr_len(s));
+}
+
+static void write_line(const char *s) {
+    write_str(s);
+    write_str("\n");
+}
+
+static char *fmt_i64(long long v) {
+    char buf[32];
+    unsigned long long u;
+    int i = 32;
+    int neg = 0;
+    if (v < 0) {
+        neg = 1;
+        u = 0ULL - (unsigned long long)v;
+    } else {
+        u = (unsigned long long)v;
+    }
+    if (u == 0) return from_buf("0", 1);
+    while (u) {
+        buf[--i] = (char)('0' + (int)(u % 10ULL));
+        u /= 10ULL;
+    }
+    if (neg) buf[--i] = '-';
+    return from_buf(buf + i, (SIZE_T)(32 - i));
+}
+
+// %g 风格：`precision` 位有效数字。指数落在 [-4, precision) 用普通十进制
+// 记法，否则用科学记数法；有效数字的尾随零先去掉，所以 100.0 → "100"、
+// 0.5 → "0.5"、3.25 → "3.25"。输出确定性：同一输入恒同一串。
+static char *fmt_double(double v, int precision) {
+    char buf[96];
+    int i = 0;
+    if (v != v) return from_buf("nan", 3);
+    if (v == 1.0 / 0.0) return from_buf("inf", 3);
+    if (v == -1.0 / 0.0) return from_buf("-inf", 4);
+    if (v == 0.0) return from_buf(v < 0.0 ? "-0" : "0", v < 0.0 ? 2 : 1);
+    if (v < 0.0) {
+        buf[i++] = '-';
+        v = -v;
+    }
+    int e = 0;
+    while (v >= 10.0) { v /= 10.0; e++; }
+    while (v < 1.0) { v *= 10.0; e--; }
+    unsigned long long scale = 1;
+    for (int k = 1; k < precision; k++) scale *= 10ULL;
+    unsigned long long rounded = (unsigned long long)(v * (double)scale + 0.5);
+    if (rounded == scale * 10ULL) { rounded = scale; e++; }
+
+    // 有效数字，高位在前；rev 是低位在前，所以「尾随零」在 rev 头部
+    char digits[32];
+    int dn = 0;
+    {
+        char rev[32];
+        int rn = 0;
+        unsigned long long u = rounded;
+        while (u) { rev[rn++] = (char)('0' + (int)(u % 10ULL)); u /= 10ULL; }
+        // rounded ∈ [scale, 10·scale) 恒有 precision 位，无需补位
+        int skip = 0;
+        while (skip + 1 < rn && rev[skip] == '0') skip++;
+        for (int k = 0; k < rn - skip; k++) digits[k] = rev[rn - 1 - k];
+        dn = rn - skip;
+    }
+
+    if (e >= -4 && e < precision) {
+        if (e < 0) {
+            // 0.<-e-1 个 0><digits>
+            buf[i++] = '0';
+            buf[i++] = '.';
+            for (int k = 0; k < -e - 1; k++) buf[i++] = '0';
+            for (int k = 0; k < dn; k++) buf[i++] = digits[k];
+        } else {
+            int int_len = e + 1;
+            if (int_len >= dn) {
+                // 整数位不够长：补零到 e+1 位，无小数部
+                for (int k = 0; k < dn; k++) buf[i++] = digits[k];
+                for (int k = dn; k < int_len; k++) buf[i++] = '0';
+            } else {
+                for (int k = 0; k < int_len; k++) buf[i++] = digits[k];
+                buf[i++] = '.';
+                for (int k = int_len; k < dn; k++) buf[i++] = digits[k];
+            }
+        }
+    } else {
+        // 科学记数法：d[.rest]e<exp>
+        buf[i++] = digits[0];
+        if (dn > 1) {
+            buf[i++] = '.';
+            for (int k = 1; k < dn; k++) buf[i++] = digits[k];
+        }
+        buf[i++] = 'e';
+        if (e < 0) { buf[i++] = '-'; e = -e; }
+        char eb[12];
+        int en = 0;
+        while (e) { eb[en++] = (char)('0' + e % 10); e /= 10; }
+        while (en) buf[i++] = eb[--en];
+    }
+    return from_buf(buf, (SIZE_T)i);
+}
+
+static char *dup_string(const char *s) {
+    SIZE_T n = cstr_len(s);
+    char *out = rt_alloc(n + 1);
+    cstr_copy(out, s, n);
+    out[n] = 0;
+    return out;
+}
+
+// 128 位十进制：按位长除法（避免 __udivti3 依赖 compiler-rt）。
+static char *fmt_u128(unsigned long long hi, unsigned long long lo) {
+    char rev[48];
+    int rn = 0;
+    for (;;) {
+        if (hi == 0 && lo == 0) break;
+        unsigned long long qhi = 0, qlo = 0, rem = 0;
+        for (int i = 127; i >= 0; i--) {
+            unsigned long long bit = (i >= 64) ? ((hi >> (i - 64)) & 1ULL) : ((lo >> i) & 1ULL);
+            rem = (rem << 1) | bit;
+            unsigned long long qb = rem >= 10;
+            if (qb) rem -= 10;
+            if (qb) {
+                if (i >= 64) qhi |= 1ULL << (i - 64);
+                else qlo |= 1ULL << i;
+            }
+        }
+        rev[rn++] = (char)('0' + (int)rem);
+        hi = qhi;
+        lo = qlo;
+    }
+    if (rn == 0) rev[rn++] = '0';
+    char *out = rt_alloc((SIZE_T)rn + 1);
+    for (int i = 0; i < rn; i++) out[i] = rev[rn - 1 - i];
+    out[rn] = 0;
+    return out;
+}
+
+static char *fmt_i128(unsigned long long hi, unsigned long long lo) {
+    int neg = (hi >> 63) != 0;
+    if (neg) {
+        unsigned long long old = lo;
+        lo = ~lo + 1ULL;
+        hi = ~hi + (old == 0 ? 1ULL : 0ULL);
+    }
+    char *digits = fmt_u128(hi, lo);
+    if (!neg) return digits;
+    SIZE_T n = cstr_len(digits);
+    char *out = rt_alloc(n + 2);
+    out[0] = '-';
+    cstr_copy(out + 1, digits, n);
+    out[n + 1] = 0;
+    return out;
+}
+
+// UTF-8 编码（char 的码点 → 字符串）
+static char *utf8_from_cp(unsigned int cp) {
+    char buf[5];
+    int n = 0;
+    if (cp < 0x80) {
+        buf[n++] = (char)cp;
+    } else if (cp < 0x800) {
+        buf[n++] = (char)(0xC0 | (cp >> 6));
+        buf[n++] = (char)(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        buf[n++] = (char)(0xE0 | (cp >> 12));
+        buf[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[n++] = (char)(0x80 | (cp & 0x3F));
+    } else {
+        buf[n++] = (char)(0xF0 | (cp >> 18));
+        buf[n++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        buf[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[n++] = (char)(0x80 | (cp & 0x3F));
+    }
+    return from_buf(buf, (SIZE_T)n);
+}
+
+char *starry_str_conv_i64(long long v) { return fmt_i64(v); }
+char *starry_str_conv_i32(int v) { return fmt_i64(v); }
+char *starry_str_conv_i16(short v) { return fmt_i64(v); }
+char *starry_str_conv_i8(signed char v) { return fmt_i64(v); }
+char *starry_str_conv_i1(int v) { return dup_string(v ? "true" : "false"); }
+char *starry_str_conv_i128(unsigned long long hi, unsigned long long lo) { return fmt_i128(hi, lo); }
+char *starry_str_conv_char(int cp) { return utf8_from_cp((unsigned int)cp); }
+char *starry_str_conv_f64(double v) { return fmt_double(v, 15); }
+char *starry_str_conv_f32(float v) { return fmt_double((double)v, 7); }
+char *starry_str_conv_string(const char *s) { return dup_string(s); }
+
+int starry_str_eq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+char *starry_str_concat(const char *a, const char *b) {
+    SIZE_T na = cstr_len(a), nb = cstr_len(b);
+    char *out = rt_alloc(na + nb + 1);
+    cstr_copy(out, a, na);
+    cstr_copy(out + na, b, nb);
+    out[na + nb] = 0;
+    return out;
+}
+
+static void print_line_owned(char *s) {
+    write_line(s);
+    rt_free(s);
+}
+
+void starry_print_i64(long long v) { print_line_owned(fmt_i64(v)); }
+void starry_print_i32(int v) { print_line_owned(fmt_i64(v)); }
+void starry_print_i16(short v) { print_line_owned(fmt_i64(v)); }
+void starry_print_i8(signed char v) { print_line_owned(fmt_i64(v)); }
+void starry_print_i128(unsigned long long hi, unsigned long long lo) {
+    print_line_owned(fmt_i128(hi, lo));
+}
+void starry_print_i1(int v) { write_line(v ? "true" : "false"); }
+void starry_print_char(int cp) {
+    char *s = utf8_from_cp((unsigned int)cp);
+    write_str(s);
+    write_str("\n");
+    rt_free(s);
+}
+void starry_print_f64(double v) { print_line_owned(fmt_double(v, 15)); }
+void starry_print_f32(float v) { print_line_owned(fmt_double((double)v, 7)); }
+/* Callers may pass either an LLVM string constant or an owned string value;
+ * ownership tracking for dynamic strings is not part of this runtime ABI. */
+void starry_print_string(const char *s) { write_line(s); }
+/* Owned strings are compiler allocations from StrConv/StrConcat; static IR
+ * string constants remain borrowed and continue through starry_print_string. */
+void starry_free_string(char *s) {
+    rt_free(s);
+}
+
+void starry_print_owned_string(char *s) {
+    write_line(s);
+    rt_free(s);
+}
+
+/* M1（D2/D4 契约）：受检算术 trap 统一入口——llvme 的受检分支调用。
+ * noreturn；向 stderr 打印区分后的原因 + 函数名（源位置近似）。
+ * 不执行 defer/ARC 清理：这是 fatal abort，不是可恢复 panic。
+ * code: 1 add ovf / 2 sub ovf / 3 mul ovf / 4 div by zero /
+ *       5 div ovf (MIN/-1) / 6 rem by zero / 7 rem ovf */
+void starry_overflow_panic(signed char op, const char *fun) {
+    const char *msg = "overflow: +";
+    if (op == 2) msg = "overflow: -";
+    else if (op == 3) msg = "overflow: *";
+    else if (op == 4) msg = "division by zero: /";
+    else if (op == 5) msg = "overflow: /";
+    else if (op == 6) msg = "remainder by zero: %";
+    else if (op == 7) msg = "overflow: %";
+    write_err(msg);
+    write_err(" in ");
+    write_err(fun);
+    write_err("\n");
+    rt_fatal_exit(134u);
+}
+
+/* M4 slice 1：class 对象 + ARC 头（R3 线程本地非原子）。
+ * header 布局定案 24B：strong / weak / meta。Phase 3a 中 class meta 是
+ * TypeInfo*；闭包 box 继续使用裸 deinit 回调并经 alloc_box 分配。 */
+typedef struct StarryTypeInfo StarryTypeInfo;
+struct StarryTypeInfo {
+    void (*deinit)(void *);
+    void *vtable;
+    unsigned long long type_id;
+    StarryTypeInfo *parent;
+};
+
+typedef struct StarryArcHdr {
+    long long strong;
+    long long weak;
+    void *meta;
+} StarryArcHdr;
+
+void *starry_alloc_object(unsigned long long payload_bytes, StarryTypeInfo *type_info) {
+    SIZE_T total = sizeof(StarryArcHdr) + payload_bytes;
+    StarryArcHdr *h = (StarryArcHdr *)rt_alloc(total);
+    h->strong = 1;
+    h->weak = 0;
+    h->meta = (void *)type_info;
+    return h + 1;
+}
+
+void *starry_alloc_box(unsigned long long payload_bytes, void (*deinit)(void *)) {
+    SIZE_T total = sizeof(StarryArcHdr) + payload_bytes;
+    StarryArcHdr *h = (StarryArcHdr *)rt_alloc(total);
+    h->strong = 1;
+    h->weak = 0;
+    h->meta = (void *)deinit;
+    return h + 1;
+}
+
+void *starry_retain(void *p) {
+    if (p) ((StarryArcHdr *)p - 1)->strong++;
+    return p;
+}
+
+void starry_release(void *p) {
+    StarryArcHdr *h;
+    if (!p) return;
+    h = (StarryArcHdr *)p - 1;
+    if (--h->strong == 0) {
+        /* meta is a raw deinit for closure boxes and a TypeInfo* for classes. */
+        if (h->meta) (*(void (*)(void *))h->meta)(p);
+        if (h->weak == 0) rt_free(h);
+    }
+}
+void starry_release_class(void *p) {
+    StarryArcHdr *h;
+    if (!p) return;
+    h = (StarryArcHdr *)p - 1;
+    if (--h->strong == 0) {
+        StarryTypeInfo *ti = (StarryTypeInfo *)h->meta;
+        if (ti && ti->deinit) ti->deinit(p);
+        if (h->weak == 0) rt_free(h);
+    }
+}
+
+/* M4 slice 3：weak var——weak++ / weak--（strong==0 && weak==0 时释放） */
+void *starry_weak_upgrade(void *p) {
+    StarryArcHdr *h;
+    if (!p) return 0;
+    h = (StarryArcHdr *)p - 1;
+    if (h->strong == 0) return 0;
+    h->strong++;
+    return p;
+}
+
+void *starry_weak_retain(void *p) {
+    StarryArcHdr *h;
+    if (!p) return p;
+    h = (StarryArcHdr *)p - 1;
+    h->weak++;
+    return p;
+}
+
+void starry_weak_drop(void *p) {
+    StarryArcHdr *h;
+    if (!p) return;
+    h = (StarryArcHdr *)p - 1;
+    if (--h->weak == 0 && h->strong == 0) rt_free(h);
+}
