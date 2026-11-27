@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "locales": ["en", "zh-cn"],
+  "defaultLocale": "en",
+  "versions": [],
+  "pages": []
+}
