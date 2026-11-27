@@ -46,6 +46,22 @@
       "roles": [
         "lookup"
       ]
+    },
+    {
+      "id": "language/control-flow-and-patterns",
+      "path": "language/control-flow-and-patterns",
+      "type": "reference",
+      "roles": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "language/functions-and-closures",
+      "path": "language/functions-and-closures",
+      "type": "reference",
+      "roles": [
+        "lookup"
+      ]
     }
   ]
 }
