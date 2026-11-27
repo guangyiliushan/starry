@@ -3,5 +3,24 @@
   "locales": ["en", "zh-cn"],
   "defaultLocale": "en",
   "versions": [],
-  "pages": []
+  "pages": [
+    {
+      "id": "index",
+      "path": "index",
+      "type": "overview",
+      "roles": ["all"]
+    },
+    {
+      "id": "start/install",
+      "path": "start/install",
+      "type": "tutorial",
+      "roles": ["newcomer"]
+    },
+    {
+      "id": "start/tutorial",
+      "path": "start/tutorial",
+      "type": "tutorial",
+      "roles": ["newcomer"]
+    }
+  ]
 }

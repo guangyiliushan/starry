@@ -46,7 +46,7 @@ starryc build <dir|starry.toml> [out]  # multi-file: manifest = package identity
 `check`, `irc`, `opt`, `llvme`, and `build` exit `0` when clean and `1` on source
 diagnostics. Diagnostics are printed as `path:line:col: Code: message`.
 
-New to the language? Start with [docs/tutorial.md](docs/tutorial.md).
+New to the language? Start with [docs/en/start/tutorial.md](docs/en/start/tutorial.md).
 
 ## Sample corpus
 

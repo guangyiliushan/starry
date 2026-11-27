@@ -36,7 +36,8 @@ LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 FENCE_RE = re.compile(r"^```([^\n]*)\n(.*?)\n?```$", re.DOTALL | re.MULTILINE)
 CODE_FENCE_LANGUAGES = {"starry", "bash", "toml", "text", "ebnf"}
 EXECUTABLE_STARRY_KINDS = {"check", "run", "reject"}
-Runner = subprocess.run
+def _real_runner(command: list[str], cwd: str, text_input: str | None = None):
+    return subprocess.run(command, cwd=cwd, text=True, input=text_input, capture_output=True)
 
 
 @dataclass(frozen=True)
@@ -189,7 +190,7 @@ def check_links(root: Path, manifest: dict) -> list[str]:
             else:
                 candidate = file.parent / clean
             candidate = candidate.resolve()
-            docs_root = (root / "docs" / manifest["defaultLocale"]).resolve()
+            docs_root = (root / "docs" / file.relative_to(root / "docs").parts[0]).resolve()
             try:
                 candidate.relative_to(docs_root)
             except ValueError:
@@ -202,6 +203,11 @@ def check_links(root: Path, manifest: dict) -> list[str]:
             errors.append(f"{file.relative_to(root)} has missing link {target!r}")
     return errors
 
+
+def _diagnostic(text: str) -> str:
+    normalized = _normalized(text)
+    marker = "program.starry"
+    return normalized[normalized.find(marker):] if marker in normalized else normalized
 
 def _normalized(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -223,14 +229,14 @@ def _run_one_example(
         command = [starryc, "check", str(source)]
         completed = runner(command, cwd=str(cwd), text_input=None)
         if mode == "reject":
-            output = _normalized(completed.stderr or completed.stdout)
+            output = _diagnostic(completed.stderr or completed.stdout)
             if completed.returncode == 0:
                 errors.append(f"{page}: reject example unexpectedly compiled")
             elif expected is None or output != _normalized(expected.code):
                 errors.append(f"{page}: diagnostic mismatch\nexpected:\n{_normalized(expected.code if expected else '')}\nactual:\n{output}")
             return errors
         if completed.returncode != 0:
-            output = _normalized(completed.stderr or completed.stdout)
+            output = _diagnostic(completed.stderr or completed.stdout)
             errors.append(f"{page}: check failed\n{output}")
             return errors
         if mode == "check":
@@ -251,7 +257,7 @@ def _run_one_example(
     return errors
 
 
-def run_examples(root: Path, manifest: dict, starryc: str, runner=Runner) -> list[str]:
+def run_examples(root: Path, manifest: dict, starryc: str, runner=_real_runner) -> list[str]:
     errors: list[str] = []
     for page in manifest.get("pages", []):
         relative_path = page.get("path", "")
