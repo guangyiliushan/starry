@@ -11,6 +11,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from check import (
+    check_llms,
     check_links,
     check_parity,
     check_spec,
@@ -43,7 +44,7 @@ class ManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             write(root / "site/data/manifest.json", "{}")
-            write(root / "docs/en/index.md")
+            write(root / "docs/en/_index.md")
             errors = validate_manifest(load_manifest(root / "site/data/manifest.json"), root)
             self.assertIn("manifest.schema must be 1", errors)
 
@@ -58,23 +59,23 @@ class ManifestTests(unittest.TestCase):
     def test_parity_detects_missing_zh_cn(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            write(root / "docs/en/index.md")
+            write(root / "docs/en/_index.md")
             errors = check_parity(root, manifest([{"path": "index"}]))
-            self.assertEqual(errors, ["zh-cn/index.md is missing"])
+            self.assertEqual(errors, ["zh-cn/_index.md is missing"])
 
     def test_terms_detects_internal_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            write(root / "docs/en/index.md", "See crates/ast.")
-            write(root / "docs/zh-cn/index.md")
+            write(root / "docs/en/_index.md", "See crates/ast.")
+            write(root / "docs/zh-cn/_index.md")
             errors = check_terms(root, manifest([{"path": "index"}]))
             self.assertTrue(any("crates/" in error for error in errors))
 
     def test_links_detects_missing_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            write(root / "docs/en/index.md", "[missing](missing.md)")
-            write(root / "docs/zh-cn/index.md")
+            write(root / "docs/en/_index.md", "[missing](missing.md)")
+            write(root / "docs/zh-cn/_index.md")
             errors = check_links(root, manifest([{"path": "index"}]))
             self.assertTrue(any("missing link" in error for error in errors))
 
@@ -89,6 +90,16 @@ class SpecTests(unittest.TestCase):
             write(root / "docs/zh-cn/spec/grammar.md", "missing")
             errors = check_spec(root, data, syntax_check=False)
             self.assertTrue(any("missing required include" in error for error in errors))
+
+
+class LlmsTests(unittest.TestCase):
+    def test_llms_contains_every_public_page(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = manifest([{"path": "index"}])
+            write(root / "site/public/llms.txt", "wrong")
+            errors = check_llms(root, data)
+            self.assertTrue(any("has 0 entries for en/index" in error for error in errors))
 
 
 class ExampleTests(unittest.TestCase):
@@ -106,8 +117,8 @@ class ExampleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             data = manifest([{"path": "index"}])
-            write(root / "docs/en/index.md", "```starry\nval x = 1\n```")
-            write(root / "docs/zh-cn/index.md", "```starry\nval x = 2\n```")
+            write(root / "docs/en/_index.md", "```starry\nval x = 1\n```")
+            write(root / "docs/zh-cn/_index.md", "```starry\nval x = 2\n```")
             errors = check_parity(root, data)
             self.assertTrue(any("code fence" in error for error in errors))
 
@@ -116,8 +127,8 @@ class ExampleTests(unittest.TestCase):
             root = Path(directory)
             data = manifest([{"path": "index"}])
             source = "```starry run\nfun main(): int {\n    print(\"ok\")\n    return 0\n}\n```\n\n```text\nnope\n```\n"
-            write(root / "docs/en/index.md", source)
-            write(root / "docs/zh-cn/index.md", source)
+            write(root / "docs/en/_index.md", source)
+            write(root / "docs/zh-cn/_index.md", source)
 
             def runner(command, cwd, text_input=None):
                 if len(command) > 1 and command[1] == "build":
@@ -132,8 +143,8 @@ class ExampleTests(unittest.TestCase):
             root = Path(directory)
             data = manifest([{"path": "index"}])
             source = "```starry reject\nval x\n```\n\n```text\nprogram.starry:1:7: SemTypeMismatch: type mismatch\n```\n"
-            write(root / "docs/en/index.md", source)
-            write(root / "docs/zh-cn/index.md", source)
+            write(root / "docs/en/_index.md", source)
+            write(root / "docs/zh-cn/_index.md", source)
 
             def runner(command, cwd, text_input=None):
                 return CompletedProcess(command, 1, "", "")

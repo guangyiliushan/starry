@@ -1,0 +1,11 @@
+{{ define "main" }}
+<article>
+  <h1>{{ site.Title }}</h1>
+  <p>Official Starry documentation is available in English and Simplified Chinese.</p>
+  <ul>
+    {{ range .AllTranslations }}
+    <li><a href="{{ .RelPermalink }}">{{ .Language.Label }}</a></li>
+    {{ end }}
+  </ul>
+</article>
+{{ end }}

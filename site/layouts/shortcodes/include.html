@@ -1,0 +1,4 @@
+{{ $resource := resources.Get (.Get 0) }}
+{{ if not $resource }}{{ errorf "missing mounted docs resource %q" (.Get 0) }}{{ end }}
+{{ $markdown := replaceRE `(?s)^#[^\n]+\n` "" $resource.Content }}
+<pre><code class="language-markdown">{{ $markdown | htmlEscape }}</code></pre>

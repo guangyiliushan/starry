@@ -1,0 +1,16 @@
+{{ $manifest := hugo.Data.manifest }}
+<nav aria-label="Documentation">
+  <ul>
+    {{ range $item := $manifest.pages }}
+      {{ if eq $item.path "index" }}
+        {{ $page := site.Home }}
+        <li><a href="{{ $page.RelPermalink }}">{{ $page.Title }}</a></li>
+      {{ else }}
+        {{ $page := site.GetPage (printf "/%s.md" $item.path) }}
+        {{ if $page }}
+          <li><a href="{{ $page.RelPermalink }}">{{ $page.Title }}</a></li>
+        {{ end }}
+      {{ end }}
+    {{ end }}
+  </ul>
+</nav>

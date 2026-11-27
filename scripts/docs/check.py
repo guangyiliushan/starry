@@ -53,7 +53,8 @@ def load_manifest(path: Path) -> dict:
 
 
 def page_path(root: Path, locale: str, relative_path: str) -> Path:
-    return root / "docs" / locale / f"{relative_path}.md"
+    filename = "_index.md" if relative_path == "index" else f"{relative_path}.md"
+    return root / "docs" / locale / filename
 
 
 def extract_fences(text: str) -> list[Fence]:
@@ -122,7 +123,7 @@ def validate_manifest(manifest: dict, root: Path) -> list[str]:
             locale_dir = root / "docs" / locale
             if not locale_dir.is_dir():
                 continue
-            allowed = {f"{page.get('path')}.md" for page in pages if isinstance(page.get("path"), str)}
+            allowed = {"_index.md" if page.get("path") == "index" else f"{page.get('path')}.md" for page in pages if isinstance(page.get("path"), str)}
             actual = {str(path.relative_to(locale_dir)).replace("\\", "/") for path in locale_dir.rglob("*.md")}
             for extra in sorted(actual - allowed):
                 errors.append(f"{locale}: unlisted page {extra}")
@@ -137,7 +138,7 @@ def check_parity(root: Path, manifest: dict) -> list[str]:
         for locale in manifest.get("locales", []):
             file = page_path(root, locale, relative_path)
             if not file.is_file():
-                errors.append(f"{locale}/{relative_path}.md is missing")
+                errors.append(f"{locale}/{page_path(root, locale, relative_path).name} is missing")
                 continue
             locale_fences[locale] = extract_fences(file.read_text(encoding="utf-8"))
         if len(locale_fences) < 2:
@@ -283,7 +284,7 @@ SPEC_INCLUDES = {
         Path("docs/syntax/starry.ebnf"),
     ),
     "spec/lexicon": (
-        '{{% include "syntax/generated/lexicon.md" %}}',
+        '{{< include "syntax/generated/lexicon.md" >}}',
         Path("docs/syntax/generated/lexicon.md"),
     ),
 }
@@ -320,6 +321,26 @@ def check_spec(root: Path, manifest: dict, syntax_check: bool = True) -> list[st
     return errors
 
 
+def check_llms(root: Path, manifest: dict, output: Path | None = None) -> list[str]:
+    file = output or root / "site/public/llms.txt"
+    if not file.is_file():
+        return [f"llms.txt is missing: {file.relative_to(root)}"]
+    text = file.read_text(encoding="utf-8")
+    errors: list[str] = []
+    lowered = text.lower()
+    for term in FORBIDDEN_TERMS:
+        if term.lower() in lowered:
+            errors.append(f"llms.txt contains forbidden term {term!r}")
+    for page in manifest.get("pages", []):
+        path = page.get("path", "")
+        for locale in manifest.get("locales", []):
+            entry = f"](/{locale}/)" if path == "index" else f"](/{locale}/{path}/)"
+            count = text.count(entry)
+            if count != 1:
+                errors.append(f"llms.txt has {count} entries for {locale}/{path}")
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -337,7 +358,7 @@ def main() -> int:
         "links": lambda: check_links(args.root, manifest),
         "examples": lambda: run_examples(args.root, manifest, str(args.starryc)),
         "spec": lambda: check_spec(args.root, manifest),
-        "llms": lambda: [],
+        "llms": lambda: check_llms(args.root, manifest),
     }
     names = list(checks) if args.command == "all" else [args.command]
     if args.command == "all":

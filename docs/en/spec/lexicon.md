@@ -7,4 +7,4 @@ description = "The current Starry lexical vocabulary."
 
 This page renders the current generated vocabulary directly.
 
-{{% include "syntax/generated/lexicon.md" %}}
+{{< include "syntax/generated/lexicon.md" >}}
