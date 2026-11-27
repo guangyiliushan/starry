@@ -122,6 +122,25 @@ class ExampleTests(unittest.TestCase):
             errors = check_parity(root, data)
             self.assertTrue(any("code fence" in error for error in errors))
 
+    def test_examples_resolve_compiler_relative_to_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = manifest([{"path": "start/tutorial"}])
+            write(root / "docs/en/start/tutorial.md", "```starry check\nfun main(): int {\n    return 0\n}\n```\n")
+            write(root / "docs/zh-cn/start/tutorial.md", "```starry check\nfun main(): int {\n    return 0\n}\n```\n")
+            write(root / "target/debug/starryc")
+            commands = []
+
+            def runner(command, cwd, text_input=None):
+                commands.append(command)
+                return CompletedProcess(command, 0, "", "")
+
+            errors = run_examples(root, data, "target/debug/starryc", runner=runner)
+            self.assertEqual(errors, [])
+            self.assertEqual(len(commands), 1)
+            self.assertTrue(Path(commands[0][0]).is_absolute())
+            self.assertTrue(Path(commands[0][0]).is_file())
+
     def test_positive_example_must_match_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

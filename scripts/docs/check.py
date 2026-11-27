@@ -259,6 +259,11 @@ def _run_one_example(
 
 
 def run_examples(root: Path, manifest: dict, starryc: str, runner=_real_runner) -> list[str]:
+    compiler_path = Path(starryc)
+    if not compiler_path.is_absolute():
+        candidate = root / compiler_path
+        if candidate.exists():
+            starryc = str(candidate.resolve())
     errors: list[str] = []
     for page in manifest.get("pages", []):
         relative_path = page.get("path", "")
