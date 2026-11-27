@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check import (
     check_links,
     check_parity,
+    check_spec,
     check_terms,
     extract_fences,
     load_manifest,
@@ -76,6 +77,18 @@ class ManifestTests(unittest.TestCase):
             write(root / "docs/zh-cn/index.md")
             errors = check_links(root, manifest([{"path": "index"}]))
             self.assertTrue(any("missing link" in error for error in errors))
+
+
+class SpecTests(unittest.TestCase):
+    def test_spec_detects_missing_include(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = manifest([{"path": "spec/grammar", "type": "spec", "roles": ["lookup"]}])
+            write(root / "docs/syntax/starry.ebnf", "Grammar")
+            write(root / "docs/en/spec/grammar.md", "missing")
+            write(root / "docs/zh-cn/spec/grammar.md", "missing")
+            errors = check_spec(root, data, syntax_check=False)
+            self.assertTrue(any("missing required include" in error for error in errors))
 
 
 class ExampleTests(unittest.TestCase):

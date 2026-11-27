@@ -277,6 +277,49 @@ def run_examples(root: Path, manifest: dict, starryc: str, runner=_real_runner) 
     return errors
 
 
+SPEC_INCLUDES = {
+    "spec/grammar": (
+        '{{< readfile path="syntax/starry.ebnf" lang="ebnf" >}}',
+        Path("docs/syntax/starry.ebnf"),
+    ),
+    "spec/lexicon": (
+        '{{% include "syntax/generated/lexicon.md" %}}',
+        Path("docs/syntax/generated/lexicon.md"),
+    ),
+}
+
+
+def check_spec(root: Path, manifest: dict, syntax_check: bool = True) -> list[str]:
+    errors: list[str] = []
+    for page_path_value, (required_include, canonical_path) in SPEC_INCLUDES.items():
+        canonical = root / canonical_path
+        if not canonical.is_file():
+            errors.append(f"spec canonical source is missing: {canonical_path}")
+        snippets: dict[str, bool] = {}
+        for locale in manifest.get("locales", []):
+            file = page_path(root, locale, page_path_value)
+            if not file.is_file():
+                errors.append(f"{locale}/{page_path_value}.md is missing")
+                continue
+            text = file.read_text(encoding="utf-8")
+            snippets[locale] = required_include in text
+            if not snippets[locale]:
+                errors.append(f"{locale}/{page_path_value}.md missing required include {required_include!r}")
+        if len(set(snippets.values())) > 1:
+            errors.append(f"{page_path_value} spec includes differ across locales")
+    if syntax_check:
+        completed = subprocess.run(
+            ["cargo", "run", "-p", "syntaxgen", "--", "--check"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+        )
+        if completed.returncode != 0:
+            output = completed.stdout + completed.stderr
+            errors.append(f"syntaxgen check failed: {_normalized(output)}")
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -293,7 +336,7 @@ def main() -> int:
         "terms": lambda: check_terms(args.root, manifest),
         "links": lambda: check_links(args.root, manifest),
         "examples": lambda: run_examples(args.root, manifest, str(args.starryc)),
-        "spec": lambda: [],
+        "spec": lambda: check_spec(args.root, manifest),
         "llms": lambda: [],
     }
     names = list(checks) if args.command == "all" else [args.command]

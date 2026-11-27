@@ -86,6 +86,54 @@
       "roles": [
         "lookup"
       ]
+    },
+    {
+      "id": "reference/cli",
+      "path": "reference/cli",
+      "type": "reference",
+      "roles": [
+        "builder"
+      ]
+    },
+    {
+      "id": "reference/diagnostics",
+      "path": "reference/diagnostics",
+      "type": "reference",
+      "roles": [
+        "debugger"
+      ]
+    },
+    {
+      "id": "reference/packages",
+      "path": "reference/packages",
+      "type": "reference",
+      "roles": [
+        "builder"
+      ]
+    },
+    {
+      "id": "spec/grammar",
+      "path": "spec/grammar",
+      "type": "spec",
+      "roles": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "spec/lexicon",
+      "path": "spec/lexicon",
+      "type": "spec",
+      "roles": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "glossary",
+      "path": "glossary",
+      "type": "glossary",
+      "roles": [
+        "all"
+      ]
     }
   ]
 }
