@@ -34,7 +34,6 @@ FORBIDDEN_TERMS = (
 )
 LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 FENCE_RE = re.compile(r"^```([^\n]*)\n(.*?)\n?```$", re.DOTALL | re.MULTILINE)
-CODE_FENCE_LANGUAGES = {"starry", "bash", "toml", "text", "ebnf"}
 EXECUTABLE_STARRY_KINDS = {"check", "run", "reject"}
 NON_EXECUTABLE_STARRY_KINDS = {"syntax"}
 def _real_runner(command: list[str], cwd: str, text_input: str | None = None):

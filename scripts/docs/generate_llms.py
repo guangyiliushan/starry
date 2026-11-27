@@ -7,7 +7,6 @@ import json
 import tomllib
 from pathlib import Path
 
-LOCALE_LABELS = {"en": "English", "zh-cn": "Simplified Chinese"}
 
 
 def parse_frontmatter(path: Path) -> dict:
