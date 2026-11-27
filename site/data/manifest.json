@@ -1,6 +1,9 @@
 {
   "schema": 1,
-  "locales": ["en", "zh-cn"],
+  "locales": [
+    "en",
+    "zh-cn"
+  ],
   "defaultLocale": "en",
   "versions": [],
   "pages": [
@@ -8,19 +11,41 @@
       "id": "index",
       "path": "index",
       "type": "overview",
-      "roles": ["all"]
+      "roles": [
+        "all"
+      ]
     },
     {
       "id": "start/install",
       "path": "start/install",
       "type": "tutorial",
-      "roles": ["newcomer"]
+      "roles": [
+        "newcomer"
+      ]
     },
     {
       "id": "start/tutorial",
       "path": "start/tutorial",
       "type": "tutorial",
-      "roles": ["newcomer"]
+      "roles": [
+        "newcomer"
+      ]
+    },
+    {
+      "id": "language/syntax",
+      "path": "language/syntax",
+      "type": "reference",
+      "roles": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "language/types",
+      "path": "language/types",
+      "type": "reference",
+      "roles": [
+        "lookup"
+      ]
     }
   ]
 }
