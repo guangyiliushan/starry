@@ -5,6 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 MANIFEST_PATH = Path("site/data/manifest.json")
@@ -30,6 +33,16 @@ FORBIDDEN_TERMS = (
     "TBD",
 )
 LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+FENCE_RE = re.compile(r"^```([^\n]*)\n(.*?)\n?```$", re.DOTALL | re.MULTILINE)
+CODE_FENCE_LANGUAGES = {"starry", "bash", "toml", "text", "ebnf"}
+EXECUTABLE_STARRY_KINDS = {"check", "run", "reject"}
+Runner = subprocess.run
+
+
+@dataclass(frozen=True)
+class Fence:
+    info: str
+    code: str
 
 
 def load_manifest(path: Path) -> dict:
@@ -39,6 +52,24 @@ def load_manifest(path: Path) -> dict:
 
 def page_path(root: Path, locale: str, relative_path: str) -> Path:
     return root / "docs" / locale / f"{relative_path}.md"
+
+
+def extract_fences(text: str) -> list[Fence]:
+    return [Fence(info.strip(), code) for info, code in FENCE_RE.findall(text)]
+
+
+def validate_example_pairs(page: str, fences: list[Fence]) -> list[str]:
+    errors: list[str] = []
+    for index, fence in enumerate(fences):
+        if not fence.info.startswith("starry"):
+            continue
+        mode = fence.info[len("starry"):].strip()
+        if mode not in EXECUTABLE_STARRY_KINDS:
+            errors.append(f"{page}: unsupported Starry fence {fence.info!r}")
+        if mode in {"run", "reject"}:
+            if index + 1 >= len(fences) or fences[index + 1].info != "text":
+                errors.append(f"{page}: {fence.info!r} must be followed by a text fence")
+    return errors
 
 
 def validate_manifest(manifest: dict, root: Path) -> list[str]:
@@ -85,8 +116,8 @@ def validate_manifest(manifest: dict, root: Path) -> list[str]:
         if not isinstance(roles, list) or not roles or any(role not in ROLES for role in roles):
             errors.append(f"pages[{index}].roles is invalid")
     if isinstance(locales, list):
-        locale_paths = [root / "docs" / locale for locale in locales]
-        for locale, locale_dir in zip(locales, locale_paths):
+        for locale in locales:
+            locale_dir = root / "docs" / locale
             if not locale_dir.is_dir():
                 continue
             allowed = {f"{page.get('path')}.md" for page in pages if isinstance(page.get("path"), str)}
@@ -100,9 +131,25 @@ def check_parity(root: Path, manifest: dict) -> list[str]:
     errors: list[str] = []
     for page in manifest.get("pages", []):
         relative_path = page.get("path", "")
+        locale_fences: dict[str, list[Fence]] = {}
         for locale in manifest.get("locales", []):
-            if not page_path(root, locale, relative_path).is_file():
+            file = page_path(root, locale, relative_path)
+            if not file.is_file():
                 errors.append(f"{locale}/{relative_path}.md is missing")
+                continue
+            locale_fences[locale] = extract_fences(file.read_text(encoding="utf-8"))
+        if len(locale_fences) < 2:
+            continue
+        first_locale = manifest.get("locales", [])[0]
+        first = locale_fences.get(first_locale, [])
+        for locale in manifest.get("locales", [])[1:]:
+            other = locale_fences.get(locale, [])
+            if len(first) != len(other):
+                errors.append(f"{locale}/{relative_path}.md has {len(other)} code fences; {first_locale} has {len(first)}")
+                continue
+            for index, (expected, actual) in enumerate(zip(first, other)):
+                if (expected.info, expected.code) != (actual.info, actual.code):
+                    errors.append(f"{locale}/{relative_path}.md code fence {index + 1} differs from {first_locale}")
     return errors
 
 
@@ -156,26 +203,98 @@ def check_links(root: Path, manifest: dict) -> list[str]:
     return errors
 
 
+def _normalized(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _run_one_example(
+    page: str,
+    fence: Fence,
+    expected: Fence | None,
+    starryc: str,
+    runner,
+) -> list[str]:
+    errors: list[str] = []
+    mode = fence.info[len("starry"):].strip()
+    with tempfile.TemporaryDirectory(prefix="starry-doc-example-") as directory:
+        cwd = Path(directory)
+        source = cwd / "program.starry"
+        source.write_text(fence.code + "\n", encoding="utf-8")
+        command = [starryc, "check", str(source)]
+        completed = runner(command, cwd=str(cwd), text_input=None)
+        if mode == "reject":
+            output = _normalized(completed.stderr or completed.stdout)
+            if completed.returncode == 0:
+                errors.append(f"{page}: reject example unexpectedly compiled")
+            elif expected is None or output != _normalized(expected.code):
+                errors.append(f"{page}: diagnostic mismatch\nexpected:\n{_normalized(expected.code if expected else '')}\nactual:\n{output}")
+            return errors
+        if completed.returncode != 0:
+            output = _normalized(completed.stderr or completed.stdout)
+            errors.append(f"{page}: check failed\n{output}")
+            return errors
+        if mode == "check":
+            return errors
+        output_name = "program"
+        if Path(starryc).suffix.lower() == ".exe":
+            output_name += ".exe"
+        completed = runner([starryc, "build", str(source), str(cwd / output_name)], cwd=str(cwd), text_input=None)
+        if completed.returncode != 0:
+            errors.append(f"{page}: build failed\n{_normalized(completed.stderr or completed.stdout)}")
+            return errors
+        completed = runner([str(cwd / output_name)], cwd=str(cwd), text_input=None)
+        if completed.returncode != 0:
+            errors.append(f"{page}: program exited {completed.returncode}\n{_normalized(completed.stderr)}")
+            return errors
+        if expected is None or _normalized(completed.stdout) != _normalized(expected.code):
+            errors.append(f"{page}: stdout mismatch\nexpected:\n{_normalized(expected.code if expected else '')}\nactual:\n{_normalized(completed.stdout)}")
+    return errors
+
+
+def run_examples(root: Path, manifest: dict, starryc: str, runner=Runner) -> list[str]:
+    errors: list[str] = []
+    for page in manifest.get("pages", []):
+        relative_path = page.get("path", "")
+        file = page_path(root, manifest.get("defaultLocale", "en"), relative_path)
+        if not file.is_file():
+            continue
+        page_name = f"{manifest.get('defaultLocale', 'en')}/{relative_path}.md"
+        fences = extract_fences(file.read_text(encoding="utf-8"))
+        errors.extend(validate_example_pairs(page_name, fences))
+        for index, fence in enumerate(fences):
+            if not fence.info.startswith("starry"):
+                continue
+            mode = fence.info[len("starry"):].strip()
+            expected = fences[index + 1] if mode in {"run", "reject"} and index + 1 < len(fences) else None
+            errors.extend(_run_one_example(page_name, fence, expected, starryc, runner))
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("manifest", "parity", "terms", "links", "all"))
+    parser.add_argument(
+        "command",
+        choices=("manifest", "parity", "terms", "links", "examples", "spec", "llms", "all"),
+    )
     parser.add_argument("--root", type=Path, default=ROOT)
+    parser.add_argument("--starryc", type=Path, default=ROOT / "target/debug/starryc")
     args = parser.parse_args()
     manifest = load_manifest(args.root / MANIFEST_PATH)
     checks = {
-        "manifest": validate_manifest,
-        "parity": check_parity,
-        "terms": check_terms,
-        "links": check_links,
+        "manifest": lambda: validate_manifest(manifest, args.root),
+        "parity": lambda: check_parity(args.root, manifest),
+        "terms": lambda: check_terms(args.root, manifest),
+        "links": lambda: check_links(args.root, manifest),
+        "examples": lambda: run_examples(args.root, manifest, str(args.starryc)),
+        "spec": lambda: [],
+        "llms": lambda: [],
     }
     names = list(checks) if args.command == "all" else [args.command]
+    if args.command == "all":
+        names.remove("llms")
     errors: list[str] = []
     for name in names:
-        found = (
-        validate_manifest(manifest, args.root)
-        if name == "manifest"
-        else checks[name](args.root, manifest)
-    )
+        found = checks[name]()
         errors.extend(f"{name}: {error}" for error in found)
     if errors:
         for error in errors:
