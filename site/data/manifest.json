@@ -62,6 +62,30 @@
       "roles": [
         "lookup"
       ]
+    },
+    {
+      "id": "language/classes-and-arc",
+      "path": "language/classes-and-arc",
+      "type": "reference",
+      "roles": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "language/traits-and-generics",
+      "path": "language/traits-and-generics",
+      "type": "reference",
+      "roles": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "language/modules-and-packages",
+      "path": "language/modules-and-packages",
+      "type": "reference",
+      "roles": [
+        "lookup"
+      ]
     }
   ]
 }

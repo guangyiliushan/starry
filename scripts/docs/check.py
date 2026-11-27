@@ -36,6 +36,7 @@ LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 FENCE_RE = re.compile(r"^```([^\n]*)\n(.*?)\n?```$", re.DOTALL | re.MULTILINE)
 CODE_FENCE_LANGUAGES = {"starry", "bash", "toml", "text", "ebnf"}
 EXECUTABLE_STARRY_KINDS = {"check", "run", "reject"}
+NON_EXECUTABLE_STARRY_KINDS = {"syntax"}
 def _real_runner(command: list[str], cwd: str, text_input: str | None = None):
     return subprocess.run(command, cwd=cwd, text=True, input=text_input, capture_output=True)
 
@@ -62,10 +63,10 @@ def extract_fences(text: str) -> list[Fence]:
 def validate_example_pairs(page: str, fences: list[Fence]) -> list[str]:
     errors: list[str] = []
     for index, fence in enumerate(fences):
-        if not fence.info.startswith("starry"):
+        if not fence.info.startswith("starry") or fence.info[len("starry"):].strip() in NON_EXECUTABLE_STARRY_KINDS:
             continue
         mode = fence.info[len("starry"):].strip()
-        if mode not in EXECUTABLE_STARRY_KINDS:
+        if mode not in EXECUTABLE_STARRY_KINDS and mode not in NON_EXECUTABLE_STARRY_KINDS:
             errors.append(f"{page}: unsupported Starry fence {fence.info!r}")
         if mode in {"run", "reject"}:
             if index + 1 >= len(fences) or fences[index + 1].info != "text":
@@ -268,7 +269,7 @@ def run_examples(root: Path, manifest: dict, starryc: str, runner=_real_runner) 
         fences = extract_fences(file.read_text(encoding="utf-8"))
         errors.extend(validate_example_pairs(page_name, fences))
         for index, fence in enumerate(fences):
-            if not fence.info.startswith("starry"):
+            if not fence.info.startswith("starry") or fence.info[len("starry"):].strip() in NON_EXECUTABLE_STARRY_KINDS:
                 continue
             mode = fence.info[len("starry"):].strip()
             expected = fences[index + 1] if mode in {"run", "reject"} and index + 1 < len(fences) else None
